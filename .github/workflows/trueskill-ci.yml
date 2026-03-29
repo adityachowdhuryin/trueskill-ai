@@ -1,0 +1,17 @@
+name: TrueSkill AI Verification
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run TrueSkill Verification
+        uses: ./
+        with:
+          repo_url: ${{ github.event.pull_request.head.repo.html_url }}
+          trueskill_api_url: ${{ secrets.TRUESKILL_API_URL }}

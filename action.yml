@@ -1,0 +1,65 @@
+name: TrueSkill AI - Resume Verification
+description: Run automated skill verification against a GitHub repository
+
+inputs:
+  resume_url:
+    description: "URL to the candidate's resume PDF"
+    required: false
+  repo_url:
+    description: "GitHub repository URL to analyze"
+    required: true
+  trueskill_api_url:
+    description: "URL of the TrueSkill AI API"
+    required: true
+    default: "http://localhost:8000"
+
+outputs:
+  verification_score:
+    description: "Overall verification score (0-100)"
+  results_json:
+    description: "Full verification results as JSON"
+
+runs:
+  using: composite
+  steps:
+    - name: Ingest Repository
+      shell: bash
+      run: |
+        RESPONSE=$(curl -s -X POST "${{ inputs.trueskill_api_url }}/api/ingest" \
+          -H "Content-Type: application/json" \
+          -d "{\"github_url\": \"${{ inputs.repo_url }}\"}")
+        
+        REPO_ID=$(echo "$RESPONSE" | jq -r '.repo_id')
+        echo "repo_id=$REPO_ID" >> $GITHUB_OUTPUT
+        echo "✅ Repository ingested: $REPO_ID"
+      id: ingest
+
+    - name: Run Analysis
+      shell: bash
+      run: |
+        RESPONSE=$(curl -s -X POST \
+          "${{ inputs.trueskill_api_url }}/api/analyze?repo_id=${{ steps.ingest.outputs.repo_id }}" \
+          -H "Content-Type: application/json")
+        
+        SCORE=$(echo "$RESPONSE" | jq -r '.summary.average_score // 0')
+        echo "verification_score=$SCORE" >> $GITHUB_OUTPUT
+        echo "results_json=$RESPONSE" >> $GITHUB_OUTPUT
+        echo "✅ Verification Score: $SCORE%"
+      id: analyze
+
+    - name: Post Results Comment
+      if: github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        SCORE="${{ steps.analyze.outputs.verification_score }}"
+        EMOJI="🔴"
+        [ $(echo "$SCORE >= 40" | bc) -eq 1 ] && EMOJI="🟡"
+        [ $(echo "$SCORE >= 70" | bc) -eq 1 ] && EMOJI="🟢"
+        
+        BODY="## $EMOJI TrueSkill AI Verification Report\n\n**Score:** ${SCORE}%\n**Repo:** ${{ inputs.repo_url }}\n\n---\n*Powered by TrueSkill AI — Automated Competency Verification*"
+        
+        curl -s -X POST \
+          -H "Authorization: token ${{ github.token }}" \
+          -H "Content-Type: application/json" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          -d "{\"body\": \"$BODY\"}"
