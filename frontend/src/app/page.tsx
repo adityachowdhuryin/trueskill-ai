@@ -23,6 +23,7 @@ const FEATURES = [
         title: "Ingestion Engine",
         desc: "Clones GitHub repos, parses code via tree-sitter, and builds a Neo4j Knowledge Graph of files, classes, functions, and imports.",
         accent: "border-blue-500/30",
+        href: "/dashboard",
     },
     {
         icon: "🧠",
@@ -32,6 +33,7 @@ const FEATURES = [
         title: "Council of Agents",
         desc: "A LangGraph-powered Parser → Auditor → Grader pipeline that extracts claims, queries the graph, and scores each with evidence.",
         accent: "border-violet-500/30",
+        href: "/dashboard",
     },
     {
         icon: "🎯",
@@ -41,6 +43,17 @@ const FEATURES = [
         title: "Career Coach",
         desc: "Compares verified skills against job descriptions and generates personalized \"Bridge Projects\" to close skill gaps.",
         accent: "border-emerald-500/30",
+        href: "/dashboard",
+    },
+    {
+        icon: "💼",
+        color: "from-amber-500/20 to-orange-500/20",
+        iconBg: "bg-amber-500/20",
+        iconGlow: "rgba(245,158,11,0.3)",
+        title: "AI Resume Toolkit",
+        desc: "Finds matching job postings via Jooble, optimizes your resume for ATS systems, locates hiring managers via Apollo.io, and drafts personalized outreach emails.",
+        accent: "border-amber-500/30",
+        href: "/resume-toolkit",
     },
 ];
 
@@ -193,11 +206,12 @@ export default function Home() {
                 </div>
 
                 {/* Feature Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 text-left">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 text-left">
                     {FEATURES.map((f, i) => (
-                        <div
+                        <Link
+                            href={f.href ?? "/dashboard"}
                             key={f.title}
-                            className={`group relative p-6 rounded-2xl border ${f.accent} backdrop-blur-sm cursor-default animate-slide-up transition-all duration-300 hover:-translate-y-1`}
+                            className={`group relative p-6 rounded-2xl border ${f.accent} backdrop-blur-sm animate-slide-up transition-all duration-300 hover:-translate-y-1 cursor-pointer`}
                             style={{
                                 animationDelay: `${320 + i * 100}ms`,
                                 background: "rgba(255,255,255,0.03)",
@@ -219,7 +233,7 @@ export default function Home() {
 
                             <h3 className="relative z-10 font-bold text-lg mb-2 text-white">{f.title}</h3>
                             <p className="relative z-10 text-sm text-slate-400 leading-relaxed">{f.desc}</p>
-                        </div>
+                        </Link>
                     ))}
                 </div>
             </main>
