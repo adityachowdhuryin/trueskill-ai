@@ -113,67 +113,72 @@ async def generate_bridge_project(
     Returns:
         CoachResponse with project details
     """
-    llm = get_llm_model(temperature=0.7)  # Higher for creative project ideas
+    llm = get_llm_model(temperature=0.3)  # Lower temp → more precise, less hallucination
     
     # Analyze skill gaps
     gap_analysis = identify_skill_gaps(verified_skills, job_description)
     
-    system_prompt = """You are an expert career coach and technical mentor. Your task is to:
-1. Analyze the gap between a candidate's verified skills and a job description
-2. Identify the MOST CRITICAL missing or weak skill
-3. Design a practical mini-project that will help them build this skill
+    system_prompt = """You are a senior engineering career coach specialising in technical skill-gap analysis.
 
-Focus on:
-- Skills explicitly mentioned in the job description that the candidate lacks
-- Skills where the candidate has low verification scores (< 50%)
-- Technologies that are core requirements, not nice-to-haves
+TASK:
+1. Read the candidate's FULL verified skill profile (with percentage scores from real code analysis).
+2. Read the target job description and infer the seniority level and specialisation.
+3. Identify the SINGLE most impactful skill gap: a technology explicitly required by the JD that is either
+   completely missing from the candidate's profile OR has a low verification score (< 60%).
+4. Design a focused, non-trivial portfolio project that directly demonstrates that skill.
 
-The project should be:
-- Achievable in 1-2 weeks for a motivated learner
-- Practical and portfolio-worthy
-- Directly relevant to the job they're targeting
+CRITICAL RULES — violating these will make your output useless:
+- NEVER suggest Python basics, data structures, or introductory ML if the candidate already knows Python/ML (score >= 60%).
+- NEVER pick a skill the candidate already excels at (score >= 70%).
+- The project difficulty MUST match the seniority level implied by the JD (use Intermediate or Advanced).
+- The project MUST showcase the missing/weak skill as its core feature, not a side note.
+- Steps must be concrete engineering tasks (not "learn about X", "understand Y").
 
-Return your response as valid JSON matching this exact structure:
+Return ONLY valid JSON (no markdown, no preamble):
 {
-    "gap_skill": "The identified missing/weak skill",
-    "project_title": "A catchy, memorable project title",
-    "description": "2-3 sentence description of what the project does",
-    "tech_stack": ["tech1", "tech2", "tech3"],
-    "difficulty": "Beginner|Intermediate|Advanced",
-    "estimated_time": "e.g., 3-5 days",
+    "gap_skill": "Specific technology or concept name from the JD",
+    "project_title": "Memorable, descriptive project title",
+    "description": "2-3 sentences: what the project does and why it demonstrates the gap skill",
+    "tech_stack": ["primary_tech", "supporting_tech2", "supporting_tech3"],
+    "difficulty": "Intermediate|Advanced",
+    "estimated_time": "e.g., 4-6 days",
     "steps": [
-        "Step 1: Detailed instruction",
-        "Step 2: Detailed instruction",
-        "Step 3: Detailed instruction",
-        "Step 4: Detailed instruction",
-        "Step 5: Detailed instruction"
+        "Step 1: concrete engineering action",
+        "Step 2: concrete engineering action",
+        "Step 3: concrete engineering action",
+        "Step 4: concrete engineering action",
+        "Step 5: concrete engineering action",
+        "Step 6: deploy or demo the project"
     ],
     "learning_outcomes": [
-        "What they will learn 1",
-        "What they will learn 2",
-        "What they will learn 3"
+        "Specific technical outcome 1",
+        "Specific technical outcome 2",
+        "Specific technical outcome 3"
     ],
-    "analysis": "Brief explanation of why this skill gap was prioritized"
+    "analysis": "1-2 sentences: why THIS gap was chosen and how closing it impacts the candidate's chances"
 }"""
 
-    # Build the analysis context
-    skills_summary = f"""
-CANDIDATE'S VERIFIED SKILLS:
-- Strong skills (score >= 70%): {', '.join(gap_analysis['strong_skills']) or 'None'}
-- Partial skills (50-69%): {', '.join([f"{s['topic']} ({s['score']}%)" for s in gap_analysis['partial_skills']]) or 'None'}
-- Weak skills (< 50%): {', '.join([f"{s['topic']} ({s['score']}%)" for s in gap_analysis['weak_skills']]) or 'None'}
+    # Build rich skill context with all individual scores
+    all_skills_lines = "\n".join(
+        f"  - {s.topic}: {s.score}% ({s.status})"
+        for s in verified_skills
+    ) or "  (no skills verified yet)"
 
-Summary: {gap_analysis['total_verified']} verified, {gap_analysis['total_partial']} partial, {gap_analysis['total_unverified']} unverified
-"""
+    human_prompt = f"""CANDIDATE VERIFIED SKILL PROFILE (from real code analysis — scores are reliable):
+{all_skills_lines}
 
-    human_prompt = f"""{skills_summary}
+SUMMARY:
+- Strong (>= 70%): {', '.join(gap_analysis['strong_skills']) or 'None'}
+- Partial (50-69%): {', '.join([f"{s['topic']} ({s['score']}%)" for s in gap_analysis['partial_skills']]) or 'None'}
+- Weak (< 50%): {', '.join([f"{s['topic']} ({s['score']}%)" for s in gap_analysis['weak_skills']]) or 'None'}
 
 TARGET JOB DESCRIPTION:
 ---
-{job_description}
+{job_description[:3000]}
 ---
 
-Analyze the gap and generate ONE bridge project to address the most critical missing skill.
+Identify the #1 highest-impact skill gap between this candidate and the role.
+Design a specific, non-trivial bridge project that directly fills that gap.
 Return ONLY valid JSON, no markdown or explanation outside the JSON."""
 
     try:

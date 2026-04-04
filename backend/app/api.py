@@ -9,7 +9,7 @@ from collections import defaultdict
 from functools import wraps
 
 from typing import Optional, Union
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl, field_validator
 
@@ -581,4 +581,90 @@ async def compare_analyses(ids: str):
         return {"analyses": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# ATS Score Endpoint
+# =============================================================================
+
+@router.post("/ats-score")
+async def ats_score_endpoint(
+    req: Request,
+    job_description: str = Form(...),
+    pdf_file: UploadFile = File(...),
+):
+    """
+    POST /api/ats-score
+    Accepts { pdf_file, job_description }. Runs ATS evaluation via LLM.
+    Returns ATSReport JSON.
+    """
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+    from .ats import score_resume_ats
+
+    check_rate_limit(req.client.host if req.client else "unknown", "ats-score")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    if not job_description or not job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+
+    try:
+        pdf_content = await pdf_file.read()
+
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF file too large. Maximum size is {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB.",
+            )
+
+        pdf_reader = PdfReader(BytesIO(pdf_content))
+        resume_text = ""
+        for page in pdf_reader.pages:
+            resume_text += page.extract_text() + "\n"
+
+        if not resume_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        report = await score_resume_ats(resume_text, job_description)
+        return report.model_dump()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ATS scoring failed: {str(e)}")
+
+
+# =============================================================================
+# ATS Report Download Endpoint
+# =============================================================================
+
+@router.post("/ats-report")
+async def ats_report_endpoint(req: Request):
+    """
+    POST /api/ats-report
+    Accepts { ats_report: dict, candidate_name: str }.
+    Returns a downloadable self-contained HTML ATS report.
+    """
+    from .ats import generate_ats_html_report
+
+    try:
+        data = await req.json()
+        ats_report = data.get("ats_report", {})
+        candidate_name = data.get("candidate_name", "Candidate")
+
+        if not ats_report:
+            raise HTTPException(status_code=400, detail="ats_report payload is required")
+
+        html = generate_ats_html_report(ats_report, candidate_name)
+        return StreamingResponse(
+            iter([html]),
+            media_type="text/html",
+            headers={"Content-Disposition": "attachment; filename=ats_report.html"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ATS report generation failed: {str(e)}")
 
