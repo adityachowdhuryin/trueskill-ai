@@ -668,3 +668,226 @@ async def ats_report_endpoint(req: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ATS report generation failed: {str(e)}")
 
+
+# =============================================================================
+# Resume Toolkit — Find Jobs (Jooble)
+# =============================================================================
+
+class FindJobsResponse(BaseModel):
+    profile: dict
+    jobs: list[dict]
+    total: int
+
+
+@router.post("/resume-toolkit/find-jobs")
+async def resume_toolkit_find_jobs(
+    req: Request,
+    pdf_file: UploadFile = File(...),
+    location_override: Optional[str] = Form(None),
+):
+    """
+    POST /api/resume-toolkit/find-jobs
+    Accepts { pdf_file, location_override? }.
+    Infers role + location from resume via LLM, then searches Jooble.
+    Returns inferred profile + list of job postings.
+    """
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+    from .job_finder import extract_role_location, search_jobs
+
+    check_rate_limit(req.client.host if req.client else "unknown", "resume-toolkit-jobs")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        pdf_content = await pdf_file.read()
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail="PDF too large (max 10 MB)")
+
+        pdf_reader = PdfReader(BytesIO(pdf_content))
+        resume_text = ""
+        for page in pdf_reader.pages:
+            resume_text += page.extract_text() + "\n"
+
+        if not resume_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        # Infer role + location via LLM
+        profile = await extract_role_location(resume_text)
+
+        # Override location if provided
+        location = location_override.strip() if location_override else profile.location
+
+        # Search Jooble
+        jobs = await search_jobs(role=profile.role, location=location)
+
+        return {
+            "profile": profile.model_dump(),
+            "jobs": [j.model_dump() for j in jobs],
+            "total": len(jobs),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
+
+
+# =============================================================================
+# Resume Toolkit — Optimize Keywords (ATS Rewriter)
+# =============================================================================
+
+@router.post("/resume-toolkit/optimize-keywords")
+async def resume_toolkit_optimize_keywords(
+    req: Request,
+    pdf_file: UploadFile = File(...),
+    job_description: str = Form(...),
+    missing_keywords: str = Form("[]"),   # JSON-encoded list sent as form string
+):
+    """
+    POST /api/resume-toolkit/optimize-keywords
+    Accepts { pdf_file (multipart), job_description, missing_keywords (JSON list) }.
+    Extracts resume text from PDF server-side, then rewrites Skills/Summary section.
+    """
+    import json
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+    from .resume_optimizer import optimize_resume_keywords
+
+    check_rate_limit(req.client.host if req.client else "unknown", "resume-toolkit-optimize")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+    if not job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+
+    try:
+        # Parse missing_keywords from JSON string
+        try:
+            kw_list: list[str] = json.loads(missing_keywords) if missing_keywords else []
+            if not isinstance(kw_list, list):
+                kw_list = []
+        except Exception:
+            kw_list = []
+
+        # Extract text from PDF server-side
+        pdf_content = await pdf_file.read()
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail="PDF too large (max 10 MB)")
+
+        pdf_reader = PdfReader(BytesIO(pdf_content))
+        resume_text = ""
+        for page in pdf_reader.pages:
+            resume_text += page.extract_text() + "\n"
+
+        if not resume_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        result = await optimize_resume_keywords(
+            resume_text=resume_text,
+            job_description=job_description,
+            missing_keywords=kw_list,
+        )
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Keyword optimization failed: {str(e)}")
+
+
+# =============================================================================
+# Resume Toolkit — Find Hiring Manager (Apollo.io)
+# =============================================================================
+
+class FindHiringManagerRequest(BaseModel):
+    company_name: str
+    job_title: str
+    company_domain: str = ""
+
+
+@router.post("/resume-toolkit/find-hiring-manager")
+async def resume_toolkit_find_hiring_manager(
+    request: FindHiringManagerRequest,
+    req: Request,
+):
+    """
+    POST /api/resume-toolkit/find-hiring-manager
+    Accepts { company_name, job_title, company_domain? }.
+    Returns hiring manager contact info via Apollo.io or pattern guess.
+    """
+    from .job_finder import find_hiring_manager
+
+    check_rate_limit(req.client.host if req.client else "unknown", "resume-toolkit-manager")
+
+    if not request.company_name.strip():
+        raise HTTPException(status_code=400, detail="company_name cannot be empty")
+
+    try:
+        result = await find_hiring_manager(
+            company_name=request.company_name,
+            job_title=request.job_title,
+            company_domain=request.company_domain,
+        )
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Hiring manager search failed: {str(e)}")
+
+
+# =============================================================================
+# Resume Toolkit — Draft Outreach Email
+# =============================================================================
+
+@router.post("/resume-toolkit/draft-email")
+async def resume_toolkit_draft_email(
+    req: Request,
+    pdf_file: UploadFile = File(...),
+    job_posting: str = Form(...),        # JSON-encoded dict
+    hiring_manager: str = Form("{}"),   # JSON-encoded dict
+):
+    """
+    POST /api/resume-toolkit/draft-email
+    Accepts { pdf_file (multipart), job_posting (JSON string), hiring_manager (JSON string) }.
+    Extracts resume text from PDF server-side, then drafts a personalized email.
+    """
+    import json
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+    from .resume_optimizer import draft_outreach_email
+
+    check_rate_limit(req.client.host if req.client else "unknown", "resume-toolkit-email")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        job_posting_dict: dict = json.loads(job_posting)
+        hiring_manager_dict: dict = json.loads(hiring_manager) if hiring_manager else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="job_posting and hiring_manager must be valid JSON")
+
+    if not job_posting_dict:
+        raise HTTPException(status_code=400, detail="job_posting cannot be empty")
+
+    try:
+        # Extract text from PDF server-side
+        pdf_content = await pdf_file.read()
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail="PDF too large (max 10 MB)")
+
+        pdf_reader = PdfReader(BytesIO(pdf_content))
+        resume_text = ""
+        for page in pdf_reader.pages:
+            resume_text += page.extract_text() + "\n"
+
+        if not resume_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        result = await draft_outreach_email(
+            resume_text=resume_text,
+            job_posting=job_posting_dict,
+            hiring_manager=hiring_manager_dict,
+        )
+        return result.model_dump()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email drafting failed: {str(e)}")
