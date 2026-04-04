@@ -36,6 +36,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Next.js dev server
+        "http://localhost:3001",  # Next.js fallback port
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
