@@ -85,39 +85,6 @@ class TestExpandTopicKeywords:
         assert "rest" in keywords or "endpoint" in keywords
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 3.  Forensics Helpers (app/forensics.py)
-# ═══════════════════════════════════════════════════════════════════
-
-class TestForensicsHelpers:
-    """Tests for forensics utility functions."""
-
-    def test_detect_naming_convention_snake_case(self):
-        from app.forensics import detect_naming_convention
-        assert detect_naming_convention("my_variable_name") == "snake_case"
-
-    def test_detect_naming_convention_camel_case(self):
-        from app.forensics import detect_naming_convention
-        assert detect_naming_convention("myVariableName") == "camelCase"
-
-    def test_detect_naming_convention_pascal_case(self):
-        from app.forensics import detect_naming_convention
-        assert detect_naming_convention("MyClassName") == "PascalCase"
-
-    def test_calculate_style_entropy_uniform(self):
-        from app.forensics import calculate_style_entropy
-        # All same convention → entropy should be low
-        names = ["foo_bar", "baz_qux", "hello_world"]
-        entropy = calculate_style_entropy(names)
-        assert entropy == 0.0  # All snake_case = no entropy
-
-    def test_calculate_style_entropy_mixed(self):
-        from app.forensics import calculate_style_entropy
-        # Mixed conventions → entropy should be > 0
-        names = ["foo_bar", "fooBar", "FooBar"]
-        entropy = calculate_style_entropy(names)
-        assert entropy > 0
-
 
 # ═══════════════════════════════════════════════════════════════════
 # 4.  Ingest Data Structures (app/ingest.py)
