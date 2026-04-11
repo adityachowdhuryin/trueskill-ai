@@ -31,13 +31,22 @@ interface OptimizationResult {
     optimization_tip: string;
 }
 
-interface HiringManager {
+interface HiringManagerResult {
     name: string;
     email: string;
     title: string;
     confidence: string;
     source: string;
     linkedin_url: string;
+    linkedin_search_url: string;
+}
+
+interface HiringManagerSearchResult {
+    primary: HiringManagerResult;
+    alternatives: HiringManagerResult[];
+    search_suggestions: string[];
+    email_patterns: string[];
+    company_domain: string;
 }
 
 interface EmailDraft {
@@ -170,8 +179,10 @@ export default function ResumeToolkitPage() {
 
     // Step 3 state
     const [isSearchingManager, setIsSearchingManager] = useState(false);
-    const [hiringManager, setHiringManager] = useState<HiringManager | null>(null);
+    const [managerResult, setManagerResult] = useState<HiringManagerSearchResult | null>(null);
     const [managerError, setManagerError] = useState<string | null>(null);
+    const [manualEmail, setManualEmail] = useState("");
+    const [manualName, setManualName] = useState("");
 
     // Step 4 state
     const [isDraftingEmail, setIsDraftingEmail] = useState(false);
@@ -327,13 +338,11 @@ export default function ResumeToolkitPage() {
         }
     };
 
-    // ------- Step 3: Find Hiring Manager -------
-
     const handleFindManager = async () => {
         if (!selectedJob) return;
         setIsSearchingManager(true);
         setManagerError(null);
-        setHiringManager(null);
+        setManagerResult(null);
 
         try {
             const res = await fetch(`${API_BASE}/api/resume-toolkit/find-hiring-manager`, {
@@ -351,8 +360,8 @@ export default function ResumeToolkitPage() {
                 throw new Error(err.detail ?? "Manager search failed");
             }
 
-            const data: HiringManager = await res.json();
-            setHiringManager(data);
+            const data: HiringManagerSearchResult = await res.json();
+            setManagerResult(data);
         } catch (e) {
             setManagerError(e instanceof Error ? e.message : "Manager search failed");
         } finally {
@@ -381,10 +390,15 @@ export default function ResumeToolkitPage() {
                 location: selectedJob.location,
                 description: jobDescOverride || selectedJob.description,
             }));
+            const primary = managerResult?.primary;
             formData.append("hiring_manager", JSON.stringify(
-                hiringManager
-                    ? { name: hiringManager.name, email: hiringManager.email, title: hiringManager.title }
-                    : { name: "", email: "", title: "Hiring Manager" }
+                primary
+                    ? {
+                        name: manualName || primary.name,
+                        email: manualEmail || primary.email,
+                        title: primary.title,
+                      }
+                    : { name: manualName || "", email: manualEmail || "", title: "Hiring Manager" }
             ));
 
             const res = await fetch(`${API_BASE}/api/resume-toolkit/draft-email`, {
@@ -891,62 +905,157 @@ export default function ResumeToolkitPage() {
                         )}
 
                         {/* Hiring manager result */}
-                        {hiringManager ? (
-                            <div
-                                className="rounded-2xl p-6 space-y-4"
-                                style={{ background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.2)" }}
-                            >
-                                <div className="flex items-start justify-between">
-                                    <div className="flex items-center gap-4">
-                                        <div
-                                            className="w-14 h-14 rounded-full flex items-center justify-center font-black text-lg"
-                                            style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.3), rgba(5,150,105,0.2))", border: "2px solid rgba(16,185,129,0.3)" }}
-                                        >
-                                            {hiringManager.name ? hiringManager.name[0]?.toUpperCase() : <User size={22} className="text-emerald-400" />}
+                        {managerResult ? (
+                            <div className="space-y-4">
+                                {/* Primary Contact */}
+                                <div
+                                    className="rounded-2xl p-5 space-y-3"
+                                    style={{ background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.2)" }}
+                                >
+                                    <div className="flex items-start justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <div
+                                                className="w-12 h-12 rounded-full flex items-center justify-center font-black text-base"
+                                                style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.3), rgba(5,150,105,0.2))", border: "2px solid rgba(16,185,129,0.3)" }}
+                                            >
+                                                {managerResult.primary.name ? managerResult.primary.name[0]?.toUpperCase() : <User size={20} className="text-emerald-400" />}
+                                            </div>
+                                            <div>
+                                                <p className="font-bold text-slate-200">{managerResult.primary.name || "Hiring Team"}</p>
+                                                <p className="text-xs text-slate-400">{managerResult.primary.title || selectedJob?.company}</p>
+                                            </div>
                                         </div>
-                                        <div>
-                                            <p className="font-bold text-slate-200 text-lg">{hiringManager.name || "Hiring Team"}</p>
-                                            <p className="text-sm text-slate-400">{hiringManager.title || selectedJob?.company}</p>
-                                        </div>
+                                        <ConfidenceBadge confidence={managerResult.primary.confidence} />
                                     </div>
-                                    <ConfidenceBadge confidence={hiringManager.confidence} />
+
+                                    {managerResult.primary.email && (
+                                        <div className="flex items-center gap-3 rounded-xl px-4 py-2.5" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                                            <Mail size={14} className="text-indigo-400 flex-shrink-0" />
+                                            <span className="font-mono text-sm text-slate-200 flex-1">{managerResult.primary.email}</span>
+                                            <button
+                                                onClick={() => navigator.clipboard.writeText(managerResult!.primary.email)}
+                                                className="text-[11px] font-semibold px-2.5 py-1 rounded-lg transition-all"
+                                                style={{ background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)", color: "#a5b4fc" }}
+                                            >
+                                                Copy
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    <div className="flex items-center gap-3 flex-wrap">
+                                        {managerResult.primary.linkedin_url && (
+                                            <a href={managerResult.primary.linkedin_url} target="_blank" rel="noopener noreferrer"
+                                                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors">
+                                                <ExternalLink size={11} /> LinkedIn Profile
+                                            </a>
+                                        )}
+                                        {managerResult.primary.linkedin_search_url && (
+                                            <a href={managerResult.primary.linkedin_search_url} target="_blank" rel="noopener noreferrer"
+                                                className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-200 transition-colors">
+                                                <ExternalLink size={11} /> Search on LinkedIn
+                                            </a>
+                                        )}
+                                    </div>
+
+                                    {managerResult.primary.confidence === "Guessed" && (
+                                        <div className="rounded-xl px-3 py-2.5 flex items-start gap-2" style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                                            <AlertCircle size={12} className="text-red-400 mt-0.5 flex-shrink-0" />
+                                            <p className="text-[11px] text-slate-400">
+                                                Pattern-based guess ({managerResult.primary.source}). Verify before sending.
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
 
-                                {hiringManager.email && (
-                                    <div className="flex items-center gap-3 rounded-xl px-4 py-3" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
-                                        <Mail size={16} className="text-indigo-400 flex-shrink-0" />
-                                        <span className="font-mono text-sm text-slate-200 flex-1">{hiringManager.email}</span>
-                                        <button
-                                            onClick={() => navigator.clipboard.writeText(hiringManager.email)}
-                                            className="text-[11px] font-semibold px-2.5 py-1 rounded-lg transition-all"
-                                            style={{ background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)", color: "#a5b4fc" }}
-                                        >
-                                            Copy
-                                        </button>
+                                {/* Alternative Contacts */}
+                                {managerResult.alternatives.length > 0 && (
+                                    <div>
+                                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-2">Also Consider</p>
+                                        <div className="space-y-2">
+                                            {managerResult.alternatives.map((alt, i) => (
+                                                <div key={i} className="flex items-center gap-3 rounded-xl px-4 py-2.5" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                                                    <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-slate-300 flex-shrink-0">
+                                                        {alt.name ? alt.name[0].toUpperCase() : "?"}
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-xs font-semibold text-slate-200">{alt.name || "Unknown"}</p>
+                                                        <p className="text-[10px] text-slate-500 truncate">{alt.email || alt.title}</p>
+                                                    </div>
+                                                    <ConfidenceBadge confidence={alt.confidence} />
+                                                    {alt.email && (
+                                                        <button onClick={() => navigator.clipboard.writeText(alt.email)}
+                                                            className="text-[10px] px-2 py-0.5 rounded font-semibold"
+                                                            style={{ background: "rgba(99,102,241,0.12)", color: "#a5b4fc" }}
+                                                        >Copy</button>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
 
-                                {hiringManager.linkedin_url && (
-                                    <a
-                                        href={hiringManager.linkedin_url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-300 transition-colors"
-                                    >
-                                        <ExternalLink size={12} /> LinkedIn Profile
-                                    </a>
-                                )}
-
-                                {/* Guessed email warning */}
-                                {hiringManager.confidence === "Guessed" && (
-                                    <div className="rounded-xl px-4 py-3 flex items-start gap-2" style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)" }}>
-                                        <AlertCircle size={13} className="text-red-400 mt-0.5 flex-shrink-0" />
-                                        <p className="text-[11px] text-slate-400">
-                                            This email address is a pattern-based guess ({hiringManager.source}). 
-                                            Verify before sending — an incorrect email could harm your application.
+                                {/* Search Suggestions */}
+                                {managerResult.search_suggestions.length > 0 && (
+                                    <div>
+                                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-1.5">
+                                            <Search size={10} /> Search Suggestions
                                         </p>
+                                        <div className="space-y-1.5">
+                                            {managerResult.search_suggestions.map((s, i) => (
+                                                <a key={i}
+                                                    href={`https://www.google.com/search?q=${encodeURIComponent(s)}`}
+                                                    target="_blank" rel="noopener noreferrer"
+                                                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-slate-300 hover:text-slate-100 transition-all"
+                                                    style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                                                >
+                                                    <ExternalLink size={10} className="text-slate-500 flex-shrink-0" />
+                                                    {s}
+                                                </a>
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
+
+                                {/* Email Patterns */}
+                                {managerResult.email_patterns.length > 0 && (
+                                    <div>
+                                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-2">Common Email Patterns at {selectedJob?.company}</p>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {managerResult.email_patterns.map((ep, i) => (
+                                                <button key={i} onClick={() => navigator.clipboard.writeText(ep)}
+                                                    className="text-[11px] font-mono px-2.5 py-1 rounded-lg transition-all hover:scale-105"
+                                                    style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", color: "#a5b4fc" }}
+                                                    title="Click to copy"
+                                                >
+                                                    {ep}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Manual override */}
+                                <div className="rounded-xl p-4 space-y-3" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                                    <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Override Contact Details</p>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                            type="text"
+                                            placeholder="Manager name (optional)"
+                                            value={manualName}
+                                            onChange={e => setManualName(e.target.value)}
+                                            className="px-3 py-2 rounded-lg text-xs bg-transparent border text-slate-300 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                                            style={{ borderColor: "rgba(255,255,255,0.1)" }}
+                                        />
+                                        <input
+                                            type="email"
+                                            placeholder="Verified email (optional)"
+                                            value={manualEmail}
+                                            onChange={e => setManualEmail(e.target.value)}
+                                            className="px-3 py-2 rounded-lg text-xs bg-transparent border text-slate-300 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                                            style={{ borderColor: "rgba(255,255,255,0.1)" }}
+                                        />
+                                    </div>
+                                </div>
                             </div>
                         ) : isSearchingManager ? (
                             <div className="h-48 flex flex-col items-center justify-center gap-4">
@@ -957,7 +1066,7 @@ export default function ResumeToolkitPage() {
                                     </div>
                                 </div>
                                 <div className="text-center">
-                                    <p className="text-slate-300 font-semibold">Searching Apollo.io...</p>
+                                    <p className="text-slate-300 font-semibold">Searching for contacts...</p>
                                     <p className="text-xs text-slate-500 mt-1">Finding hiring managers at {selectedJob?.company}</p>
                                 </div>
                             </div>
@@ -1026,8 +1135,8 @@ export default function ResumeToolkitPage() {
                         <div className="grid grid-cols-3 gap-3">
                             {[
                                 { label: "Job", value: `${selectedJob?.title} @ ${selectedJob?.company}`, icon: Briefcase },
-                                { label: "Contact", value: hiringManager?.name || "Hiring Team", icon: User },
-                                { label: "Email", value: hiringManager?.email || "hiring@company.com", icon: Mail },
+                                { label: "Contact", value: manualName || managerResult?.primary.name || "Hiring Team", icon: User },
+                                { label: "Email", value: manualEmail || managerResult?.primary.email || "hiring@company.com", icon: Mail },
                             ].map(({ label, value, icon: Icon }) => (
                                 <div key={label} className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
                                     <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold flex items-center gap-1 mb-1">
@@ -1049,7 +1158,7 @@ export default function ResumeToolkitPage() {
                             <>
                                 <EmailComposer
                                     draft={emailDraft}
-                                    recipientEmail={hiringManager?.email}
+                                    recipientEmail={manualEmail || managerResult?.primary.email}
                                     onBodyChange={(body) => setEmailDraft((d) => d ? { ...d, body } : d)}
                                     onSubjectChange={(subject) => setEmailDraft((d) => d ? { ...d, subject } : d)}
                                 />

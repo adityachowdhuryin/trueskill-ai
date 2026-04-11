@@ -1,4 +1,4 @@
-# PROJECT SPECIFICATION: TrueSkill AI (MSc Thesis)
+# PROJECT SPECIFICATION: TrueSkill AI (MSc Data science Thesis)
 
 ## 1. Project Overview
 **Title:** TrueSkill AI: Automated Competency Verification System  
