@@ -6,6 +6,8 @@ Evaluates a resume against a job description and produces:
   - Keyword match analysis
   - Section-by-section feedback (Summary, Experience, Skills, Education)
   - Formatting / readability flags
+  - Priority actions ranked by expected score gain
+  - Section rewrite suggestions
   - Downloadable HTML report generator
 
 Uses the shared Groq/Llama LLM from llm.py — no new dependencies.
@@ -38,6 +40,21 @@ class SectionFeedback(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+class PriorityAction(BaseModel):
+    rank: int
+    action: str
+    impact: str        # "High" | "Medium" | "Low"
+    estimated_gain: int = Field(ge=0, le=30, description="Estimated ATS score points this action adds")
+    section: str       # Which resume section this applies to
+
+
+class RewriteSuggestion(BaseModel):
+    section: str
+    original_snippet: str   # Short excerpt from the resume
+    rewritten_snippet: str  # LLM-suggested rewrite
+    rationale: str
+
+
 class ATSReport(BaseModel):
     ats_score: int = Field(ge=0, le=100, description="Overall ATS compatibility score")
     keyword_match_score: int = Field(ge=0, le=100, description="% of JD keywords found in resume")
@@ -50,6 +67,8 @@ class ATSReport(BaseModel):
     overall_recommendation: str = ""
     strengths: list[str] = Field(default_factory=list)
     improvements: list[str] = Field(default_factory=list)
+    priority_actions: list[PriorityAction] = Field(default_factory=list)
+    rewrite_suggestions: list[RewriteSuggestion] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -63,7 +82,9 @@ You must analyze:
 1. **Keyword Match** — Extract every required skill, tool, technology, and qualification from the job description. For EACH one, check whether it appears in the resume (exact match OR clear synonym). Record context snippets where found.
 2. **Section Quality** — Evaluate the quality of: Summary/Objective, Work Experience, Skills, and Education sections.
 3. **Formatting & Readability** — Flag issues like: no quantified achievements, passive language, missing action verbs, overly long paragraphs, no dates, etc.
-4. **Scoring:**
+4. **Priority Actions** — Identify the top 3 most impactful changes the candidate should make, ranked by estimated ATS score gain. Be very specific.
+5. **Rewrite Suggestions** — For the 2-3 weakest sections, provide a short original snippet and a rewritten version that would score higher.
+6. **Scoring:**
    - `keyword_match_score`: (keywords found / total keywords) * 100, rounded to integer
    - `format_score`: 0-100 based on formatting quality
    - `content_score`: 0-100 based on content quality, relevance, and depth
@@ -113,7 +134,44 @@ Return ONLY valid JSON in this exact structure — no markdown, no explanation o
   ],
   "overall_recommendation": "2-3 sentence executive summary with concrete next steps",
   "strengths": ["Strong point 1", "Strong point 2", "Strong point 3"],
-  "improvements": ["Improvement 1", "Improvement 2", "Improvement 3"]
+  "improvements": ["Improvement 1", "Improvement 2", "Improvement 3"],
+  "priority_actions": [
+    {
+      "rank": 1,
+      "action": "Very specific action e.g. Add 'Kubernetes' to your Skills section and mention K8s orchestration in your most recent role",
+      "impact": "High",
+      "estimated_gain": 12,
+      "section": "Skills"
+    },
+    {
+      "rank": 2,
+      "action": "Rewrite 3 bullet points in Experience to lead with quantified metrics (e.g. 'Reduced latency by 40%')",
+      "impact": "High",
+      "estimated_gain": 8,
+      "section": "Experience"
+    },
+    {
+      "rank": 3,
+      "action": "Specific third action",
+      "impact": "Medium",
+      "estimated_gain": 5,
+      "section": "Summary"
+    }
+  ],
+  "rewrite_suggestions": [
+    {
+      "section": "Experience",
+      "original_snippet": "Worked on backend API development",
+      "rewritten_snippet": "Architected and shipped 12 REST API endpoints using FastAPI, reducing average response time by 35% through async processing and Redis caching",
+      "rationale": "The original lacks metrics and action verbs that ATS systems and recruiters look for"
+    },
+    {
+      "section": "Skills",
+      "original_snippet": "Python, databases, cloud",
+      "rewritten_snippet": "Python (FastAPI, Pandas, NumPy) | Databases (PostgreSQL, Redis, MongoDB) | Cloud (AWS EC2, S3, Lambda)",
+      "rationale": "Specific technology names match JD keywords; structured format is easier for ATS to parse"
+    }
+  ]
 }"""
 
 
@@ -132,12 +190,12 @@ async def score_resume_ats(resume_text: str, job_description: str) -> ATSReport:
 
     human_prompt = f"""RESUME:
 ---
-{resume_text[:6000]}
+{resume_text[:10000]}
 ---
 
 JOB DESCRIPTION:
 ---
-{job_description[:3000]}
+{job_description[:5000]}
 ---
 
 Perform a full ATS analysis and return the JSON report."""
@@ -170,6 +228,29 @@ Perform a full ATS analysis and return the JSON report."""
         for sf in raw.get("section_feedback", [])
     ]
 
+    # Build priority_actions list
+    priority_actions = [
+        PriorityAction(
+            rank=int(pa.get("rank", i + 1)),
+            action=pa.get("action", ""),
+            impact=pa.get("impact", "Medium"),
+            estimated_gain=max(0, min(30, int(pa.get("estimated_gain", 5)))),
+            section=pa.get("section", ""),
+        )
+        for i, pa in enumerate(raw.get("priority_actions", []))
+    ]
+
+    # Build rewrite_suggestions list
+    rewrite_suggestions = [
+        RewriteSuggestion(
+            section=rs.get("section", ""),
+            original_snippet=rs.get("original_snippet", ""),
+            rewritten_snippet=rs.get("rewritten_snippet", ""),
+            rationale=rs.get("rationale", ""),
+        )
+        for rs in raw.get("rewrite_suggestions", [])
+    ]
+
     return ATSReport(
         ats_score=max(0, min(100, int(raw.get("ats_score", 0)))),
         keyword_match_score=max(0, min(100, int(raw.get("keyword_match_score", 0)))),
@@ -182,6 +263,8 @@ Perform a full ATS analysis and return the JSON report."""
         overall_recommendation=raw.get("overall_recommendation", ""),
         strengths=raw.get("strengths", []),
         improvements=raw.get("improvements", []),
+        priority_actions=priority_actions,
+        rewrite_suggestions=rewrite_suggestions,
     )
 
 
@@ -205,16 +288,13 @@ def _score_label(score: int) -> str:
     return "Weak"
 
 
+def _impact_color(impact: str) -> str:
+    return {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#22c55e"}.get(impact, "#94a3b8")
+
+
 def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Candidate") -> str:
     """
     Generate a self-contained downloadable HTML ATS report.
-
-    Args:
-        report: ATSReport as a dict (from ATSReport.model_dump()).
-        candidate_name: Name to display in the report header.
-
-    Returns:
-        HTML string.
     """
     ats_score = report.get("ats_score", 0)
     kw_score = report.get("keyword_match_score", 0)
@@ -227,8 +307,9 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
     top_missing = report.get("top_missing_keywords", [])
     keyword_matches = report.get("keyword_matches", [])
     section_feedback = report.get("section_feedback", [])
+    priority_actions = report.get("priority_actions", [])
+    rewrite_suggestions = report.get("rewrite_suggestions", [])
 
-    # Score gauge circle via CSS conic-gradient
     ats_color = _score_color(ats_score)
     ats_label = _score_label(ats_score)
 
@@ -268,6 +349,47 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
             {"<ul style='color:#64748b;font-size:12px;padding-left:18px'>" + suggestions_html + "</ul>" if suggestions_html else ""}
         </div>"""
 
+    # Priority actions
+    pa_rows = ""
+    for pa in priority_actions:
+        ic = _impact_color(pa.get("impact", "Medium"))
+        pa_rows += f"""
+        <div style="display:flex;align-items:flex-start;gap:14px;padding:14px;background:#f8fafc;border-radius:10px;margin-bottom:10px;border-left:4px solid {ic}">
+            <div style="width:28px;height:28px;border-radius:50%;background:{ic};color:white;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex-shrink:0">
+                {pa.get('rank','')}
+            </div>
+            <div style="flex:1">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    <span style="font-size:11px;font-weight:700;text-transform:uppercase;color:{ic}">{pa.get('impact','')} Impact</span>
+                    <span style="font-size:11px;color:#64748b">·</span>
+                    <span style="font-size:11px;color:#64748b">{pa.get('section','')}</span>
+                    <span style="font-size:11px;background:#e0e7ff;color:#4338ca;padding:1px 7px;border-radius:20px;font-weight:600">+{pa.get('estimated_gain',0)} pts</span>
+                </div>
+                <p style="font-size:13px;color:#1e293b;margin:0">{pa.get('action','')}</p>
+            </div>
+        </div>"""
+
+    # Rewrite suggestions
+    rw_rows = ""
+    for rs in rewrite_suggestions:
+        rw_rows += f"""
+        <div style="background:#f8fafc;border-radius:10px;padding:16px;margin-bottom:12px;border:1px solid #e2e8f0">
+            <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#6366f1;margin-bottom:10px">
+                {rs.get('section','')} Section
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px">
+                <div>
+                    <div style="font-size:11px;font-weight:600;color:#94a3b8;margin-bottom:4px">BEFORE</div>
+                    <div style="background:#fee2e2;border-radius:6px;padding:10px;font-size:12px;color:#7f1d1d;line-height:1.5">{rs.get('original_snippet','')}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;font-weight:600;color:#94a3b8;margin-bottom:4px">AFTER</div>
+                    <div style="background:#dcfce7;border-radius:6px;padding:10px;font-size:12px;color:#14532d;line-height:1.5">{rs.get('rewritten_snippet','')}</div>
+                </div>
+            </div>
+            <p style="font-size:11px;color:#64748b;margin:0;font-style:italic">💡 {rs.get('rationale','')}</p>
+        </div>"""
+
     # Missing keywords badges
     missing_badges = "".join(
         f"<span style='display:inline-block;margin:3px;padding:3px 10px;background:#fee2e2;color:#b91c1c;border-radius:20px;font-size:12px;font-weight:600'>{k}</span>"
@@ -280,7 +402,6 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
         for f in formatting_flags
     )
 
-    # Strengths & improvements
     strengths_html = "".join(f"<li style='margin-bottom:5px;color:#166534'>{s}</li>" for s in strengths)
     improvements_html = "".join(f"<li style='margin-bottom:5px;color:#9a3412'>{s}</li>" for s in improvements)
 
@@ -344,6 +465,10 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
     <div style="font-weight:700;margin-bottom:8px;color:#4f46e5">📋 Overall Recommendation</div>
     <p style="color:#374151;line-height:1.6">{recommendation}</p>
   </div>
+
+  {"<div class='card'><p class='section-title'>🚀 Priority Actions</p>" + pa_rows + "</div>" if pa_rows else ""}
+
+  {"<div class='card'><p class='section-title'>✏️ Rewrite Suggestions</p>" + rw_rows + "</div>" if rw_rows else ""}
 
   <div class="card">
     <p class="section-title">🔑 Keyword Analysis</p>

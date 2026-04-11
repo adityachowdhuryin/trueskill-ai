@@ -2,9 +2,10 @@
 Job Finder Module — AI Resume Toolkit
 ======================================
 Provides:
-  1. search_jobs()          — Finds recent job postings via Jooble API
-  2. extract_role_location() — Infers job role + location from resume text via LLM
-  3. find_hiring_manager()  — Finds hiring manager contact via Apollo.io API
+  1. search_jobs()                   — Finds recent job postings via Jooble API
+  2. extract_role_location()         — Infers job role + location from resume text via LLM
+  3. find_hiring_manager()           — Finds hiring manager contact via Apollo.io API
+  4. find_hiring_manager_enhanced()  — Enhanced version: multiple contacts + LLM search suggestions
 
 APIs:
   - Jooble: https://jooble.org/api (POST, JSON, key in URL path)
@@ -16,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Optional
+from urllib.parse import quote_plus
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -49,8 +51,18 @@ class HiringManagerResult(BaseModel):
     email: str = ""
     title: str = ""
     confidence: str = "Unknown"   # "High" | "Medium" | "Guessed" | "Not Found"
-    source: str = ""              # "Apollo" | "Pattern" | "None"
+    source: str = ""              # "Apollo" | "Pattern" | "LLM" | "None"
     linkedin_url: str = ""
+    linkedin_search_url: str = ""  # Pre-built LinkedIn People Search URL
+
+
+class HiringManagerSearchResult(BaseModel):
+    """Enhanced response containing multiple contacts + search suggestions"""
+    primary: HiringManagerResult
+    alternatives: list[HiringManagerResult] = []
+    search_suggestions: list[str] = []   # e.g. "Head of Engineering at Stripe on LinkedIn"
+    email_patterns: list[str] = []       # e.g. "firstname.lastname@company.com"
+    company_domain: str = ""
 
 
 # =============================================================================
@@ -103,16 +115,9 @@ async def search_jobs(
 ) -> list[JobPosting]:
     """
     Search Jooble for recent job postings matching a role and location.
-
-    Jooble API docs:
-      POST https://jooble.org/api/{api_key}
-      Body: { "keywords": "...", "location": "...", "resultsOnPage": N }
-
-    Returns a list of JobPosting objects, empty list on failure.
     """
     api_key = os.getenv("JOOBLE_API_KEY", "")
     if not api_key:
-        # Return demo data so UI doesn't break
         return _demo_jobs(role, location)
 
     url = f"{JOOBLE_BASE_URL}/{api_key}"
@@ -132,7 +137,6 @@ async def search_jobs(
 
     jobs = []
     for job in data.get("jobs", []):
-        # Jooble field names
         title = job.get("title", "").strip()
         company = job.get("company", "").strip()
         loc = job.get("location", "").strip()
@@ -141,7 +145,6 @@ async def search_jobs(
         updated = job.get("updated", "")
         salary = job.get("salary", "") or ""
 
-        # Clean HTML tags from snippet
         snippet = re.sub(r"<[^>]+>", "", snippet).strip()
 
         if title and link:
@@ -159,7 +162,7 @@ async def search_jobs(
 
 
 def _demo_jobs(role: str, location: str) -> list[JobPosting]:
-    """Fallback demo job postings shown when no API key is configured or API fails."""
+    """Fallback demo job postings when no API key is configured."""
     return [
         JobPosting(
             title=f"Senior {role}",
@@ -192,11 +195,10 @@ def _demo_jobs(role: str, location: str) -> list[JobPosting]:
 
 
 # =============================================================================
-# Step 3 — Find hiring manager via Apollo.io
+# Step 3 — Find hiring manager via Apollo.io + LLM fallback
 # =============================================================================
 
 APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/v1/mixed_people/search"
-APOLLO_ORG_SEARCH_URL = "https://api.apollo.io/v1/mixed_companies/search"
 
 
 async def find_hiring_manager(
@@ -205,35 +207,86 @@ async def find_hiring_manager(
     company_domain: str = "",
 ) -> HiringManagerResult:
     """
-    Search Apollo.io for hiring managers / recruiters at a company.
-
-    Apollo.io API:
-      POST https://api.apollo.io/v1/mixed_people/search
-      Headers: { "X-Api-Key": key }
-      Body: { organization_name, titles, page, per_page }
-
-    Falls back to pattern-based email guess if API fails or returns no results.
+    Original single-result function — kept for backward compat.
+    Delegates to the enhanced version and returns primary.
     """
-    api_key = os.getenv("APOLLO_API_KEY", "")
-
-    if api_key:
-        result = await _apollo_search(api_key, company_name, company_domain, job_title)
-        if result:
-            return result
-
-    # Fallback: pattern guess
-    return _pattern_guess(company_name, company_domain)
+    result = await find_hiring_manager_enhanced(company_name, job_title, company_domain)
+    return result.primary
 
 
-async def _apollo_search(
+async def find_hiring_manager_enhanced(
+    company_name: str,
+    job_title: str,
+    company_domain: str = "",
+) -> HiringManagerSearchResult:
+    """
+    Enhanced hiring manager search.
+
+    Priority:
+    1. Apollo.io API (if key configured) — up to 3 real contacts
+    2. LLM-generated search suggestions + email pattern guesses (always)
+
+    Returns HiringManagerSearchResult with primary, alternatives, and search hints.
+    """
+    apollo_key = os.getenv("APOLLO_API_KEY", "")
+    resolved_domain = company_domain or _guess_domain("", company_name)
+
+    alternatives: list[HiringManagerResult] = []
+    primary: Optional[HiringManagerResult] = None
+
+    # ── Try Apollo.io ──────────────────────────────────────────────────────────
+    if apollo_key:
+        apollo_results = await _apollo_search_multiple(
+            apollo_key, company_name, resolved_domain, job_title
+        )
+        if apollo_results:
+            primary = apollo_results[0]
+            alternatives = apollo_results[1:]
+
+    # ── LLM-generated search suggestions ──────────────────────────────────────
+    search_suggestions, email_patterns = await _llm_generate_search_hints(
+        company_name, job_title, resolved_domain
+    )
+
+    # ── Build LinkedIn search URLs ─────────────────────────────────────────────
+    linkedin_urls = _build_linkedin_search_urls(company_name, job_title)
+
+    # ── If Apollo gave nothing, build pattern-based primary ───────────────────
+    if primary is None:
+        primary = _build_pattern_primary(company_name, resolved_domain, linkedin_urls)
+
+    # Attach LinkedIn search URL to primary if missing
+    if not primary.linkedin_search_url and linkedin_urls:
+        primary = primary.model_copy(update={"linkedin_search_url": linkedin_urls[0]})
+
+    # Build alternative contacts from search suggestions (LinkedIn + email patterns)
+    if not alternatives and len(email_patterns) > 1:
+        for ep in email_patterns[1:3]:
+            alternatives.append(HiringManagerResult(
+                name="",
+                email=ep,
+                title="Hiring Team",
+                confidence="Guessed",
+                source="Pattern",
+                linkedin_search_url=linkedin_urls[1] if len(linkedin_urls) > 1 else "",
+            ))
+
+    return HiringManagerSearchResult(
+        primary=primary,
+        alternatives=alternatives,
+        search_suggestions=search_suggestions,
+        email_patterns=email_patterns,
+        company_domain=resolved_domain,
+    )
+
+
+async def _apollo_search_multiple(
     api_key: str,
     company_name: str,
     company_domain: str,
     job_title: str,
-) -> Optional[HiringManagerResult]:
-    """Call Apollo.io people search API."""
-
-    # Titles to search for — hiring manager, recruiter, talent acquisition
+) -> list[HiringManagerResult]:
+    """Call Apollo.io and return up to 3 HiringManagerResult objects."""
     hiring_titles = [
         "Hiring Manager",
         "Technical Recruiter",
@@ -241,6 +294,8 @@ async def _apollo_search(
         "Head of Engineering",
         "Engineering Manager",
         "HR Manager",
+        "VP Engineering",
+        "Director of Engineering",
     ]
 
     payload: dict = {
@@ -263,80 +318,140 @@ async def _apollo_search(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                APOLLO_PEOPLE_SEARCH_URL,
-                json=payload,
-                headers=headers,
-            )
+            response = await client.post(APOLLO_PEOPLE_SEARCH_URL, json=payload, headers=headers)
             if response.status_code != 200:
-                return None
+                return []
             data = response.json()
     except Exception:
-        return None
+        return []
 
     people = data.get("people", [])
-    if not people:
-        return None
+    results: list[HiringManagerResult] = []
 
-    person = people[0]
-    first = person.get("first_name", "")
-    last = person.get("last_name", "")
-    name = f"{first} {last}".strip()
-    title = person.get("title", "")
-    email = person.get("email", "") or ""
-    linkedin = person.get("linkedin_url", "") or ""
+    for person in people[:3]:
+        first = person.get("first_name", "")
+        last = person.get("last_name", "")
+        name = f"{first} {last}".strip()
+        title = person.get("title", "")
+        email = person.get("email", "") or ""
+        linkedin = person.get("linkedin_url", "") or ""
 
-    # Apollo may return email as None or masked
-    confidence = "High" if email and "@" in email else "Medium"
+        confidence = "High" if email and "@" in email else "Medium"
 
-    # If email is masked/missing, build a pattern guess using the domain
-    if not email or "@" not in email:
-        domain = company_domain or _guess_domain(person.get("organization", {}).get("primary_domain", ""), company_name)
-        if domain and first and last:
-            email = f"{first.lower()}.{last.lower()}@{domain}"
-            confidence = "Guessed"
-            source = "Pattern"
+        if not email or "@" not in email:
+            domain = company_domain or _guess_domain(
+                person.get("organization", {}).get("primary_domain", ""), company_name
+            )
+            if domain and first and last:
+                email = f"{first.lower()}.{last.lower()}@{domain}"
+                confidence = "Guessed"
+                source = "Pattern"
+            else:
+                email = ""
+                confidence = "Not Found"
+                source = "Apollo (no email)"
         else:
-            email = ""
-            confidence = "Not Found"
-            source = "Apollo (no email)"
-    else:
-        source = "Apollo"
+            source = "Apollo"
 
-    return HiringManagerResult(
-        name=name,
-        email=email,
-        title=title,
-        confidence=confidence,
-        source=source,
-        linkedin_url=linkedin,
-    )
+        lk_search = _build_linkedin_search_urls(company_name, job_title)
+        results.append(HiringManagerResult(
+            name=name,
+            email=email,
+            title=title,
+            confidence=confidence,
+            source=source,
+            linkedin_url=linkedin,
+            linkedin_search_url=lk_search[0] if lk_search else "",
+        ))
+
+    return results
 
 
-def _pattern_guess(company_name: str, company_domain: str) -> HiringManagerResult:
-    """Generate a pattern-based email guess when no API is available."""
-    if not company_domain:
-        # Try to guess domain from company name
-        company_domain = _guess_domain("", company_name)
+async def _llm_generate_search_hints(
+    company_name: str,
+    job_title: str,
+    domain: str,
+) -> tuple[list[str], list[str]]:
+    """
+    Use LLM to generate smart search suggestions and email patterns for a company.
 
-    if company_domain:
-        guessed_email = f"hiring@{company_domain}"
-        return HiringManagerResult(
-            name="",
-            email=guessed_email,
-            title="Hiring Team",
-            confidence="Guessed",
-            source="Pattern",
-            linkedin_url="",
-        )
+    Returns:
+        (search_suggestions, email_patterns)
+    """
+    llm = get_llm_model(temperature=0.2)
 
+    prompt = f"""You are a recruiting intelligence assistant. Given a company and job title, generate:
+1. 4 specific LinkedIn/Google search queries to find the right hiring manager
+2. 3 common corporate email patterns for this company domain
+
+Company: {company_name}
+Job Title: {job_title}
+Domain: {domain or f"{_guess_domain('', company_name)}"}
+
+Return ONLY valid JSON:
+{{
+  "search_suggestions": [
+    "Head of Engineering at {company_name} LinkedIn",
+    "Technical Recruiter {company_name} site:linkedin.com",
+    "{job_title} hiring manager {company_name}",
+    "VP Engineering {company_name} contact"
+  ],
+  "email_patterns": [
+    "firstname.lastname@{domain or 'company.com'}",
+    "f.lastname@{domain or 'company.com'}",
+    "hiring@{domain or 'company.com'}"
+  ]
+}}"""
+
+    try:
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = parse_json_response(response.content)
+        suggestions = raw.get("search_suggestions", [])[:5]
+        patterns = raw.get("email_patterns", [])[:4]
+        return suggestions, patterns
+    except Exception:
+        # Fallback static suggestions
+        suggestions = [
+            f"Head of Engineering at {company_name} LinkedIn",
+            f"Technical Recruiter {company_name} site:linkedin.com",
+            f'"{company_name}" "{job_title}" hiring',
+        ]
+        patterns = [
+            f"firstname.lastname@{domain or 'company.com'}",
+            f"hiring@{domain or 'company.com'}",
+        ]
+        return suggestions, patterns
+
+
+def _build_linkedin_search_urls(company_name: str, job_title: str) -> list[str]:
+    """Build pre-filled LinkedIn People Search URLs for hiring managers."""
+    keywords = [
+        f"Hiring Manager {company_name}",
+        f"Technical Recruiter {company_name}",
+        f"Head of Engineering {company_name}",
+    ]
+    urls = []
+    base = "https://www.linkedin.com/search/results/people/?"
+    for kw in keywords:
+        urls.append(f"{base}keywords={quote_plus(kw)}&origin=GLOBAL_SEARCH_HEADER")
+    return urls
+
+
+def _build_pattern_primary(
+    company_name: str,
+    company_domain: str,
+    linkedin_urls: list[str],
+) -> HiringManagerResult:
+    """Build a pattern-based primary result when Apollo isn't available."""
+    email = f"hiring@{company_domain}" if company_domain else ""
     return HiringManagerResult(
         name="",
-        email="",
-        title="",
-        confidence="Not Found",
-        source="None",
+        email=email,
+        title="Hiring Team",
+        confidence="Guessed",
+        source="Pattern",
         linkedin_url="",
+        linkedin_search_url=linkedin_urls[0] if linkedin_urls else "",
     )
 
 
@@ -344,8 +459,6 @@ def _guess_domain(primary_domain: str, company_name: str) -> str:
     """Attempt to infer a company domain from its name."""
     if primary_domain:
         return primary_domain
-
-    # Simple heuristic: lowercase, remove spaces & special chars, add .com
     cleaned = re.sub(r"[^a-zA-Z0-9]", "", company_name.lower())
     if cleaned:
         return f"{cleaned}.com"

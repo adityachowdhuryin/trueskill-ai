@@ -5,11 +5,11 @@ Compares verified skills against job descriptions and generates learning project
 Workflow 2 (from project_spec.md):
     Input: VerifiedSkills list vs JobDescription text
     Logic: Identify missing keywords + Identify "weak" verifications (Score < 50)
-    Output: ProjectSuggestion (Title, Tech Stack, Step-by-Step Instructions)
+    Output: List[ProjectSuggestion] (configurable count, default 3)
 """
 
 import os
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -30,6 +30,7 @@ class VerifiedSkill(BaseModel):
 
 class BridgeProject(BaseModel):
     """A mini-project to bridge a skill gap"""
+    rank: int = Field(description="1=highest priority, 2=second, etc.")
     gap_skill: str = Field(description="The missing or weak skill identified")
     project_title: str = Field(description="A catchy title for the learning project")
     description: str = Field(description="Brief description of what the project accomplishes")
@@ -38,16 +39,19 @@ class BridgeProject(BaseModel):
     estimated_time: str = Field(description="Estimated time to complete (e.g., '2-3 days')")
     steps: list[str] = Field(description="Step-by-step instructions to build the project")
     learning_outcomes: list[str] = Field(description="What skills will be gained")
+    why_this_gap: str = Field(description="Why this gap was chosen and how it impacts job match")
+    estimated_score_gain: int = Field(ge=0, le=100, description="Estimated % gap closure from completing this project")
 
 
 class CoachRequest(BaseModel):
     """Request model for coach endpoint"""
     verified_skills: list[VerifiedSkill]
     job_description: str
+    num_projects: int = Field(default=3, ge=1, le=5, description="Number of bridge project suggestions to generate")
 
 
 class CoachResponse(BaseModel):
-    """Response model for coach endpoint"""
+    """Response model — kept for backward compat single-project usage"""
     gap_skill: str
     project_title: str
     description: str
@@ -57,9 +61,9 @@ class CoachResponse(BaseModel):
     steps: list[str]
     learning_outcomes: list[str]
     analysis: str = Field(description="Brief analysis of the skill gap")
-
-
-# LLM is initialized via shared llm.py module
+    rank: int = 1
+    why_this_gap: str = ""
+    estimated_score_gain: int = 0
 
 
 # =============================================================================
@@ -67,23 +71,17 @@ class CoachResponse(BaseModel):
 # =============================================================================
 
 def identify_skill_gaps(
-    verified_skills: list[VerifiedSkill], 
+    verified_skills: list[VerifiedSkill],
     job_description: str
 ) -> dict[str, Any]:
     """
     Analyze the gap between verified skills and job requirements.
-    
-    Returns:
-        Dictionary with strong_skills, weak_skills, and missing_keywords
     """
-    # Categorize existing skills
     strong_skills = [s for s in verified_skills if s.score >= 70]
     weak_skills = [s for s in verified_skills if s.score < 50]
     partial_skills = [s for s in verified_skills if 50 <= s.score < 70]
-    
-    # Extract skill topics
     all_skill_topics = {s.topic.lower() for s in verified_skills}
-    
+
     return {
         "strong_skills": [s.topic for s in strong_skills],
         "weak_skills": [{"topic": s.topic, "score": s.score} for s in weak_skills],
@@ -96,69 +94,86 @@ def identify_skill_gaps(
 
 
 # =============================================================================
-# Bridge Project Generator
+# Multiple Bridge Projects Generator
 # =============================================================================
 
-async def generate_bridge_project(
-    verified_skills: list[VerifiedSkill],
-    job_description: str
-) -> CoachResponse:
-    """
-    Generate a bridge project to help close the gap between current skills and job requirements.
-    
-    Args:
-        verified_skills: List of skills with verification scores
-        job_description: Target job description text
-        
-    Returns:
-        CoachResponse with project details
-    """
-    llm = get_llm_model(temperature=0.3)  # Lower temp → more precise, less hallucination
-    
-    # Analyze skill gaps
-    gap_analysis = identify_skill_gaps(verified_skills, job_description)
-    
-    system_prompt = """You are a senior engineering career coach specialising in technical skill-gap analysis.
+def _build_projects_prompt(num_projects: int) -> str:
+    """Build the system prompt for generating N bridge projects."""
+    project_example = {
+        "rank": 1,
+        "gap_skill": "Specific technology or concept name from the JD",
+        "project_title": "Memorable, descriptive project title",
+        "description": "2-3 sentences: what the project does and why it demonstrates the gap skill",
+        "tech_stack": ["primary_tech", "supporting_tech2", "supporting_tech3"],
+        "difficulty": "Intermediate|Advanced",
+        "estimated_time": "e.g., 4-6 days",
+        "steps": [
+            "Step 1: concrete engineering action",
+            "Step 2: concrete engineering action",
+            "Step 3: concrete engineering action",
+            "Step 4: concrete engineering action",
+            "Step 5: concrete engineering action",
+            "Step 6: deploy or demo the project"
+        ],
+        "learning_outcomes": [
+            "Specific technical outcome 1",
+            "Specific technical outcome 2",
+            "Specific technical outcome 3"
+        ],
+        "why_this_gap": "1-2 sentences: why THIS gap was chosen and how closing it impacts the candidate's chances",
+        "estimated_score_gain": 25
+    }
+
+    return f"""You are a senior engineering career coach specializing in technical skill-gap analysis.
 
 TASK:
 1. Read the candidate's FULL verified skill profile (with percentage scores from real code analysis).
 2. Read the target job description and infer the seniority level and specialisation.
-3. Identify the SINGLE most impactful skill gap: a technology explicitly required by the JD that is either
-   completely missing from the candidate's profile OR has a low verification score (< 60%).
-4. Design a focused, non-trivial portfolio project that directly demonstrates that skill.
+3. Identify the TOP {num_projects} most impactful skill gaps: technologies explicitly required by the JD that are either completely missing from the candidate's profile OR have a low verification score (< 60%).
+4. For each gap, design a focused, non-trivial portfolio project that directly demonstrates that skill.
+5. Rank the projects by impact — #1 should be the single biggest gap that most affects the candidate's chances.
 
 CRITICAL RULES — violating these will make your output useless:
 - NEVER suggest Python basics, data structures, or introductory ML if the candidate already knows Python/ML (score >= 60%).
 - NEVER pick a skill the candidate already excels at (score >= 70%).
 - The project difficulty MUST match the seniority level implied by the JD (use Intermediate or Advanced).
-- The project MUST showcase the missing/weak skill as its core feature, not a side note.
+- Each project MUST showcase a DIFFERENT missing/weak skill as its core feature.
 - Steps must be concrete engineering tasks (not "learn about X", "understand Y").
+- `estimated_score_gain` should reflect the realistic % improvement in job-match likelihood.
 
 Return ONLY valid JSON (no markdown, no preamble):
-{
-    "gap_skill": "Specific technology or concept name from the JD",
-    "project_title": "Memorable, descriptive project title",
-    "description": "2-3 sentences: what the project does and why it demonstrates the gap skill",
-    "tech_stack": ["primary_tech", "supporting_tech2", "supporting_tech3"],
-    "difficulty": "Intermediate|Advanced",
-    "estimated_time": "e.g., 4-6 days",
-    "steps": [
-        "Step 1: concrete engineering action",
-        "Step 2: concrete engineering action",
-        "Step 3: concrete engineering action",
-        "Step 4: concrete engineering action",
-        "Step 5: concrete engineering action",
-        "Step 6: deploy or demo the project"
-    ],
-    "learning_outcomes": [
-        "Specific technical outcome 1",
-        "Specific technical outcome 2",
-        "Specific technical outcome 3"
-    ],
-    "analysis": "1-2 sentences: why THIS gap was chosen and how closing it impacts the candidate's chances"
-}"""
+{{
+  "gap_analysis_summary": "2-3 sentence overview of the candidate's skill gap profile against this role",
+  "projects": [
+    {project_example},
+    ... ({num_projects} projects total)
+  ]
+}}"""
 
-    # Build rich skill context with all individual scores
+
+async def generate_bridge_projects(
+    verified_skills: list[VerifiedSkill],
+    job_description: str,
+    num_projects: int = 3
+) -> tuple[list[BridgeProject], str]:
+    """
+    Generate multiple bridge projects to help close the gap between current skills and job requirements.
+
+    Args:
+        verified_skills: List of skills with verification scores
+        job_description: Target job description text
+        num_projects: How many project suggestions to generate (1-5)
+
+    Returns:
+        Tuple of (list of BridgeProject, gap_analysis_summary string)
+    """
+    num_projects = max(1, min(5, num_projects))
+    llm = get_llm_model(temperature=0.4)
+
+    gap_analysis = identify_skill_gaps(verified_skills, job_description)
+    system_prompt = _build_projects_prompt(num_projects)
+
+    # Build rich skill context
     all_skills_lines = "\n".join(
         f"  - {s.topic}: {s.score}% ({s.status})"
         for s in verified_skills
@@ -174,11 +189,11 @@ SUMMARY:
 
 TARGET JOB DESCRIPTION:
 ---
-{job_description[:3000]}
+{job_description[:4000]}
 ---
 
-Identify the #1 highest-impact skill gap between this candidate and the role.
-Design a specific, non-trivial bridge project that directly fills that gap.
+Identify the top {num_projects} highest-impact skill gaps between this candidate and the role.
+Design {num_projects} specific, non-trivial bridge projects — each targeting a DIFFERENT gap.
 Return ONLY valid JSON, no markdown or explanation outside the JSON."""
 
     try:
@@ -186,22 +201,31 @@ Return ONLY valid JSON, no markdown or explanation outside the JSON."""
             SystemMessage(content=system_prompt),
             HumanMessage(content=human_prompt)
         ])
-        
+
         response_text = response.content
-        project_data = parse_json_response(response_text)
-        
-        return CoachResponse(
-            gap_skill=project_data.get("gap_skill", "Unknown"),
-            project_title=project_data.get("project_title", "Bridge Project"),
-            description=project_data.get("description", ""),
-            tech_stack=project_data.get("tech_stack", []),
-            difficulty=project_data.get("difficulty", "Intermediate"),
-            estimated_time=project_data.get("estimated_time", "1 week"),
-            steps=project_data.get("steps", []),
-            learning_outcomes=project_data.get("learning_outcomes", []),
-            analysis=project_data.get("analysis", "")
-        )
-        
+        data = parse_json_response(response_text)
+
+        gap_summary = data.get("gap_analysis_summary", "")
+        projects_raw = data.get("projects", [])
+
+        projects: list[BridgeProject] = []
+        for i, p in enumerate(projects_raw[:num_projects]):
+            projects.append(BridgeProject(
+                rank=int(p.get("rank", i + 1)),
+                gap_skill=p.get("gap_skill", "Unknown"),
+                project_title=p.get("project_title", f"Bridge Project {i + 1}"),
+                description=p.get("description", ""),
+                tech_stack=p.get("tech_stack", []),
+                difficulty=p.get("difficulty", "Intermediate"),
+                estimated_time=p.get("estimated_time", "1 week"),
+                steps=p.get("steps", []),
+                learning_outcomes=p.get("learning_outcomes", []),
+                why_this_gap=p.get("why_this_gap", ""),
+                estimated_score_gain=max(0, min(100, int(p.get("estimated_score_gain", 15)))),
+            ))
+
+        return projects, gap_summary
+
     except ValueError as e:
         raise ValueError(str(e))
     except Exception as e:
@@ -209,80 +233,29 @@ Return ONLY valid JSON, no markdown or explanation outside the JSON."""
 
 
 # =============================================================================
-# Quick Project Suggestions (No LLM, keyword-based)
+# Legacy single-project function (kept for backward compat)
 # =============================================================================
 
-SKILL_PROJECT_TEMPLATES = {
-    "docker": {
-        "project_title": "Containerize Your Portfolio App",
-        "description": "Package your application with Docker and deploy to a cloud platform.",
-        "tech_stack": ["Docker", "Docker Compose", "GitHub Actions"],
-        "difficulty": "Intermediate",
-        "estimated_time": "2-3 days",
-        "steps": [
-            "Create a Dockerfile for your existing project",
-            "Set up a docker-compose.yml for local development",
-            "Add a .dockerignore file to optimize builds",
-            "Create a multi-stage build for production",
-            "Set up GitHub Actions to build and push images",
-            "Deploy to a cloud platform (Railway, Fly.io, or AWS ECS)"
-        ],
-        "learning_outcomes": [
-            "Understand containerization concepts",
-            "Write production-ready Dockerfiles",
-            "Use Docker Compose for multi-service apps",
-            "Implement CI/CD with container workflows"
-        ]
-    },
-    "kubernetes": {
-        "project_title": "Deploy a Microservice on K8s",
-        "description": "Deploy a simple microservice architecture using Kubernetes.",
-        "tech_stack": ["Kubernetes", "kubectl", "Helm", "Minikube"],
-        "difficulty": "Advanced",
-        "estimated_time": "1 week",
-        "steps": [
-            "Set up Minikube or use a cloud K8s cluster",
-            "Create Deployment and Service manifests",
-            "Implement ConfigMaps and Secrets",
-            "Set up horizontal pod autoscaling",
-            "Create a Helm chart for your application",
-            "Implement health checks and rolling updates"
-        ],
-        "learning_outcomes": [
-            "Understand Kubernetes architecture",
-            "Write and manage K8s manifests",
-            "Use Helm for package management",
-            "Implement production-ready deployments"
-        ]
-    },
-    "graphql": {
-        "project_title": "Build a GraphQL API Gateway",
-        "description": "Create a GraphQL API that aggregates multiple data sources.",
-        "tech_stack": ["GraphQL", "Apollo Server", "Node.js", "TypeScript"],
-        "difficulty": "Intermediate",
-        "estimated_time": "3-4 days",
-        "steps": [
-            "Set up Apollo Server with TypeScript",
-            "Define a schema with types, queries, and mutations",
-            "Implement resolvers with data loaders",
-            "Add authentication with context",
-            "Implement subscription for real-time updates",
-            "Add error handling and validation"
-        ],
-        "learning_outcomes": [
-            "Design GraphQL schemas",
-            "Implement efficient data fetching",
-            "Handle authentication in GraphQL",
-            "Build real-time features with subscriptions"
-        ]
-    }
-}
-
-
-def get_template_project(skill: str) -> Optional[dict[str, Any]]:
-    """Get a pre-defined project template for common skills."""
-    skill_lower = skill.lower()
-    for key, template in SKILL_PROJECT_TEMPLATES.items():
-        if key in skill_lower:
-            return {"gap_skill": skill, **template, "analysis": f"'{skill}' was identified as a missing skill in the job requirements."}
-    return None
+async def generate_bridge_project(
+    verified_skills: list[VerifiedSkill],
+    job_description: str
+) -> CoachResponse:
+    """Generate a single bridge project (legacy, wraps generate_bridge_projects)."""
+    projects, summary = await generate_bridge_projects(verified_skills, job_description, num_projects=1)
+    if not projects:
+        raise ValueError("No bridge project could be generated")
+    p = projects[0]
+    return CoachResponse(
+        gap_skill=p.gap_skill,
+        project_title=p.project_title,
+        description=p.description,
+        tech_stack=p.tech_stack,
+        difficulty=p.difficulty,
+        estimated_time=p.estimated_time,
+        steps=p.steps,
+        learning_outcomes=p.learning_outcomes,
+        analysis=p.why_this_gap,
+        rank=p.rank,
+        why_this_gap=p.why_this_gap,
+        estimated_score_gain=p.estimated_score_gain,
+    )

@@ -3,7 +3,8 @@
 import { useState } from "react";
 import {
     Download, ChevronDown, ChevronUp, CheckCircle2,
-    XCircle, AlertTriangle, Zap, TrendingUp, Target
+    XCircle, AlertTriangle, Zap, TrendingUp, Target,
+    Rocket, Pencil, ChevronRight
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,6 +21,21 @@ export interface SectionFeedback {
     suggestions: string[];
 }
 
+export interface PriorityAction {
+    rank: number;
+    action: string;
+    impact: string;
+    estimated_gain: number;
+    section: string;
+}
+
+export interface RewriteSuggestion {
+    section: string;
+    original_snippet: string;
+    rewritten_snippet: string;
+    rationale: string;
+}
+
 export interface ATSReport {
     ats_score: number;
     keyword_match_score: number;
@@ -32,6 +48,8 @@ export interface ATSReport {
     overall_recommendation: string;
     strengths: string[];
     improvements: string[];
+    priority_actions?: PriorityAction[];
+    rewrite_suggestions?: RewriteSuggestion[];
 }
 
 interface ATSScorePanelProps {
@@ -59,6 +77,18 @@ function scoreBg(score: number): string {
     return "rgba(239,68,68,0.1)";
 }
 
+function impactColor(impact: string): string {
+    if (impact === "High") return "#ef4444";
+    if (impact === "Medium") return "#f59e0b";
+    return "#22c55e";
+}
+
+function impactBg(impact: string): string {
+    if (impact === "High") return "rgba(239,68,68,0.12)";
+    if (impact === "Medium") return "rgba(245,158,11,0.12)";
+    return "rgba(34,197,94,0.12)";
+}
+
 // ─── Circular Gauge ────────────────────────────────────────────────────────────
 function CircularGauge({ score }: { score: number }) {
     const radius = 54;
@@ -69,12 +99,7 @@ function CircularGauge({ score }: { score: number }) {
     return (
         <div className="relative flex items-center justify-center" style={{ width: 140, height: 140 }}>
             <svg width="140" height="140" style={{ transform: "rotate(-90deg)" }}>
-                {/* Track */}
-                <circle
-                    cx="70" cy="70" r={radius}
-                    fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="10"
-                />
-                {/* Progress */}
+                <circle cx="70" cy="70" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="10" />
                 <circle
                     cx="70" cy="70" r={radius}
                     fill="none"
@@ -86,7 +111,6 @@ function CircularGauge({ score }: { score: number }) {
                     style={{ transition: "stroke-dashoffset 1s ease-out, stroke 0.3s" }}
                 />
             </svg>
-            {/* Center label */}
             <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <span className="text-3xl font-black" style={{ color }}>{score}</span>
                 <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "rgba(255,255,255,0.5)" }}>ATS Score</span>
@@ -110,6 +134,94 @@ function ScoreBar({ label, score }: { label: string; score: number }) {
                     style={{ width: `${score}%`, background: color, boxShadow: `0 0 8px ${color}55` }}
                 />
             </div>
+        </div>
+    );
+}
+
+// ─── Priority Action Card ─────────────────────────────────────────────────────
+function PriorityActionCard({ action }: { action: PriorityAction }) {
+    const ic = impactColor(action.impact);
+    const ib = impactBg(action.impact);
+    return (
+        <div
+            className="flex items-start gap-3 rounded-xl p-4 transition-all duration-200"
+            style={{ background: "rgba(255,255,255,0.03)", border: `1px solid rgba(255,255,255,0.07)`, borderLeft: `3px solid ${ic}` }}
+        >
+            <div
+                className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-black"
+                style={{ background: ib, color: ic }}
+            >
+                {action.rank}
+            </div>
+            <div className="flex-1 min-w-0">
+                <div className="flex items-center flex-wrap gap-1.5 mb-1.5">
+                    <span
+                        className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full"
+                        style={{ background: ib, color: ic }}
+                    >
+                        {action.impact} Impact
+                    </span>
+                    <span className="text-[10px] text-slate-500">·</span>
+                    <span className="text-[10px] text-slate-500">{action.section}</span>
+                    <span
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-full ml-auto"
+                        style={{ background: "rgba(99,102,241,0.15)", color: "#a5b4fc", border: "1px solid rgba(99,102,241,0.3)" }}
+                    >
+                        +{action.estimated_gain} pts
+                    </span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">{action.action}</p>
+            </div>
+        </div>
+    );
+}
+
+// ─── Rewrite Suggestion Card ──────────────────────────────────────────────────
+function RewriteCard({ rs }: { rs: RewriteSuggestion }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <div
+            className="rounded-xl overflow-hidden transition-all duration-200"
+            style={{ border: "1px solid rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.02)" }}
+        >
+            <button
+                onClick={() => setOpen(v => !v)}
+                className="w-full flex items-center justify-between px-4 py-3 text-left"
+            >
+                <div className="flex items-center gap-2">
+                    <Pencil size={12} className="text-indigo-400 flex-shrink-0" />
+                    <span className="text-xs font-semibold text-slate-300">{rs.section} Section Rewrite</span>
+                </div>
+                {open ? <ChevronUp size={13} className="text-slate-500" /> : <ChevronDown size={13} className="text-slate-500" />}
+            </button>
+            {open && (
+                <div className="px-4 pb-4 space-y-3 border-t" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+                    <div className="grid grid-cols-2 gap-3 pt-3">
+                        <div>
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-red-400 mb-1.5">Before</p>
+                            <div
+                                className="rounded-lg p-3 text-[11px] text-red-200 leading-relaxed"
+                                style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}
+                            >
+                                {rs.original_snippet}
+                            </div>
+                        </div>
+                        <div>
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-green-400 mb-1.5">After</p>
+                            <div
+                                className="rounded-lg p-3 text-[11px] text-green-200 leading-relaxed"
+                                style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)" }}
+                            >
+                                {rs.rewritten_snippet}
+                            </div>
+                        </div>
+                    </div>
+                    <p className="text-[11px] text-slate-500 italic flex items-start gap-1.5">
+                        <Zap size={11} className="text-amber-400 mt-0.5 flex-shrink-0" />
+                        {rs.rationale}
+                    </p>
+                </div>
+            )}
         </div>
     );
 }
@@ -175,10 +287,14 @@ type KeywordTab = "all" | "found" | "missing";
 export default function ATSScorePanel({ report, candidateName = "Candidate", apiBaseUrl = "http://localhost:8000" }: ATSScorePanelProps) {
     const [kwTab, setKwTab] = useState<KeywordTab>("all");
     const [isDownloading, setIsDownloading] = useState(false);
+    const [showRewrites, setShowRewrites] = useState(false);
 
     const found = report.keyword_matches.filter(k => k.found);
     const missing = report.keyword_matches.filter(k => !k.found);
     const displayed = kwTab === "found" ? found : kwTab === "missing" ? missing : report.keyword_matches;
+
+    const priorityActions = report.priority_actions ?? [];
+    const rewriteSuggestions = report.rewrite_suggestions ?? [];
 
     const handleDownload = async () => {
         setIsDownloading(true);
@@ -285,6 +401,50 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                     >
                         <span className="font-semibold text-indigo-300">📋 Recommendation: </span>
                         {report.overall_recommendation}
+                    </div>
+                )}
+
+                {/* ── Priority Actions ── */}
+                {priorityActions.length > 0 && (
+                    <div>
+                        <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2 mb-3">
+                            <Rocket size={14} className="text-indigo-400" />
+                            Priority Actions
+                            <span className="text-[10px] font-medium text-slate-500 ml-1">— ranked by score impact</span>
+                        </h4>
+                        <div className="space-y-2">
+                            {priorityActions.map((pa, i) => (
+                                <PriorityActionCard key={i} action={pa} />
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* ── Rewrite Suggestions ── */}
+                {rewriteSuggestions.length > 0 && (
+                    <div>
+                        <button
+                            onClick={() => setShowRewrites(v => !v)}
+                            className="w-full flex items-center justify-between text-sm font-bold text-slate-200 mb-3"
+                        >
+                            <span className="flex items-center gap-2">
+                                <Pencil size={14} className="text-violet-400" />
+                                Rewrite Suggestions
+                                <span className="text-[10px] font-medium text-slate-500 ml-1">— copy-paste ready improvements</span>
+                            </span>
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold"
+                                style={{ color: "#a78bfa" }}>
+                                {showRewrites ? "Hide" : "Show"} {rewriteSuggestions.length} suggestions
+                                <ChevronRight size={12} className={`transition-transform duration-200 ${showRewrites ? "rotate-90" : ""}`} />
+                            </div>
+                        </button>
+                        {showRewrites && (
+                            <div className="space-y-2">
+                                {rewriteSuggestions.map((rs, i) => (
+                                    <RewriteCard key={i} rs={rs} />
+                                ))}
+                            </div>
+                        )}
                     </div>
                 )}
 

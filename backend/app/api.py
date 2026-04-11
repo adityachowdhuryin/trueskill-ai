@@ -372,6 +372,7 @@ class CoachRequestModel(BaseModel):
     """Request model for coach endpoint"""
     verified_skills: list[dict]  # [{topic, score, status}, ...]
     job_description: str
+    num_projects: int = 3        # Configurable number of bridge project suggestions (1-5)
 
 
 @router.post("/coach")
@@ -379,9 +380,9 @@ async def generate_coach_plan(request: CoachRequestModel, req: Request):
     """
     POST /api/coach
     Compares verified skills against job description.
-    Returns a bridge project to close the most critical skill gap.
+    Returns N configurable bridge projects (default 3) ranked by impact.
     """
-    from .coach import generate_bridge_project, VerifiedSkill
+    from .coach import generate_bridge_projects, VerifiedSkill
 
     check_rate_limit(req.client.host if req.client else "unknown", "coach")
 
@@ -399,11 +400,15 @@ async def generate_coach_plan(request: CoachRequestModel, req: Request):
         if not request.job_description.strip():
             raise HTTPException(status_code=400, detail="Job description cannot be empty")
 
-        result = await generate_bridge_project(skills, request.job_description)
+        num = max(1, min(5, request.num_projects))
+        projects, gap_summary = await generate_bridge_projects(skills, request.job_description, num_projects=num)
 
         return {
             "status": "success",
-            "bridge_project": result.model_dump()
+            "gap_analysis_summary": gap_summary,
+            "bridge_projects": [p.model_dump() for p in projects],
+            # Backward-compat: first project as singular field
+            "bridge_project": projects[0].model_dump() if projects else None,
         }
 
     except ValueError as e:
@@ -812,9 +817,14 @@ async def resume_toolkit_find_hiring_manager(
     """
     POST /api/resume-toolkit/find-hiring-manager
     Accepts { company_name, job_title, company_domain? }.
-    Returns hiring manager contact info via Apollo.io or pattern guess.
+    Returns enhanced hiring manager info:
+      - primary contact (Apollo or pattern)
+      - alternatives (up to 2 more)
+      - LLM-generated search suggestions
+      - email patterns
+      - LinkedIn search URLs
     """
-    from .job_finder import find_hiring_manager
+    from .job_finder import find_hiring_manager_enhanced
 
     check_rate_limit(req.client.host if req.client else "unknown", "resume-toolkit-manager")
 
@@ -822,7 +832,7 @@ async def resume_toolkit_find_hiring_manager(
         raise HTTPException(status_code=400, detail="company_name cannot be empty")
 
     try:
-        result = await find_hiring_manager(
+        result = await find_hiring_manager_enhanced(
             company_name=request.company_name,
             job_title=request.job_title,
             company_domain=request.company_domain,
