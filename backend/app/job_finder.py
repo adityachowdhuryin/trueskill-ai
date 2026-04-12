@@ -162,34 +162,48 @@ async def search_jobs(
 
 
 def _demo_jobs(role: str, location: str) -> list[JobPosting]:
-    """Fallback demo job postings when no API key is configured."""
+    """Fallback demo job postings when no API key is configured.
+    Uses real job board search URLs so users can actually find jobs.
+    """
+    from urllib.parse import quote_plus
+    role_enc = quote_plus(role)
+    loc_enc = quote_plus(location or "Remote")
     return [
         JobPosting(
             title=f"Senior {role}",
-            company="TechCorp Global",
+            company="Various (LinkedIn)",
             location=location or "Remote",
-            description="We are looking for an experienced professional to join our growing team. You will be responsible for building scalable systems, collaborating with cross-functional teams, and mentoring junior engineers.",
-            apply_url="https://example.com/apply",
+            description="We are looking for an experienced professional to join a growing team. You will be responsible for building scalable systems, collaborating with cross-functional teams, and driving technical decisions.",
+            apply_url=f"https://www.linkedin.com/jobs/search/?keywords={role_enc}&location={loc_enc}",
             posted_date="2026-04-01",
             salary="$90,000 - $130,000",
         ),
         JobPosting(
             title=role,
-            company="Innovate Labs",
+            company="Various (Indeed)",
             location=location or "Remote",
-            description="Join our fast-moving startup solving hard problems. We value impact over process. You'll own projects end-to-end and have the autonomy to make key technical decisions.",
-            apply_url="https://example.com/apply2",
+            description="Join fast-moving teams solving hard problems. We value impact over process. Own projects end-to-end with the autonomy to make key technical decisions. Competitive salary and equity package.",
+            apply_url=f"https://www.indeed.com/jobs?q={role_enc}&l={loc_enc}",
             posted_date="2026-04-03",
             salary="$80,000 - $110,000",
         ),
         JobPosting(
             title=f"{role} — Mid Level",
-            company="FinancePro Inc",
+            company="Various (Glassdoor)",
             location=location or "Hybrid",
-            description="Exciting opportunity in the fintech space. Work on high-throughput systems serving millions of users. Strong benefits package including equity, health insurance, and flexible PTO.",
-            apply_url="https://example.com/apply3",
+            description="Exciting opportunities across multiple industries. Work on high-throughput systems serving millions of users. Strong benefits packages including equity, health insurance, and flexible PTO.",
+            apply_url=f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={role_enc}&locT=C&locId=0",
             posted_date="2026-04-02",
-            salary="",
+            salary="$70,000 - $105,000",
+        ),
+        JobPosting(
+            title=f"{role} — Remote",
+            company="Various (RemoteOK)",
+            location="Remote",
+            description="Remote-first companies seeking talented professionals. Work from anywhere while collaborating with world-class teams on meaningful products used by thousands.",
+            apply_url=f"https://remoteok.com/remote-{role_enc.lower().replace('+', '-')}-jobs",
+            posted_date="2026-04-04",
+            salary="$75,000 - $120,000",
         ),
     ]
 
@@ -198,7 +212,9 @@ def _demo_jobs(role: str, location: str) -> list[JobPosting]:
 # Step 3 — Find hiring manager via Apollo.io + LLM fallback
 # =============================================================================
 
-APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/v1/mixed_people/search"
+# Apollo.io v1/people/search is accessible on free-tier keys.
+# v1/mixed_people/search requires a paid plan.
+APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/v1/people/search"
 
 
 async def find_hiring_manager(
@@ -299,6 +315,7 @@ async def _apollo_search_multiple(
     ]
 
     payload: dict = {
+        "api_key": api_key,   # Some Apollo tiers require api_key in body
         "page": 1,
         "per_page": 5,
         "person_titles": hiring_titles,
@@ -310,7 +327,7 @@ async def _apollo_search_multiple(
         payload["organization_name"] = company_name
 
     headers = {
-        "X-Api-Key": api_key,
+        "X-Api-Key": api_key,           # Header-based auth
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Cache-Control": "no-cache",
@@ -319,10 +336,18 @@ async def _apollo_search_multiple(
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(APOLLO_PEOPLE_SEARCH_URL, json=payload, headers=headers)
+            if response.status_code == 401:
+                print(f"[Apollo] 401 Unauthorized — check APOLLO_API_KEY validity")
+                return []
+            if response.status_code == 403:
+                print(f"[Apollo] 403 Forbidden — key may not have people search access")
+                return []
             if response.status_code != 200:
+                print(f"[Apollo] Non-200 response: {response.status_code} — {response.text[:200]}")
                 return []
             data = response.json()
-    except Exception:
+    except Exception as e:
+        print(f"[Apollo] Request error: {e}")
         return []
 
     people = data.get("people", [])

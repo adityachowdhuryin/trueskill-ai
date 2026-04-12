@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 import {
     Upload, FileText, Loader2, CheckCircle, XCircle, AlertCircle,
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
-    Terminal
+    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
@@ -205,6 +206,7 @@ export default function DashboardPage() {
     const [agentStatus, setAgentStatus] = useState<string | null>(null);
     const [agentMessages, setAgentMessages] = useState<string[]>([]);
     const [pdfFile, setPdfFile] = useState<File | null>(null);
+    const [pdfFileName, setPdfFileName] = useState<string | null>(null); // persisted across navigations
     const [isIngesting, setIsIngesting] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
@@ -212,6 +214,10 @@ export default function DashboardPage() {
     const [viewMode, setViewMode] = useState<ViewMode>("cards");
     const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
+    // graphRepoId tracks which repo_id to use for the graph — can be 'all' for multi-repo
+    // it is separate from repoId so the useEffect doesn't overwrite the multi-repo graph call
+    const [graphRepoId, setGraphRepoId] = useState<string | null>(null);
+
     const [coachFocused, setCoachFocused] = useState(false);
 
     // Auto-detect extraction state
@@ -270,6 +276,7 @@ export default function DashboardPage() {
                 type: (n.type as GraphNode["type"]) || "File",
                 file_path: n.file_path as string | undefined,
                 complexity_score: n.complexity_score as number | undefined,
+                repo_id: (n.repo_id as string) || "",
             }));
 
             const links: GraphLink[] = (data.edges || []).map((e: Record<string, unknown>) => ({
@@ -287,43 +294,60 @@ export default function DashboardPage() {
         }
     }, []);
 
-    // Auto-fetch graph data and timeline when repoId changes
+    // Auto-fetch graph data and timeline when graphRepoId changes
+    // graphRepoId can be a single repo_id OR 'all' for multi-repo combined view
     useEffect(() => {
+        if (graphRepoId) {
+            fetchGraphData(graphRepoId);
+        }
+        // Also fetch timeline using the primary repoId (timeline is always per-repo)
         if (repoId) {
-            fetchGraphData(repoId);
-            // Fetch timeline data
             fetch(`${API_BASE_URL}/api/skill-timeline/${repoId}`)
                 .then(r => r.json())
                 .then(d => setTimelineData(d.timeline || {}))
                 .catch(() => setTimelineData({}));
         }
-    }, [repoId, fetchGraphData]);
+    }, [graphRepoId, repoId, fetchGraphData]);
 
     // Export report handler (Feature 5)
     const handleExportReport = useCallback(async () => {
         if (!analysisResult) return;
         try {
+            const repoNames = extractedRepos.filter(r => selectedRepos.has(r.html_url)).map(r => r.name);
             const response = await fetch(`${API_BASE_URL}/api/export-report`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     candidate_name: githubUsername || "Candidate",
-                    repo_names: extractedRepos.filter(r => selectedRepos.has(r.html_url)).map(r => r.name),
-                    skills: analysisResult.verification_results?.map(v => ({ topic: v.topic, score: v.score, status: v.status, evidence: v.reasoning })) || [],
+                    repo_names: repoNames.length ? repoNames : (analysisResult.repo_id ? [analysisResult.repo_id] : ["Unknown"]),
+                    skills: analysisResult.verification_results?.map(v => ({
+                        topic: v.topic,
+                        score: v.score,
+                        status: v.status,
+                        evidence: v.reasoning,
+                        complexity_analysis: v.complexity_analysis,
+                    })) || [],
                     overall_score: analysisResult.summary?.average_score || 0,
+                    verification_results: analysisResult.verification_results || [],
+                    forensics: analysisResult.forensics || null,
+                    bridge_projects: bridgeProjects || [],
+                    ats_report: atsReport || null,
+                    summary: analysisResult.summary || null,
                 }),
             });
             const blob = await response.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = "trueskill_report.html";
+            const date = new Date().toISOString().split("T")[0];
+            a.download = `trueskill_report_${(githubUsername || "candidate").replace(/\s+/g, "_")}_${date}.html`;
             a.click();
             URL.revokeObjectURL(url);
         } catch (err) {
             console.error("Export failed:", err);
         }
-    }, [analysisResult, githubUsername, extractedRepos, selectedRepos]);
+    }, [analysisResult, githubUsername, extractedRepos, selectedRepos, bridgeProjects, atsReport]);
+
 
     // Save analysis handler (Feature 4)
     const handleSaveAnalysis = useCallback(async () => {
@@ -351,18 +375,150 @@ export default function DashboardPage() {
         }
     }, [analysisResult, githubUsername, extractedRepos, selectedRepos, multiRepoIds]);
 
-    // Toggle repo selection for multi-repo (Feature 2)
-    const toggleRepoSelection = useCallback((repoUrl: string) => {
+    // Toggle repo selection for multi-repo
+    const toggleRepoSelection = useCallback((url: string) => {
         setSelectedRepos(prev => {
             const next = new Set(prev);
-            if (next.has(repoUrl)) {
-                next.delete(repoUrl);
+            if (next.has(url)) {
+                next.delete(url);
             } else {
-                next.add(repoUrl);
+                next.add(url);
             }
             return next;
         });
     }, []);
+
+    // ── Session Storage: restore on mount ──────────────────────────────────────
+    const SESSION_KEY = "trueskill_dashboard_v2";
+
+    useEffect(() => {
+        try {
+            const saved = sessionStorage.getItem(SESSION_KEY);
+            if (!saved) return;
+            const d = JSON.parse(saved);
+            if (d.repoUrl)        setRepoUrl(d.repoUrl);
+            if (d.repoId)         setRepoId(d.repoId);
+            if (d.githubUsername) setGithubUsername(d.githubUsername);
+            if (d.extractedRepos?.length) setExtractedRepos(d.extractedRepos);
+            if (d.selectedRepos?.length)  setSelectedRepos(new Set(d.selectedRepos as string[]));
+            if (d.multiRepoIds?.length)   setMultiRepoIds(d.multiRepoIds);
+            if (d.analysisResult) setAnalysisResult(d.analysisResult);
+            if (d.bridgeProjects?.length) setBridgeProjects(d.bridgeProjects);
+            if (d.gapSummary)     setGapSummary(d.gapSummary);
+            if (d.jobDescription) setJobDescription(d.jobDescription);
+            if (d.atsReport)      setAtsReport(d.atsReport);
+            if (d.pdfFileName)    setPdfFileName(d.pdfFileName);
+            if (d.viewMode)       setViewMode(d.viewMode as ViewMode);
+        } catch { /* silently ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // ── Session Storage: save whenever key state changes ──────────────────────
+    useEffect(() => {
+        try {
+            sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+                repoUrl, repoId, githubUsername, extractedRepos,
+                selectedRepos: Array.from(selectedRepos),
+                multiRepoIds, analysisResult, bridgeProjects, gapSummary,
+                jobDescription, atsReport,
+                pdfFileName: pdfFile?.name ?? pdfFileName,
+                viewMode,
+            }));
+        } catch { /* quota exceeded or serialization error — ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [repoUrl, repoId, githubUsername, extractedRepos, selectedRepos,
+        multiRepoIds, analysisResult, bridgeProjects, gapSummary,
+        jobDescription, atsReport, pdfFile, pdfFileName, viewMode]);
+
+    // ── Reset all state & session ──────────────────────────────────────────────
+    const handleResetAll = useCallback(() => {
+        sessionStorage.removeItem(SESSION_KEY);
+        setRepoUrl(""); setRepoId(null); setGithubUsername(null);
+        setExtractedRepos([]); setSelectedRepos(new Set()); setMultiRepoIds([]);
+        setAnalysisResult(null); setGraphNodes([]); setGraphLinks([]);
+        setBridgeProjects([]); setGapSummary(null); setJobDescription("");
+        setAtsReport(null); setPdfFile(null); setPdfFileName(null);
+        setTimelineData({}); setViewMode("cards"); setGraphRepoId(null);
+        setError(null); setExtractionError(null); setCoachError(null);
+        setAtsError(null); setAgentMessages([]); setAgentStatus(null);
+        setIsManualMode(false);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ── Multi-repo analyze flow ────────────────────────────────────────────────
+    const handleMultiRepoAnalyze = useCallback(async () => {
+        if (selectedRepos.size === 0) { setError("Please select at least one repository"); return; }
+        if (!pdfFile) { setError("Please re-upload your resume PDF to run analysis"); return; }
+
+        setIsIngesting(true);
+        setError(null);
+        setAgentMessages([]);
+        setAnalysisResult(null);
+
+        const urls = Array.from(selectedRepos);
+        const ids: string[] = [];
+
+        try {
+            // Step 1: Ingest each selected repo
+            for (let i = 0; i < urls.length; i++) {
+                const repoName = urls[i].split("/").pop() ?? urls[i];
+                setAgentStatus(`Ingesting repo ${i + 1}/${urls.length}: ${repoName}`);
+                setAgentMessages(prev => [...prev, `📦 Ingesting ${repoName}...`]);
+
+                const res = await fetch(`${API_BASE_URL}/api/ingest`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ github_url: urls[i] }),
+                });
+
+                if (!res.ok) {
+                    const e = await res.json().catch(() => ({}));
+                    throw new Error(e.detail || `Failed to ingest ${repoName}`);
+                }
+                const data = await res.json();
+                ids.push(data.repo_id);
+                setAgentMessages(prev => [...prev, `✅ Ingested: ${data.repo_id}`]);
+            }
+
+            setMultiRepoIds(ids);
+            setRepoId(ids[0]);
+            setIsIngesting(false);
+
+            // Step 2: Set graphRepoId — 'all' for multiple repos, single id for one
+            // Using state instead of calling fetchGraphData directly so the useEffect
+            // handles it cleanly rather than racing with the repoId setter above.
+            setGraphRepoId(ids.length > 1 ? "all" : ids[0]);
+
+            // Step 3: Run multi-repo analysis
+            setIsAnalyzing(true);
+            setAgentStatus(`Analyzing ${ids.length} repo${ids.length > 1 ? "s" : ""}...`);
+            setAgentMessages(prev => [...prev, `🔍 Running multi-repo analysis on ${ids.length} repo${ids.length > 1 ? "s" : ""}...`]);
+
+            const formData = new FormData();
+            formData.append("pdf_file", pdfFile);
+            formData.append("repo_ids", JSON.stringify(ids));
+
+            const analyzeRes = await fetch(`${API_BASE_URL}/api/analyze/multi`, {
+                method: "POST",
+                body: formData,
+            });
+
+            if (!analyzeRes.ok) {
+                const e = await analyzeRes.json().catch(() => ({}));
+                throw new Error(e.detail || "Multi-repo analysis failed");
+            }
+
+            const result = await analyzeRes.json();
+            setAnalysisResult(result);
+            setAgentMessages(prev => [...prev, `✨ Analysis complete! ${result.verification_results?.length ?? 0} skills verified across ${ids.length} repo${ids.length > 1 ? "s" : ""}.`]);
+            setAgentStatus(null);
+
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Analysis failed");
+        } finally {
+            setIsIngesting(false);
+            setIsAnalyzing(false);
+        }
+    }, [selectedRepos, pdfFile, fetchGraphData]);
 
     // Handle PDF upload and trigger extraction
     const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -481,6 +637,7 @@ export default function DashboardPage() {
             const ingestData = await ingestResponse.json();
             const newRepoId = ingestData.repo_id;
             setRepoId(newRepoId);
+            setGraphRepoId(newRepoId);
             setIsIngesting(false);
 
             // STEP 2: Analyze
@@ -531,6 +688,7 @@ export default function DashboardPage() {
 
             const data = await response.json();
             setRepoId(data.repo_id);
+            setGraphRepoId(data.repo_id);
         } catch (err) {
             setError(err instanceof Error ? err.message : "Ingestion failed");
         } finally {
@@ -667,18 +825,40 @@ export default function DashboardPage() {
             {/* Header */}
             <header className="sticky top-0 z-40 bg-white/70 backdrop-blur-xl border-b border-indigo-100/50 px-6 py-4 shadow-sm transition-all">
                 <div className="max-w-7xl mx-auto flex items-center justify-between">
-                    <div>
-                        <div className="flex items-center gap-3 mb-1">
-                            <h1 className="text-3xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 tracking-tight">TrueSkill AI</h1>
-                            <button
-                                onClick={() => setIsManualMode(!isManualMode)}
-                                className={`text-xs font-medium px-2.5 py-1 rounded-full transition-all duration-300 ${isManualMode ? "bg-indigo-100 text-indigo-700 shadow-inner" : "bg-slate-100 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 hover:shadow-sm"}`}
-                            >
-                                {isManualMode ? "Hide Manual Input" : "Manual Input"}
-                            </button>
+                    {/* Left: back link + title + controls */}
+                    <div className="flex items-center gap-3">
+                        {/* ← Home */}
+                        <Link
+                            href="/"
+                            className="flex items-center gap-1.5 text-slate-500 hover:text-indigo-600 transition-colors duration-200 text-sm font-medium group"
+                        >
+                            <ArrowLeft className="w-4 h-4 transition-transform duration-200 group-hover:-translate-x-0.5" />
+                            <span className="hidden sm:inline">Home</span>
+                        </Link>
+                        <div className="w-px h-5 bg-slate-200" />
+                        <div>
+                            <div className="flex items-center gap-2.5 mb-1">
+                                <h1 className="text-3xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 tracking-tight">TrueSkill AI</h1>
+                                <button
+                                    onClick={() => setIsManualMode(!isManualMode)}
+                                    className={`text-xs font-medium px-2.5 py-1 rounded-full transition-all duration-300 ${isManualMode ? "bg-indigo-100 text-indigo-700 shadow-inner" : "bg-slate-100 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 hover:shadow-sm"}`}
+                                >
+                                    {isManualMode ? "Hide Manual Input" : "Manual Input"}
+                                </button>
+                                {/* Reset button */}
+                                <button
+                                    onClick={handleResetAll}
+                                    title="Reset all state and start over"
+                                    className="flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-red-50 text-red-500 hover:bg-red-100 hover:text-red-700 transition-all duration-200 border border-red-100"
+                                >
+                                    <RotateCcw className="w-3 h-3" />
+                                    Reset
+                                </button>
+                            </div>
+                            <p className="text-sm text-slate-500 font-medium tracking-wide">Automated Competency Verification System</p>
                         </div>
-                        <p className="text-sm text-slate-500 font-medium tracking-wide">Automated Competency Verification System</p>
                     </div>
+
 
                     {/* Summary Stats */}
                     {analysisResult?.summary && (
@@ -899,55 +1079,119 @@ export default function DashboardPage() {
                                             </div>
                                         ) : extractedRepos.length > 0 ? (
                                             <div className="mt-4">
-                                                <div className="flex items-center gap-2 mb-4">
-                                                    <Github className="w-5 h-5 text-slate-700" />
-                                                    <h3 className="font-semibold text-slate-800">
-                                                        Found <span className="text-blue-600">@{githubUsername}</span>
-                                                    </h3>
-                                                </div>
-                                                <p className="text-sm text-slate-600 mb-4">Select a repository to verify your skills against:</p>
-                                                
-                                                <div className="space-y-3 pb-4">
-                                                    {extractedRepos.map((repo, repoIdx) => (
-                                                        <div 
-                                                            key={repo.name}
-                                                            onClick={() => handleAutoAnalyze(repo.html_url)}
-                                                            className={`p-4 bg-white border animate-slide-in-left ${
-                                                                repoUrl === repo.html_url
-                                                                    ? 'border-indigo-400 ring-1 ring-indigo-400 shadow-md border-l-4 border-l-indigo-500 glow-ring-blue'
-                                                                    : 'border-slate-200 hover:border-indigo-300 hover:shadow-sm hover:border-l-4 hover:border-l-indigo-300'
-                                                            } rounded-lg cursor-pointer transition-all group`}
-                                                            style={{ animationDelay: `${repoIdx * 80}ms` }}
+                                                {/* Header row: username + Select All / Deselect All */}
+                                                <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                                                    <div className="flex items-center gap-2">
+                                                        <Github className="w-5 h-5 text-slate-700" />
+                                                        <h3 className="font-semibold text-slate-800">
+                                                            Found <span className="text-blue-600">@{githubUsername}</span>
+                                                        </h3>
+                                                        <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                                                            {extractedRepos.length} repos
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <button
+                                                            onClick={() => setSelectedRepos(new Set(extractedRepos.map(r => r.html_url)))}
+                                                            className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors border border-indigo-100"
                                                         >
-                                                            <div className="flex items-start justify-between mb-1">
-                                                                <h4 className="font-medium text-slate-900 group-hover:text-blue-600 transition-colors">
-                                                                    {repo.name}
-                                                                </h4>
-                                                                {repo.language && (
-                                                                    <span className="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-600 rounded whitespace-nowrap">
-                                                                        {repo.language}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            {repo.description && (
-                                                                <p className="text-xs text-slate-500 mb-3 line-clamp-2">
-                                                                    {repo.description}
-                                                                </p>
-                                                            )}
-                                                            <div className="flex items-center gap-3 text-xs text-slate-400">
-                                                                <div className="flex items-center gap-1">
-                                                                    <Star className="w-3.5 h-3.5" />
-                                                                    {repo.stargazers_count}
-                                                                </div>
-                                                                <div className="flex items-center gap-1">
-                                                                    <Clock className="w-3.5 h-3.5" />
-                                                                    Updated {new Date(repo.updated_at).toLocaleDateString()}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    ))}
+                                                            <CheckSquare className="w-3.5 h-3.5" /> Select All
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setSelectedRepos(new Set())}
+                                                            className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-slate-50 text-slate-500 hover:bg-slate-100 transition-colors border border-slate-200"
+                                                        >
+                                                            <Square className="w-3.5 h-3.5" /> Deselect All
+                                                        </button>
+                                                    </div>
                                                 </div>
+
+                                                <p className="text-sm text-slate-500 mb-3">
+                                                    {selectedRepos.size > 0
+                                                        ? <><strong className="text-indigo-600">{selectedRepos.size}</strong> repo{selectedRepos.size > 1 ? "s" : ""} selected — click to toggle</>
+                                                        : "Click repos to select them for analysis:"}
+                                                </p>
+
+                                                <div className="space-y-3 pb-2">
+                                                    {extractedRepos.map((repo, repoIdx) => {
+                                                        const isSelected = selectedRepos.has(repo.html_url);
+                                                        return (
+                                                            <div
+                                                                key={repo.name}
+                                                                onClick={() => toggleRepoSelection(repo.html_url)}
+                                                                className={`p-4 bg-white border animate-slide-in-left ${
+                                                                    isSelected
+                                                                        ? "border-indigo-400 ring-1 ring-indigo-400 shadow-md border-l-4 border-l-indigo-500"
+                                                                        : "border-slate-200 hover:border-indigo-300 hover:shadow-sm hover:border-l-4 hover:border-l-indigo-300"
+                                                                } rounded-lg cursor-pointer transition-all group`}
+                                                                style={{ animationDelay: `${repoIdx * 80}ms` }}
+                                                            >
+                                                                <div className="flex items-start justify-between mb-1">
+                                                                    <h4 className="font-medium text-slate-900 group-hover:text-blue-600 transition-colors flex items-center gap-2">
+                                                                        {/* Checkbox indicator */}
+                                                                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-all ${isSelected ? "bg-indigo-500 border-indigo-500" : "border-slate-300 group-hover:border-indigo-300"}`}>
+                                                                            {isSelected && <CheckCircle className="w-3 h-3 text-white" />}
+                                                                        </div>
+                                                                        {repo.name}
+                                                                    </h4>
+                                                                    {repo.language && (
+                                                                        <span className="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-600 rounded whitespace-nowrap ml-2 flex-shrink-0">
+                                                                            {repo.language}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                {repo.description && (
+                                                                    <p className="text-xs text-slate-500 mb-3 line-clamp-2 ml-6">
+                                                                        {repo.description}
+                                                                    </p>
+                                                                )}
+                                                                <div className="flex items-center gap-3 text-xs text-slate-400 ml-6">
+                                                                    <div className="flex items-center gap-1">
+                                                                        <Star className="w-3.5 h-3.5" />
+                                                                        {repo.stargazers_count}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-1">
+                                                                        <Clock className="w-3.5 h-3.5" />
+                                                                        Updated {new Date(repo.updated_at).toLocaleDateString()}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+
+                                                {/* Start Analyzing CTA */}
+                                                <button
+                                                    onClick={handleMultiRepoAnalyze}
+                                                    disabled={selectedRepos.size === 0 || isIngesting || isAnalyzing || !pdfFile}
+                                                    className="mt-4 w-full py-3 px-4 font-bold text-sm text-white rounded-xl flex items-center justify-center gap-2 transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100"
+                                                    style={{
+                                                        background: selectedRepos.size > 0 && pdfFile
+                                                            ? "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)"
+                                                            : "linear-gradient(135deg, #94a3b8 0%, #cbd5e1 100%)",
+                                                        boxShadow: selectedRepos.size > 0 && pdfFile ? "0 8px 25px rgba(99,102,241,0.35)" : "none",
+                                                    }}
+                                                >
+                                                    {(isIngesting || isAnalyzing) ? (
+                                                        <><Loader2 className="w-4 h-4 animate-spin" /> Analyzing {selectedRepos.size} repo{selectedRepos.size > 1 ? "s" : ""}...</>
+                                                    ) : (
+                                                        <><Play className="w-4 h-4" /> Start Analyzing
+                                                            {selectedRepos.size > 0 && <span className="ml-1 px-2 py-0.5 bg-white/20 rounded-full text-xs">{selectedRepos.size} repo{selectedRepos.size > 1 ? "s" : ""}</span>}
+                                                        </>
+                                                    )}
+                                                </button>
+
+                                                {/* Warning if no PDF uploaded but repos selected */}
+                                                {selectedRepos.size > 0 && !pdfFile && (
+                                                    <p className="mt-2 text-xs text-amber-600 text-center flex items-center justify-center gap-1">
+                                                        <AlertCircle className="w-3.5 h-3.5" />
+                                                        {pdfFileName
+                                                            ? <>Re-upload <strong>{pdfFileName}</strong> to enable analysis</>
+                                                            : "Upload your resume PDF to enable analysis"}
+                                                    </p>
+                                                )}
                                             </div>
+
                                         ) : githubUsername ? (
                                             <div className="mt-8 text-center p-6 bg-slate-50 rounded-xl border border-slate-200">
                                                 <AlertCircle className="w-8 h-8 text-amber-500 mx-auto mb-3" />
