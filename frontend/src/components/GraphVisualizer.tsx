@@ -26,6 +26,7 @@ export interface GraphNode {
     color?: string;
     file_path?: string;
     complexity_score?: number;
+    repo_id?: string;  // which repository this node belongs to
 }
 
 export interface GraphLink {
@@ -92,7 +93,24 @@ function getComplexityColor(score: number | undefined): string {
     }
 }
 
-type ColorMode = "type" | "complexity";
+type ColorMode = "type" | "complexity" | "repo";
+
+// Generate a vivid hue from a repo_id string (deterministic)
+function repoColor(repoId: string): string {
+    if (!repoId) return "#64748b";
+    // Hash the string to a 0-360 hue
+    let hash = 0;
+    for (let i = 0; i < repoId.length; i++) hash = repoId.charCodeAt(i) + ((hash << 5) - hash);
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 75%, 60%)`;
+}
+
+// Collect unique repo_ids from a node list for the legend
+function uniqueRepos(nodes: GraphNode[]): string[] {
+    const seen = new Set<string>();
+    nodes.forEach(n => { if (n.repo_id) seen.add(n.repo_id); });
+    return Array.from(seen);
+}
 
 interface GraphNodeInternal extends GraphNode {
     x?: number;
@@ -167,6 +185,17 @@ function NodeInfoPanel({ node, links, onClose }: NodeInfoPanelProps) {
                     <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Name</p>
                     <p className="text-sm font-semibold text-slate-100 break-words">{node.name}</p>
                 </div>
+
+                {/* Repo field */}
+                {node.repo_id && (
+                    <div>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Repository</p>
+                        <p className="text-xs font-semibold break-all" style={{ color: repoColor(node.repo_id) }}>
+                            {node.repo_id.split("/").pop() ?? node.repo_id}
+                        </p>
+                        <p className="text-[10px] text-slate-600 break-all mt-0.5">{node.repo_id}</p>
+                    </div>
+                )}
 
                 {/* File path */}
                 {node.file_path && (
@@ -260,6 +289,7 @@ export default function GraphVisualizer({
     // Get color for a node
     const getNodeColor = useCallback((node: GraphNode): string => {
         if (colorMode === "complexity") return getComplexityColor(node.complexity_score);
+        if (colorMode === "repo") return repoColor(node.repo_id || "");
         return NODE_COLORS[node.type] ?? "#64748b";
     }, [colorMode]);
 
@@ -379,11 +409,17 @@ export default function GraphVisualizer({
 
     const handleNodeLabel = useCallback((rawNode: object): string => {
         const n = rawNode as GraphNode;
-        const color = colorMode === "complexity" ? getComplexityColor(n.complexity_score) : (NODE_COLORS[n.type] ?? "#64748b");
+        const color = colorMode === "complexity"
+            ? getComplexityColor(n.complexity_score)
+            : colorMode === "repo"
+                ? repoColor(n.repo_id || "")
+                : (NODE_COLORS[n.type] ?? "#64748b");
+        const repoShort = n.repo_id ? n.repo_id.split("/").pop() ?? n.repo_id : null;
         return `<div style="background:rgba(15,23,42,0.95);padding:8px 12px;border-radius:10px;font-family:Inter,sans-serif;border:1px solid rgba(255,255,255,0.1);">
   <div style="color:${color};font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase;">${n.type}</div>
   <div style="color:#f1f5f9;font-size:13px;margin-top:3px;font-weight:600;">${n.name}</div>
   ${n.file_path ? `<div style="color:#94a3b8;font-size:10px;margin-top:3px;">${n.file_path}</div>` : ""}
+  ${repoShort ? `<div style="color:#818cf8;font-size:10px;margin-top:3px;">📁 ${repoShort}</div>` : ""}
   ${n.complexity_score != null ? `<div style="color:#fbbf24;font-size:10px;margin-top:3px;">Complexity: ${n.complexity_score}</div>` : ""}
 </div>`;
     }, [colorMode]);
@@ -424,7 +460,7 @@ export default function GraphVisualizer({
 
                 {/* Color mode pills */}
                 <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.1)", background: "rgba(15,23,42,0.8)", backdropFilter: "blur(12px)" }}>
-                    {(["type", "complexity"] as ColorMode[]).map(mode => (
+                    {(["type", "complexity", "repo"] as ColorMode[]).map(mode => (
                         <button
                             key={mode}
                             onClick={() => setColorMode(mode)}
@@ -434,7 +470,7 @@ export default function GraphVisualizer({
                                 color: colorMode === mode ? "#c7d2fe" : "#64748b",
                             }}
                         >
-                            {mode === "type" ? "Type" : "Complexity"}
+                            {mode === "type" ? "Type" : mode === "complexity" ? "Complexity" : "Repo"}
                         </button>
                     ))}
                 </div>
@@ -492,6 +528,21 @@ export default function GraphVisualizer({
                                 </button>
                             ))}
                             <p className="text-[9px] text-slate-600 mt-1">Click to toggle</p>
+                        </>
+                    ) : colorMode === "repo" ? (
+                        <>
+                            <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-2">Repositories</p>
+                            {uniqueRepos(nodes).map(rid => {
+                                const short = rid.split("/").pop() ?? rid;
+                                const c = repoColor(rid);
+                                return (
+                                    <div key={rid} className="flex items-center gap-2 mb-1.5">
+                                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c, boxShadow: `0 0 6px ${c}` }} />
+                                        <span className="text-[10px] text-slate-300 truncate" title={rid}>{short}</span>
+                                    </div>
+                                );
+                            })}
+                            {uniqueRepos(nodes).length === 0 && <p className="text-[9px] text-slate-600">No repo info on nodes</p>}
                         </>
                     ) : (
                         <>

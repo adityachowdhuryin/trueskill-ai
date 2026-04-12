@@ -26,7 +26,6 @@ function CompanyAvatar({ name }: { name: string }) {
         .map((w) => w[0]?.toUpperCase() ?? "")
         .join("");
 
-    // Hash company name to pick a consistent gradient
     const hash = name.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const gradients = [
         "from-blue-500 to-indigo-600",
@@ -48,7 +47,22 @@ function CompanyAvatar({ name }: { name: string }) {
     );
 }
 
+/** Determine if a URL is a real, clickable job link (not a placeholder). */
+function isValidApplyUrl(url: string): boolean {
+    if (!url) return false;
+    try {
+        const parsed = new URL(url);
+        // Reject example.com placeholders
+        if (parsed.hostname === "example.com") return false;
+        return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+        return false;
+    }
+}
+
 export default function JobCard({ job, onSelect, isSelected = false, index = 0 }: JobCardProps) {
+    const hasValidLink = isValidApplyUrl(job.apply_url);
+
     return (
         <div
             className="group relative rounded-2xl border transition-all duration-300 cursor-pointer hover:-translate-y-0.5 overflow-hidden"
@@ -102,7 +116,7 @@ export default function JobCard({ job, onSelect, isSelected = false, index = 0 }
                 </p>
 
                 {/* Meta row */}
-                <div className="flex flex-wrap items-center gap-2 mb-3">
+                <div className="flex flex-wrap items-center gap-2 mb-4">
                     {job.location && (
                         <span
                             className="flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full"
@@ -134,11 +148,12 @@ export default function JobCard({ job, onSelect, isSelected = false, index = 0 }
 
                 {/* Actions */}
                 <div className="flex items-center gap-2">
+                    {/* "Use This Job" selector button */}
                     <button
                         onClick={(e) => { e.stopPropagation(); onSelect(job); }}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200"
+                        className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all duration-200"
                         style={{
-                            background: isSelected ? "rgba(99,102,241,0.3)" : "rgba(99,102,241,0.15)",
+                            background: isSelected ? "rgba(99,102,241,0.3)" : "rgba(99,102,241,0.12)",
                             border: "1px solid rgba(99,102,241,0.4)",
                             color: "#a5b4fc",
                         }}
@@ -146,21 +161,36 @@ export default function JobCard({ job, onSelect, isSelected = false, index = 0 }
                         <Sparkles size={11} />
                         {isSelected ? "Selected ✓" : "Use This Job"}
                     </button>
-                    <a
-                        href={job.apply_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all duration-200 hover:opacity-80"
-                        style={{
-                            background: "rgba(255,255,255,0.05)",
-                            border: "1px solid rgba(255,255,255,0.1)",
-                            color: "#64748b",
-                        }}
-                    >
-                        <ExternalLink size={10} />
-                        Apply
-                    </a>
+
+                    {/* Apply Now — prominent, always visible */}
+                    {hasValidLink ? (
+                        <a
+                            href={job.apply_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-bold transition-all duration-200 hover:scale-[1.02] hover:opacity-90"
+                            style={{
+                                background: "linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(5,150,105,0.15) 100%)",
+                                border: "1px solid rgba(16,185,129,0.4)",
+                                color: "#6ee7b7",
+                            }}
+                        >
+                            <ExternalLink size={11} />
+                            Apply Now →
+                        </a>
+                    ) : (
+                        <span
+                            className="flex-1 flex items-center justify-center gap-1 py-1.5 px-3 rounded-lg text-xs font-medium opacity-40 cursor-not-allowed"
+                            style={{
+                                background: "rgba(255,255,255,0.04)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                color: "#64748b",
+                            }}
+                        >
+                            Link unavailable
+                        </span>
+                    )}
                 </div>
             </div>
         </div>
