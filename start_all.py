@@ -3,9 +3,15 @@
 TrueSkill AI — Master Startup Script
 =====================================
 Launches the entire development stack with a single command:
-  1. Neo4j (via docker-compose)
-  2. FastAPI Backend (uvicorn with hot-reload)
-  3. Next.js Frontend (npm run dev)
+  1. FastAPI Backend (uvicorn with hot-reload)
+  2. Next.js Frontend (npm run dev)
+
+Neo4j is hosted on Neo4j AuraDB (cloud) — no local Docker instance needed.
+Configure backend/.env with:
+    NEO4J_URI=neo4j+s://<your-instance>.databases.neo4j.io
+    NEO4J_USERNAME=<username>
+    NEO4J_PASSWORD=<password>
+    NEO4J_DATABASE=<database>
 
 Usage:
     python3 start_all.py
@@ -19,7 +25,7 @@ import os
 import socket
 
 # ──────────────────────────────────────
-#  Patch PATH so docker/npm are found
+#  Patch PATH so npm/uvicorn are found
 #  (needed when launched from IDE or GUI)
 # ──────────────────────────────────────
 EXTRA_PATHS = [
@@ -28,9 +34,8 @@ EXTRA_PATHS = [
     "/usr/bin",
     "/bin",
 ]
-current_path = os.environ.get("PATH", "")
 for p in EXTRA_PATHS:
-    if p not in current_path:
+    if p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
 
 # ──────────────────────────────────────
@@ -42,7 +47,6 @@ FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
 
 BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
-DB_STARTUP_WAIT = 10  # seconds to wait for a *freshly started* Neo4j
 
 # ──────────────────────────────────────
 #  Helpers
@@ -73,14 +77,6 @@ def _free_port(port: int) -> None:
         print(f"    ⚠️  Could not free port {port}: {e}")
 
 
-def _run_docker(*args, **kwargs):
-    """Try `docker compose` first, fall back to `docker-compose`."""
-    try:
-        return subprocess.run(["docker", "compose"] + list(args), **kwargs)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return subprocess.run(["docker-compose"] + list(args), **kwargs)
-
-
 def cleanup(sig=None, frame=None):
     """Gracefully terminate all child processes."""
     print("\n🛑  Shutting down all services...")
@@ -97,35 +93,47 @@ signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 
 # ──────────────────────────────────────
-#  Step A — Start Database (Neo4j)
+#  Header
 # ──────────────────────────────────────
 print("=" * 50)
 print("🚀  TrueSkill AI — Master Startup")
 print("=" * 50)
 
-print("\n📦  [Step A] Starting Neo4j via docker compose...")
-try:
-    _run_docker("up", "-d", "neo4j", cwd=ROOT_DIR, check=True)
-    neo4j_freshly_started = True
-except Exception as e:
-    print(f"    ⚠️  docker compose failed: {e}")
-    print("    Assuming Neo4j is already running and continuing...")
-    neo4j_freshly_started = False
+# ──────────────────────────────────────
+#  Step A — Verify AuraDB configuration
+# ──────────────────────────────────────
+print("\n☁️   [Step A] Checking Neo4j AuraDB configuration...")
+env_file = os.path.join(BACKEND_DIR, ".env")
 
-if neo4j_freshly_started:
-    print(f"⏳  Waiting {DB_STARTUP_WAIT}s for Neo4j to be ready...")
-    for i in range(DB_STARTUP_WAIT, 0, -1):
-        print(f"    {i}s remaining...", end="\r", flush=True)
-        time.sleep(1)
-    print("    Neo4j should be ready now.    ")
+if not os.path.exists(env_file):
+    print("    ⚠️  backend/.env not found!")
+    print("    Copy backend/.env.example → backend/.env and add your:")
+    print("        NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE")
+    print("    Continuing anyway — backend will log the error on startup.")
 else:
-    print("    Skipping wait — Neo4j already running.")
+    neo4j_uri = ""
+    with open(env_file) as f:
+        for line in f:
+            if line.startswith("NEO4J_URI="):
+                neo4j_uri = line.split("=", 1)[1].strip()
+                break
+
+    if not neo4j_uri:
+        print("    ⚠️  NEO4J_URI not set in backend/.env.")
+    elif "localhost" in neo4j_uri or ("bolt://" in neo4j_uri and "aura" not in neo4j_uri):
+        print(f"    ⚠️  NEO4J_URI still points to localhost ({neo4j_uri}).")
+        print("    TrueSkill AI uses Neo4j AuraDB (cloud) — update your .env.")
+    else:
+        print(f"    ✅  AuraDB URI detected: {neo4j_uri[:50]}...")
+
+    print(f"    ℹ️   DB health will be available at: "
+          f"http://localhost:{BACKEND_PORT}/api/health/db")
 
 # ──────────────────────────────────────
-#  Step B — Free ports & start Backend
+#  Step B — Install deps & start Backend
 # ──────────────────────────────────────
 requirements_file = os.path.join(BACKEND_DIR, "requirements.txt")
-venv_dir = os.path.join(BACKEND_DIR, "venv")
+venv_dir          = os.path.join(BACKEND_DIR, "venv")
 
 # Create virtualenv if it doesn't exist
 if not os.path.exists(venv_dir):
@@ -133,7 +141,7 @@ if not os.path.exists(venv_dir):
     subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
     print("    Virtualenv created.")
 
-# Determine pip / uvicorn inside virtualenv
+# Determine pip / uvicorn paths inside the virtualenv
 if sys.platform == "win32":
     pip_path     = os.path.join(venv_dir, "Scripts", "pip")
     uvicorn_path = os.path.join(venv_dir, "Scripts", "uvicorn")
@@ -172,14 +180,14 @@ backend_proc = subprocess.Popen(
 )
 processes.append(backend_proc)
 
-# Give uvicorn a moment to bind
+# Give uvicorn a moment to bind before checking
 time.sleep(2)
 if backend_proc.poll() is not None:
     print("❌  Backend failed to start! Check uvicorn logs above.")
     cleanup()
 
 # ──────────────────────────────────────
-#  Step C — Free port & start Frontend
+#  Step C — Start Frontend
 # ──────────────────────────────────────
 if _port_in_use(FRONTEND_PORT):
     print(f"\n⚠️  Port {FRONTEND_PORT} busy — freeing it...")
@@ -202,13 +210,13 @@ print("=" * 50)
 print(f"   Frontend      → http://localhost:{FRONTEND_PORT}")
 print(f"   Backend API   → http://localhost:{BACKEND_PORT}")
 print(f"   API Docs      → http://localhost:{BACKEND_PORT}/docs")
-print(f"   Neo4j Browser → http://localhost:7474")
+print(f"   DB Health     → http://localhost:{BACKEND_PORT}/api/health/db")
 print("\n   Press Ctrl+C to stop all services.\n")
 
-# Keep alive — only exit if the user hits Ctrl+C
+# Keep alive — only exit if the user hits Ctrl+C (or a process dies)
 try:
     while True:
-        for proc in processes:
+        for proc in list(processes):
             ret = proc.poll()
             if ret is not None:
                 name = "Backend" if proc is backend_proc else "Frontend"
