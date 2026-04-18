@@ -12,12 +12,25 @@ from pydantic_settings import BaseSettings
 
 
 class Neo4jSettings(BaseSettings):
-    """Neo4j connection settings loaded from environment variables"""
-    
+    """Neo4j connection settings loaded from environment variables.
+    Supports both local Docker (NEO4J_USER) and AuraDB cloud (NEO4J_USERNAME).
+    """
+
     neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
+    # AuraDB uses NEO4J_USERNAME; local Docker uses NEO4J_USER.
+    # We read both and prefer USERNAME when set.
+    neo4j_username: str = "neo4j"   # maps to NEO4J_USERNAME env var
+    neo4j_user: str = ""            # maps to NEO4J_USER env var (legacy fallback)
     neo4j_password: str = "trueskill_password"
-    
+    neo4j_database: str = "neo4j"   # maps to NEO4J_DATABASE env var
+
+    @property
+    def effective_user(self) -> str:
+        """Return the correct username, preferring NEO4J_USERNAME over NEO4J_USER."""
+        if self.neo4j_username and self.neo4j_username != "neo4j":
+            return self.neo4j_username
+        return self.neo4j_user or self.neo4j_username or "neo4j"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -40,9 +53,10 @@ class Neo4jConnection:
     def __init__(self):
         if self._driver is None:
             settings = Neo4jSettings()
+            self._settings = settings
             self._driver = GraphDatabase.driver(
                 settings.neo4j_uri,
-                auth=(settings.neo4j_user, settings.neo4j_password)
+                auth=(settings.effective_user, settings.neo4j_password)
             )
     
     @property
@@ -71,35 +85,37 @@ class Neo4jConnection:
             return False
     
     @contextmanager
-    def get_session(self, database: str = "neo4j") -> Generator[Session, None, None]:
+    def get_session(self, database: Optional[str] = None) -> Generator[Session, None, None]:
         """
         Context manager for Neo4j sessions.
         Ensures proper session cleanup after use.
-        
+        Uses the configured NEO4J_DATABASE by default (critical for AuraDB).
+
         Usage:
             with neo4j_driver.get_session() as session:
                 result = session.run("MATCH (n) RETURN n LIMIT 10")
         """
-        session = self.driver.session(database=database)
+        db = database or getattr(self, '_settings', None) and self._settings.neo4j_database or "neo4j"
+        session = self.driver.session(database=db)
         try:
             yield session
         finally:
             session.close()
     
     def execute_query(
-        self, 
-        query: str, 
+        self,
+        query: str,
         parameters: Optional[dict[str, Any]] = None,
-        database: str = "neo4j"
+        database: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
         Execute a Cypher query and return results as a list of dictionaries.
-        
+
         Args:
             query: Cypher query string
             parameters: Optional query parameters
-            database: Target database name
-            
+            database: Target database name (defaults to NEO4J_DATABASE env var)
+
         Returns:
             List of result records as dictionaries
         """
@@ -111,16 +127,16 @@ class Neo4jConnection:
         self,
         query: str,
         parameters: Optional[dict[str, Any]] = None,
-        database: str = "neo4j"
+        database: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Execute a write transaction and return summary info.
-        
+
         Args:
             query: Cypher query string for write operation
             parameters: Optional query parameters
-            database: Target database name
-            
+            database: Target database name (defaults to NEO4J_DATABASE env var)
+
         Returns:
             Dictionary with counters from the result summary
         """
