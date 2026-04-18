@@ -9,7 +9,7 @@ from collections import defaultdict
 from functools import wraps
 
 from typing import Optional, Union
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl, field_validator
 
@@ -94,6 +94,7 @@ class GraphResponse(BaseModel):
     """Response model for graph data"""
     nodes: list[dict]
     edges: list[dict]
+    meta: dict = {}  # total_nodes, returned_nodes, total_edges, returned_edges, was_sampled
 
 
 class GitHubRepo(BaseModel):
@@ -460,39 +461,114 @@ async def analyze_multi_repos(
 
 
 # =============================================================================
-# Graph Data Endpoint (Improvement #4 — backend side)
+# Graph Data Endpoint — smart sampling, multi-repo, server-side edge filter
 # =============================================================================
 
 @router.get("/graph/{repo_id}", response_model=GraphResponse)
-async def get_graph_data(repo_id: str):
+async def get_graph_data(
+    repo_id: str,
+    limit: int = Query(default=5000, ge=100, le=25000, description="Max nodes to return"),
+):
     """
-    GET /api/graph/{repo_id}
-    Returns Nodes/Edges for frontend visualization.
-    """
-    # Query all nodes and relationships for the repository
-    nodes_query = """
-    MATCH (n)
-    WHERE n.repo_id = $repo_id OR $repo_id = 'all'
-    RETURN n, labels(n) as labels, elementId(n) as nodeId
-    LIMIT 1000
-    """
+    GET /api/graph/{repo_id}?limit=5000
+    repo_id can be a single id OR comma-separated ids for multi-repo.
+    Returns sampled Nodes/Edges for frontend visualization with a meta summary.
 
-    edges_query = """
-    MATCH (a)-[r]->(b)
-    WHERE a.repo_id = $repo_id OR $repo_id = 'all'
-    RETURN elementId(a) as sourceId, type(r) as relationship, elementId(b) as targetId
-    LIMIT 1000
+    Sampling strategy (priority order to fill `limit` slots):
+      1. All File nodes       (structural backbone)
+      2. All Class nodes
+      3. Function nodes       (ordered by complexity_score DESC — most complex first)
+      4. Import nodes         (fill remaining slots)
+
+    Edges are returned ONLY for pairs where BOTH endpoints are in the sampled set,
+    preventing dangling references that crash react-force-graph-3d.
     """
+    # Parse comma-separated repo_ids for multi-repo support
+    repo_ids = [r.strip() for r in repo_id.split(",") if r.strip()]
+    is_multi = len(repo_ids) > 1
+
+    # Build the WHERE clause dynamically
+    if is_multi:
+        where_clause = "WHERE n.repo_id IN $repo_ids"
+        edge_where_clause = "WHERE a.repo_id IN $repo_ids"
+        params: dict = {"repo_ids": repo_ids}
+    else:
+        where_clause = "WHERE n.repo_id = $repo_id"
+        edge_where_clause = "WHERE a.repo_id = $repo_id"
+        params = {"repo_id": repo_ids[0]}
 
     try:
-        nodes_result = query_graph(nodes_query, {"repo_id": repo_id})
-        edges_result = query_graph(edges_query, {"repo_id": repo_id})
+        # ── Step 1: Count total nodes per type ──────────────────────────────
+        count_query = f"""
+        MATCH (n)
+        {where_clause}
+        RETURN labels(n)[0] AS label, count(n) AS cnt
+        """
+        count_results = query_graph(count_query, params)
+        type_counts = {r["label"]: r["cnt"] for r in count_results if r["label"]}
+        total_nodes = sum(type_counts.values())
 
-        nodes = []
-        for r in nodes_result:
+        # ── Step 2: Fetch nodes by priority, respecting limit ───────────────
+        remaining = limit
+        sampled_nodes: list[dict] = []
+
+        # Priority 1 — File nodes (always include all if possible)
+        if remaining > 0:
+            file_q = f"""
+            MATCH (n:File)
+            {where_clause}
+            RETURN n, labels(n) AS labels, elementId(n) AS nodeId
+            LIMIT $cap
+            """
+            results = query_graph(file_q, {**params, "cap": remaining})
+            sampled_nodes.extend(results)
+            remaining -= len(results)
+
+        # Priority 2 — Class nodes
+        if remaining > 0:
+            class_q = f"""
+            MATCH (n:Class)
+            {where_clause}
+            RETURN n, labels(n) AS labels, elementId(n) AS nodeId
+            LIMIT $cap
+            """
+            results = query_graph(class_q, {**params, "cap": remaining})
+            sampled_nodes.extend(results)
+            remaining -= len(results)
+
+        # Priority 3 — Function nodes ordered by complexity DESC
+        if remaining > 0:
+            func_q = f"""
+            MATCH (n:Function)
+            {where_clause}
+            RETURN n, labels(n) AS labels, elementId(n) AS nodeId
+            ORDER BY n.complexity_score DESC
+            LIMIT $cap
+            """
+            results = query_graph(func_q, {**params, "cap": remaining})
+            sampled_nodes.extend(results)
+            remaining -= len(results)
+
+        # Priority 4 — Import nodes (fill remaining slots)
+        if remaining > 0:
+            import_q = f"""
+            MATCH (n:Import)
+            {where_clause}
+            RETURN n, labels(n) AS labels, elementId(n) AS nodeId
+            LIMIT $cap
+            """
+            results = query_graph(import_q, {**params, "cap": remaining})
+            sampled_nodes.extend(results)
+
+        # ── Step 3: Build node response + collect nodeId set ────────────────
+        nodes: list[dict] = []
+        sampled_node_ids: set[str] = set()
+
+        for r in sampled_nodes:
             node = r.get("n", {})
             labels = r.get("labels", [])
             node_id = r.get("nodeId", str(hash(str(node))))
+            sampled_node_ids.add(node_id)
 
             # Determine node type for frontend coloring
             node_type = "File"
@@ -513,17 +589,45 @@ async def get_graph_data(repo_id: str):
                 "properties": dict(node),
             })
 
+        # ── Step 4: Fetch edges and filter to sampled nodes only ────────────
+        # Fetching a large edge set then filtering server-side prevents dangling
+        # references that crash the react-force-graph-3d physics engine.
+        edges_query = f"""
+        MATCH (a)-[r]->(b)
+        {edge_where_clause}
+        RETURN elementId(a) AS sourceId, type(r) AS relationship, elementId(b) AS targetId
+        LIMIT $edge_cap
+        """
+        # Fetch up to 4x the node limit to ensure good edge coverage after filtering
+        edge_cap = min(limit * 4, 100000)
+        raw_edges = query_graph(edges_query, {**params, "edge_cap": edge_cap})
 
-        edges = [
+        # Server-side filter: only edges where BOTH endpoints are in the sampled set
+        edges: list[dict] = [
             {
                 "source": r["sourceId"],
                 "target": r["targetId"],
-                "type": r["relationship"]
+                "type": r["relationship"],
             }
-            for r in edges_result
+            for r in raw_edges
+            if r["sourceId"] in sampled_node_ids and r["targetId"] in sampled_node_ids
         ]
 
-        return GraphResponse(nodes=nodes, edges=edges)
+        was_sampled = total_nodes > len(nodes)
+
+        return GraphResponse(
+            nodes=nodes,
+            edges=edges,
+            meta={
+                "total_nodes": total_nodes,
+                "returned_nodes": len(nodes),
+                "total_edges": len(raw_edges),
+                "returned_edges": len(edges),
+                "was_sampled": was_sampled,
+                "repo_ids": repo_ids,
+            },
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Graph query failed: {str(e)}")
 

@@ -212,9 +212,11 @@ def _demo_jobs(role: str, location: str) -> list[JobPosting]:
 # Step 3 — Find hiring manager via Apollo.io + LLM fallback
 # =============================================================================
 
-# Apollo.io v1/people/search is accessible on free-tier keys.
-# v1/mixed_people/search requires a paid plan.
+# Apollo.io endpoints
+# v1/people/search requires a paid plan — returns list of matching contacts.
+# v1/people/match is on free tier — requires name+company, returns enriched contact.
 APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/v1/people/search"
+APOLLO_PEOPLE_MATCH_URL  = "https://api.apollo.io/v1/people/match"
 
 
 async def find_hiring_manager(
@@ -239,8 +241,9 @@ async def find_hiring_manager_enhanced(
     Enhanced hiring manager search.
 
     Priority:
-    1. Apollo.io API (if key configured) — up to 3 real contacts
-    2. LLM-generated search suggestions + email pattern guesses (always)
+    1. Apollo.io /v1/people/search (paid plan) — up to 3 real contacts
+    2. Apollo.io /v1/people/match  (free tier)  — name+company enrichment
+    3. LLM-generated search suggestions + email pattern guesses (always)
 
     Returns HiringManagerSearchResult with primary, alternatives, and search hints.
     """
@@ -250,7 +253,7 @@ async def find_hiring_manager_enhanced(
     alternatives: list[HiringManagerResult] = []
     primary: Optional[HiringManagerResult] = None
 
-    # ── Try Apollo.io ──────────────────────────────────────────────────────────
+    # ── Try Apollo.io people/search (paid) ────────────────────────────────────
     if apollo_key:
         apollo_results = await _apollo_search_multiple(
             apollo_key, company_name, resolved_domain, job_title
@@ -258,6 +261,14 @@ async def find_hiring_manager_enhanced(
         if apollo_results:
             primary = apollo_results[0]
             alternatives = apollo_results[1:]
+
+    # ── If paid search gave nothing, try Apollo /people/match (free tier) ─────
+    if primary is None and apollo_key:
+        match_result = await _apollo_people_match(
+            apollo_key, company_name, resolved_domain, job_title
+        )
+        if match_result:
+            primary = match_result
 
     # ── LLM-generated search suggestions ──────────────────────────────────────
     search_suggestions, email_patterns = await _llm_generate_search_hints(
@@ -267,7 +278,7 @@ async def find_hiring_manager_enhanced(
     # ── Build LinkedIn search URLs ─────────────────────────────────────────────
     linkedin_urls = _build_linkedin_search_urls(company_name, job_title)
 
-    # ── If Apollo gave nothing, build pattern-based primary ───────────────────
+    # ── If Apollo gave nothing, build multi-pattern primary ───────────────────
     if primary is None:
         primary = _build_pattern_primary(company_name, resolved_domain, linkedin_urls)
 
@@ -275,16 +286,16 @@ async def find_hiring_manager_enhanced(
     if not primary.linkedin_search_url and linkedin_urls:
         primary = primary.model_copy(update={"linkedin_search_url": linkedin_urls[0]})
 
-    # Build alternative contacts from search suggestions (LinkedIn + email patterns)
-    if not alternatives and len(email_patterns) > 1:
-        for ep in email_patterns[1:3]:
+    # Build alternative contacts from email patterns when Apollo didn't return any
+    if not alternatives and email_patterns:
+        for i, ep in enumerate(email_patterns[:3]):
             alternatives.append(HiringManagerResult(
                 name="",
                 email=ep,
                 title="Hiring Team",
                 confidence="Guessed",
                 source="Pattern",
-                linkedin_search_url=linkedin_urls[1] if len(linkedin_urls) > 1 else "",
+                linkedin_search_url=linkedin_urls[i + 1] if len(linkedin_urls) > i + 1 else "",
             ))
 
     return HiringManagerSearchResult(
@@ -302,7 +313,10 @@ async def _apollo_search_multiple(
     company_domain: str,
     job_title: str,
 ) -> list[HiringManagerResult]:
-    """Call Apollo.io and return up to 3 HiringManagerResult objects."""
+    """
+    Call Apollo.io /v1/people/search (requires paid plan) and return up to 3 results.
+    Returns empty list on 402/403 (plan restriction) so caller can try the free-tier match.
+    """
     hiring_titles = [
         "Hiring Manager",
         "Technical Recruiter",
@@ -314,8 +328,9 @@ async def _apollo_search_multiple(
         "Director of Engineering",
     ]
 
+    # NOTE: api_key must ONLY go in the X-Api-Key header, NOT in the request body.
+    # Sending it in the body can cause 401 errors on some Apollo API versions.
     payload: dict = {
-        "api_key": api_key,   # Some Apollo tiers require api_key in body
         "page": 1,
         "per_page": 5,
         "person_titles": hiring_titles,
@@ -327,7 +342,7 @@ async def _apollo_search_multiple(
         payload["organization_name"] = company_name
 
     headers = {
-        "X-Api-Key": api_key,           # Header-based auth
+        "X-Api-Key": api_key,
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Cache-Control": "no-cache",
@@ -336,18 +351,16 @@ async def _apollo_search_multiple(
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(APOLLO_PEOPLE_SEARCH_URL, json=payload, headers=headers)
-            if response.status_code == 401:
-                print(f"[Apollo] 401 Unauthorized — check APOLLO_API_KEY validity")
-                return []
-            if response.status_code == 403:
-                print(f"[Apollo] 403 Forbidden — key may not have people search access")
+            if response.status_code in (401, 402, 403):
+                print(f"[Apollo] /people/search returned {response.status_code} — "
+                      f"key may be free-tier only. Falling back to /people/match.")
                 return []
             if response.status_code != 200:
-                print(f"[Apollo] Non-200 response: {response.status_code} — {response.text[:200]}")
+                print(f"[Apollo] /people/search non-200: {response.status_code} — {response.text[:200]}")
                 return []
             data = response.json()
     except Exception as e:
-        print(f"[Apollo] Request error: {e}")
+        print(f"[Apollo] /people/search request error: {e}")
         return []
 
     people = data.get("people", [])
@@ -376,7 +389,7 @@ async def _apollo_search_multiple(
                 confidence = "Not Found"
                 source = "Apollo (no email)"
         else:
-            source = "Apollo"
+            source = "Apollo-Search"
 
         lk_search = _build_linkedin_search_urls(company_name, job_title)
         results.append(HiringManagerResult(
@@ -390,6 +403,84 @@ async def _apollo_search_multiple(
         ))
 
     return results
+
+
+async def _apollo_people_match(
+    api_key: str,
+    company_name: str,
+    company_domain: str,
+    job_title: str,
+) -> Optional[HiringManagerResult]:
+    """
+    Call Apollo.io /v1/people/match (free-tier endpoint).
+    Tries a set of common hiring manager first+last name combos to find enriched data.
+    Returns the first successful match, or None.
+    """
+    # Common names for HR/recruiting roles — used to probe the enrichment endpoint
+    name_probes = [
+        ("Talent", "Acquisition"),
+        ("HR", "Manager"),
+        ("Recruiting", "Team"),
+    ]
+
+    headers = {
+        "X-Api-Key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+    }
+
+    for first, last in name_probes:
+        payload: dict = {
+            "first_name": first,
+            "last_name": last,
+            "organization_name": company_name,
+        }
+        if company_domain:
+            payload["domain"] = company_domain
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(APOLLO_PEOPLE_MATCH_URL, json=payload, headers=headers)
+                if resp.status_code not in (200, 201):
+                    continue
+                data = resp.json()
+                person = data.get("person") or {}
+                if not person:
+                    continue
+
+                p_first = person.get("first_name", "")
+                p_last  = person.get("last_name", "")
+                name    = f"{p_first} {p_last}".strip()
+                email   = person.get("email", "") or ""
+                title   = person.get("title", "Hiring Team")
+                linkedin = person.get("linkedin_url", "") or ""
+
+                if email and "@" in email:
+                    confidence = "High"
+                    source = "Apollo-Match"
+                elif p_first and p_last and company_domain:
+                    email = f"{p_first.lower()}.{p_last.lower()}@{company_domain}"
+                    confidence = "Medium"
+                    source = "Apollo-Match"
+                else:
+                    continue  # Skip — not useful without at least a guessable email
+
+                lk_search = _build_linkedin_search_urls(company_name, job_title)
+                return HiringManagerResult(
+                    name=name,
+                    email=email,
+                    title=title,
+                    confidence=confidence,
+                    source=source,
+                    linkedin_url=linkedin,
+                    linkedin_search_url=lk_search[0] if lk_search else "",
+                )
+        except Exception as e:
+            print(f"[Apollo] /people/match error: {e}")
+            continue
+
+    return None
 
 
 async def _llm_generate_search_hints(
@@ -467,12 +558,17 @@ def _build_pattern_primary(
     company_domain: str,
     linkedin_urls: list[str],
 ) -> HiringManagerResult:
-    """Build a pattern-based primary result when Apollo isn't available."""
-    email = f"hiring@{company_domain}" if company_domain else ""
+    """Build a pattern-based primary result when Apollo isn't available.
+    Uses the most common corporate talent acquisition email patterns.
+    """
+    # Use the most likely contact address; alternatives surface the other patterns
+    primary_email = f"talent@{company_domain}" if company_domain else ""
+    if not primary_email:
+        primary_email = f"careers@{company_domain}" if company_domain else ""
     return HiringManagerResult(
         name="",
-        email=email,
-        title="Hiring Team",
+        email=primary_email,
+        title="Talent Acquisition",
         confidence="Guessed",
         source="Pattern",
         linkedin_url="",

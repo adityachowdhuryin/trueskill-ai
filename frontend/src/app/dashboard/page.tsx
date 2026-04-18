@@ -227,10 +227,11 @@ export default function DashboardPage() {
     const [extractionError, setExtractionError] = useState<string | null>(null);
     const [isManualMode, setIsManualMode] = useState(false);
 
-    // Graph data state (Improvement #4 — real data from API)
+    // Graph data state
     const [graphNodes, setGraphNodes] = useState<GraphNode[]>([]);
     const [graphLinks, setGraphLinks] = useState<GraphLink[]>([]);
     const [isLoadingGraph, setIsLoadingGraph] = useState(false);
+    const [graphMeta, setGraphMeta] = useState<Record<string, unknown> | null>(null);
 
     // Coach state
     const [jobDescription, setJobDescription] = useState("");
@@ -262,11 +263,12 @@ export default function DashboardPage() {
     const [isSaving, setIsSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
 
-    // Fetch real graph data when repo is ingested (Improvement #4)
+    // Fetch real graph data when repo is ingested
     const fetchGraphData = useCallback(async (rid: string) => {
         setIsLoadingGraph(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/graph/${rid}`);
+            // Use limit=5000 to capture large repos; backend samples by priority (complexity)
+            const response = await fetch(`${API_BASE_URL}/api/graph/${rid}?limit=5000`);
             if (!response.ok) throw new Error("Failed to fetch graph data");
             const data = await response.json();
 
@@ -287,6 +289,7 @@ export default function DashboardPage() {
 
             setGraphNodes(nodes);
             setGraphLinks(links);
+            setGraphMeta(data.meta ?? null);
         } catch (err) {
             console.error("Graph fetch error:", err);
         } finally {
@@ -483,10 +486,10 @@ export default function DashboardPage() {
             setRepoId(ids[0]);
             setIsIngesting(false);
 
-            // Step 2: Set graphRepoId — 'all' for multiple repos, single id for one
-            // Using state instead of calling fetchGraphData directly so the useEffect
-            // handles it cleanly rather than racing with the repoId setter above.
-            setGraphRepoId(ids.length > 1 ? "all" : ids[0]);
+            // Step 2: Set graphRepoId — comma-separated ids for multi-repo, single id for one.
+            // The updated backend parses comma-separated repo_ids so each repo's nodes
+            // are correctly scoped and edges are validated server-side (no dangling refs).
+            setGraphRepoId(ids.join(","));
 
             // Step 3: Run multi-repo analysis
             setIsAnalyzing(true);
@@ -1394,6 +1397,7 @@ export default function DashboardPage() {
                                                 nodes={graphNodes}
                                                 links={graphLinks}
                                                 onNodeClick={handleNodeClick}
+                                                graphMeta={graphMeta}
                                             />
                                         ) : (
                                             <div className="h-full flex flex-col items-center justify-center bg-slate-900 rounded-lg text-slate-400">
@@ -1709,6 +1713,7 @@ export default function DashboardPage() {
                     onClose={() => setIsGraphFullscreen(false)}
                     onNodeClick={handleNodeClick}
                     isLoading={isLoadingGraph}
+                    graphMeta={graphMeta}
                 />
             )}
         </div>

@@ -19,6 +19,7 @@ interface GraphFullscreenModalProps {
     onClose: () => void;
     onNodeClick?: (node: GraphNode) => void;
     isLoading?: boolean;
+    graphMeta?: Record<string, unknown> | null;
 }
 
 export default function GraphFullscreenModal({
@@ -27,6 +28,7 @@ export default function GraphFullscreenModal({
     onClose,
     onNodeClick,
     isLoading = false,
+    graphMeta = null,
 }: GraphFullscreenModalProps) {
     const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -191,6 +193,7 @@ export default function GraphFullscreenModal({
                             onNodeClick={onNodeClick}
                             isFullscreen={true}
                             showSearch={true}
+                            graphMeta={graphMeta}
                         />
                     ) : (
                         <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#475569" }}>

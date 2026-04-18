@@ -48,3 +48,6 @@ trueskill_*/
 htmlcov/
 .coverage
 .pytest_cache/
+
+# Neo4j AuraDB credential files (contain sensitive passwords)
+Neo4j-*.txt

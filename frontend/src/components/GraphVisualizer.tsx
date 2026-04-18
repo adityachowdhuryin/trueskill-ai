@@ -43,6 +43,7 @@ interface GraphVisualizerProps {
     onNodeClick?: (node: GraphNode) => void;
     isFullscreen?: boolean;
     showSearch?: boolean;
+    graphMeta?: Record<string, unknown> | null;  // sampling metadata from backend
 }
 
 // Vibrant, neon-accented color palette for node types
@@ -245,6 +246,7 @@ export default function GraphVisualizer({
     onNodeClick,
     isFullscreen = false,
     showSearch = true,
+    graphMeta = null,
 }: GraphVisualizerProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fgRef = useRef<any>();
@@ -652,6 +654,25 @@ export default function GraphVisualizer({
                 links={links}
                 onClose={() => setSelectedNode(null)}
             />
+
+            {/* ─── Sampling indicator banner ────────────────────────────── */}
+            {graphMeta?.was_sampled && (
+                <div
+                    className="absolute top-3 right-4 z-10 text-[11px] px-3 py-1.5 rounded-lg flex items-center gap-2"
+                    style={{ background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.3)", backdropFilter: "blur(8px)" }}
+                    title={`Repository has ${graphMeta.total_nodes as number} nodes total. Top ${graphMeta.returned_nodes as number} shown, prioritised by complexity score.`}
+                >
+                    <span style={{ color: "#fb923c" }}>⚡</span>
+                    <span style={{ color: "#fed7aa" }}>
+                        Showing{" "}
+                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.returned_nodes as number}</span>
+                        {" "}of{" "}
+                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.total_nodes as number}</span>
+                        {" "}nodes
+                        <span className="opacity-60 ml-1">(sampled by complexity)</span>
+                    </span>
+                </div>
+            )}
 
             {/* ─── Bottom hint ─────────────────────────────────────────────── */}
             <div
