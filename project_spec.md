@@ -20,7 +20,7 @@
 | **AI Orchestration** | LangChain, LangGraph |
 | **LLM** | Groq — Llama 3.3 70B (`langchain_groq`) |
 | **AST Parsing** | tree-sitter (Python, JS, TS, Go, Java, Rust) |
-| **Graph Database** | Neo4j (Docker local or AuraDB Free Tier) |
+| **Graph Database** | Neo4j AuraDB (cloud free tier) — `neo4j+s://` protocol |
 | **Relational Storage** | SQLite (`trueskill_analyses.db`) via `storage.py` |
 | **HTTP Client** | httpx (async, for GitHub API / Jooble / Apollo.io) |
 | **PDF Parser** | PyPDF2 |
@@ -38,7 +38,7 @@
 | **Resume Optimizer** | `resume_optimizer.py` | LLM keyword rewriting + personalized email drafting |
 | **Report Generator** | `report.py` | Self-contained HTML verification report |
 | **Storage** | `storage.py` | SQLite CRUD for saving & comparing analyses |
-| **Database** | `db.py` | Neo4j driver + `query_graph()` helper |
+| **Database** | `db.py` | Neo4j AuraDB driver + `query_graph()` helper; supports `NEO4J_USERNAME` / `NEO4J_DATABASE` |
 | **LLM Client** | `llm.py` | Shared Gemini 2.5 Flash client + JSON parser |
 | **API** | `api.py` | 18+ FastAPI endpoints with rate limiting |
 
@@ -163,7 +163,7 @@ Multi-step sequential workflow available at `/resume-toolkit`:
 
 1. **Job Search** — PDF → LLM infers role + location → Jooble API → ranked job list
 2. **ATS Optimization** — PDF + JD → keyword gap analysis → LLM rewrites Skills/Summary
-3. **Hiring Manager Lookup** — Company name + title → Apollo.io search → email pattern guess
+3. **Hiring Manager Lookup** — Company name + title → Apollo.io `/people/search` (paid plan) → `/people/match` (free tier) → email pattern guess
 4. **Email Drafting** — PDF + job posting + hiring manager → LLM-personalized cold email
 
 ### Workflow 4: Skill Coaching
@@ -182,7 +182,11 @@ All endpoints are registered under `/api` prefix with in-memory rate limiting (1
 POST   /api/ingest                     { github_url }           → IngestResponse
 POST   /api/extract-profile            { pdf_file }             → ExtractProfileResponse
 POST   /api/analyze                    { pdf_file, repo_id }    → SSE stream (progress + JSON)
-GET    /api/graph/{repo_id}                                     → GraphResponse
+POST   /api/analyze/multi              { pdf_file, repo_ids[] } → merged AnalysisResponse JSON
+GET    /api/graph/{repo_id}?limit=5000                          → GraphResponse (nodes, edges, meta)
+         # repo_id can be comma-separated for multi-repo: /api/graph/id1,id2
+         # ?limit=N controls max nodes (default 5000, max 25000)
+         # meta field: { total_nodes, returned_nodes, was_sampled, repo_ids[] }
 GET    /api/skill-timeline/{repo_id}                           → timeline by language
 GET    /api/forensics/{repo_id}                                → authorship + stylometry
 ```
@@ -208,6 +212,7 @@ POST   /api/export-report              { ...results }                        →
 POST   /api/resume-toolkit/find-jobs             { pdf_file, location_override? }
 POST   /api/resume-toolkit/optimize-keywords     { pdf_file, job_description, missing_keywords }
 POST   /api/resume-toolkit/find-hiring-manager   { company_name, job_title, company_domain? }
+         # Priority: Apollo /people/search (paid) → /people/match (free tier) → LLM pattern
 POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring_manager }
 ```
 
@@ -242,20 +247,24 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 
 ### Local Development
 ```bash
-python start_all.py   # starts Neo4j + FastAPI + Next.js
+python start_all.py   # verifies AuraDB config, then starts FastAPI + Next.js
 ```
 
-### Docker (Production)
+The script checks `backend/.env` for a valid `NEO4J_URI` and warns if it still
+points to localhost. DB health is accessible at `http://localhost:8000/api/health/db`.
+
+### Docker (Production — Frontend + Backend only)
 ```bash
-docker compose up -d   # all 3 services
+docker compose up -d   # backend + frontend (Neo4j is AuraDB, not containerised)
 ```
 
 ### Required Environment Variables
 ```env
-# Neo4j
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=trueskill_password
+# Neo4j AuraDB (cloud) — get from console.neo4j.io
+NEO4J_URI=neo4j+s://<instance-id>.databases.neo4j.io
+NEO4J_USERNAME=<username>       # note: USERNAME not USER
+NEO4J_PASSWORD=<password>
+NEO4J_DATABASE=<database-name>
 
 # Groq (required — powers all LLM calls via langchain_groq)
 GROQ_API_KEY=your_groq_api_key_here
@@ -263,7 +272,9 @@ GROQ_API_KEY=your_groq_api_key_here
 # GitHub Token (optional — avoids public API rate limits)
 GITHUB_TOKEN=your_github_token_here
 
-# Optional
+# Optional integrations
 JOOBLE_API_KEY=your_jooble_key
-APOLLO_API_KEY=your_apollo_key
+APOLLO_API_KEY=your_apollo_key   # Free tier enables /people/match fallback
 ```
+
+> **Security:** `.env` and `Neo4j-*.txt` files are both excluded via `.gitignore`.

@@ -2,7 +2,7 @@
 
 Automated Competency Verification System using GraphRAG (Graph-based Retrieval Augmented Generation).
 
-A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis — using cyclomatic complexity scoring, coding stylometry, and a Neo4j knowledge graph.
+A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis — using cyclomatic complexity scoring, coding stylometry, and a **Neo4j AuraDB** knowledge graph.
 
 ---
 
@@ -22,7 +22,7 @@ trueskill-ai/
 │   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
 │   │   ├── storage.py               # SQLite persistence for saved analyses
-│   │   ├── db.py                    # Neo4j driver & query helpers
+│   │   ├── db.py                    # Neo4j AuraDB driver & query helpers
 │   │   └── llm.py                   # Shared LLM client (Gemini 2.5 Flash)
 │   ├── main.py                      # FastAPI entry point
 │   ├── requirements.txt
@@ -36,18 +36,18 @@ trueskill-ai/
 │       │   ├── compare/             # Multi-candidate comparison view
 │       │   └── resume-toolkit/      # 4-step AI Resume Toolkit
 │       └── components/
-│           ├── GraphVisualizer.tsx  # 3D force-graph (react-force-graph-3d)
+│           ├── GraphVisualizer.tsx  # 3D force-graph with smart sampling banner
+│           ├── GraphFullscreenModal.tsx
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
 │           ├── SkillCard.tsx        # Per-claim verification card
 │           ├── ResumeOptimizer.tsx  # ATS keyword rewriting UI
 │           ├── EmailComposer.tsx    # Personalized outreach email UI
 │           ├── JobCard.tsx          # Job posting card
 │           ├── SkillTimeline.tsx    # Language timeline chart
-│           ├── GraphFullscreenModal.tsx
 │           ├── Navbar.tsx           # Scroll-aware shared navbar
 │           ├── Skeletons.tsx        # Loading skeletons
 │           └── AnimatedCounter.tsx
-├── docker-compose.yml               # Neo4j + Backend + Frontend
+├── docker-compose.yml               # (Legacy) local Neo4j container config
 ├── start_all.py                     # One-command dev stack launcher
 └── README.md
 ```
@@ -57,9 +57,9 @@ trueskill-ai/
 ## Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose (for Neo4j)
 - Node.js 20+ (for frontend)
 - Python 3.11+ (for backend)
+- A **Neo4j AuraDB** free-tier instance — [console.neo4j.io](https://console.neo4j.io)
 
 ### Option 1 — One-Command Launch (Recommended)
 
@@ -68,7 +68,7 @@ python start_all.py
 ```
 
 This script automatically:
-1. Starts Neo4j via Docker Compose
+1. Verifies your AuraDB configuration in `backend/.env`
 2. Creates a Python virtualenv and installs backend deps
 3. Starts FastAPI with hot-reload on `:8000`
 4. Starts Next.js dev server on `:3000`
@@ -77,18 +77,13 @@ Press `Ctrl+C` to stop all services gracefully.
 
 ### Option 2 — Manual
 
-**Start Database:**
-```bash
-docker compose up neo4j -d
-```
-
 **Backend:**
 ```bash
 cd backend
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in GOOGLE_API_KEY, etc.
+cp .env.example .env   # fill in your AuraDB credentials + API keys
 uvicorn main:app --reload
 ```
 
@@ -105,9 +100,7 @@ npm run dev
 | Frontend | http://localhost:3000 |
 | Backend API | http://localhost:8000 |
 | API Docs (Swagger) | http://localhost:8000/docs |
-| Neo4j Browser | http://localhost:7474 |
-
-Neo4j credentials: `neo4j / trueskill_password`
+| DB Health Check | http://localhost:8000/api/health/db |
 
 ---
 
@@ -119,7 +112,8 @@ Neo4j credentials: `neo4j / trueskill_password`
 | `POST` | `/api/ingest` | Clone GitHub repo & build Neo4j knowledge graph |
 | `POST` | `/api/extract-profile` | Extract GitHub username from PDF + fetch repo list |
 | `POST` | `/api/analyze` | Run agent workflow (SSE streaming response) |
-| `GET`  | `/api/graph/{repo_id}` | Return nodes & edges for 3D graph visualization |
+| `POST` | `/api/analyze/multi` | Run analysis across multiple repos (merged result) |
+| `GET`  | `/api/graph/{repo_id}?limit=5000` | Nodes & edges for 3D graph — supports comma-separated repo IDs for multi-repo |
 | `GET`  | `/api/skill-timeline/{repo_id}` | File timeline grouped by language |
 | `GET`  | `/api/forensics/{repo_id}` | Authorship & stylometry data |
 
@@ -144,14 +138,14 @@ Neo4j credentials: `neo4j / trueskill_password`
 |--------|----------|-------------|
 | `POST` | `/api/resume-toolkit/find-jobs` | Infer role from resume, search Jooble |
 | `POST` | `/api/resume-toolkit/optimize-keywords` | ATS keyword rewriting via LLM |
-| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io hiring manager lookup |
+| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io lookup (paid) → people/match (free) → pattern fallback |
 | `POST` | `/api/resume-toolkit/draft-email` | Draft personalized outreach email |
 
 ### Health
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/health` | Application health check |
-| `GET` | `/api/health/db` | Neo4j connectivity check |
+| `GET` | `/api/health/db` | Neo4j AuraDB connectivity check |
 
 ---
 
@@ -166,7 +160,7 @@ Neo4j credentials: `neo4j / trueskill_password`
 | **AI Orchestration** | LangChain, LangGraph |
 | **LLM** | Groq — Llama 3.3 70B (`langchain_groq`) |
 | **AST Parsing** | tree-sitter (Python, JS, TS, Go, Java, Rust) |
-| **Graph Database** | Neo4j (Docker or AuraDB) |
+| **Graph Database** | Neo4j AuraDB (cloud) |
 | **Relational Storage** | SQLite (`trueskill_analyses.db`) |
 | **HTTP Client** | httpx (async) |
 | **PDF Extraction** | PyPDF2 |
@@ -188,8 +182,16 @@ Results stream back to the frontend via **Server-Sent Events (SSE)**.
 ### Ingestion Engine
 - Shallow-clones GitHub repos (depth=1, LFS-safe)
 - Parses **6 languages**: Python, JavaScript, TypeScript, Go, Java, Rust via tree-sitter
-- Extracts `File`, `Class`, `Function`, `Import` nodes + relationships into Neo4j
+- Extracts `File`, `Class`, `Function`, `Import` nodes + relationships into Neo4j AuraDB
 - Computes **cyclomatic complexity** for every function
+
+### 3D Knowledge Graph (Smart Sampling)
+The `/api/graph/{repo_id}` endpoint supports large repositories without capping at 1000 nodes:
+- **Default limit**: 5,000 nodes (configurable up to 25,000 via `?limit=N`)
+- **Sampling priority**: Files → Classes → Functions (top complexity first) → Imports
+- **Multi-repo**: Pass comma-separated IDs (`/api/graph/repo1,repo2`) for a combined view
+- **Server-side edge filtering**: Only edges between sampled nodes are returned — prevents rendering crashes
+- **UI banner**: Graph shows a "Showing X of Y nodes (sampled by complexity)" indicator when sampling is active
 
 ### Stylometric Forensics
 The `forensics.py` module detects AI-generated or copy-pasted code via:
@@ -202,7 +204,7 @@ The `forensics.py` module detects AI-generated or copy-pasted code via:
 A self-contained page (`/resume-toolkit`) that guides users through:
 1. **Job Search** — Upload PDF → LLM infers role/location → Jooble job listings
 2. **ATS Optimization** — Resume vs JD keyword analysis → LLM rewrites Skills/Summary
-3. **Hiring Manager Lookup** — Apollo.io search → email pattern inference
+3. **Hiring Manager Lookup** — Apollo.io paid search → free-tier `/people/match` → email pattern fallback
 4. **Outreach Email** — LLM drafts a personalized cold email for the role
 
 ### Candidate Comparison
@@ -215,10 +217,11 @@ The `/compare` page loads two or more saved analyses side-by-side for HR-style s
 Copy `backend/.env.example` to `backend/.env` and fill in:
 
 ```env
-# Neo4j
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=trueskill_password
+# Neo4j AuraDB (cloud) — get from console.neo4j.io
+NEO4J_URI=neo4j+s://<instance-id>.databases.neo4j.io
+NEO4J_USERNAME=<username>
+NEO4J_PASSWORD=<password>
+NEO4J_DATABASE=<database-name>
 
 # Groq (required — powers all LLM calls)
 GROQ_API_KEY=your_groq_api_key_here
@@ -228,5 +231,7 @@ GITHUB_TOKEN=your_github_token_here
 
 # Optional integrations
 JOOBLE_API_KEY=your_jooble_key
-APOLLO_API_KEY=your_apollo_key
+APOLLO_API_KEY=your_apollo_key   # Free tier: enables /people/match fallback
 ```
+
+> **Security note:** Never commit `.env` or `Neo4j-*.txt` files — both are listed in `.gitignore`.
