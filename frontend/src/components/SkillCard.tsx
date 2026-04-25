@@ -137,8 +137,6 @@ const LEVEL_STYLES: Record<string, string> = {
 // ─── Main Card ────────────────────────────────────────────────────────────────
 export default function SkillCard({ result, index = 0, apiBaseUrl = "http://localhost:8000" }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
-    const contentRef = useRef<HTMLDivElement>(null);
-    const [contentHeight, setContentHeight] = useState(0);
 
     // Feature 5 — Interview Questions state
     const [showInterview, setShowInterview] = useState(false);
@@ -177,12 +175,6 @@ export default function SkillCard({ result, index = 0, apiBaseUrl = "http://loca
     const config = statusConfig[result.status];
     const StatusIcon = config.icon;
 
-    // Measure content height for smooth accordion
-    useEffect(() => {
-        if (contentRef.current) {
-            setContentHeight(contentRef.current.scrollHeight);
-        }
-    }, [isExpanded, result]);
 
     return (
         <div
@@ -220,15 +212,17 @@ export default function SkillCard({ result, index = 0, apiBaseUrl = "http://loca
                 </div>
             </div>
 
-            {/* Expanded Content — smooth max-height accordion */}
+            {/* Expanded Content — smooth accordion */}
             <div
                 style={{
-                    maxHeight: isExpanded ? `${contentHeight}px` : "0px",
-                    transition: "max-height 350ms cubic-bezier(0.4, 0, 0.2, 1)",
+                    maxHeight: isExpanded ? "9999px" : "0px",
+                    transition: isExpanded
+                        ? "max-height 600ms cubic-bezier(0.4, 0, 0.2, 1)"
+                        : "max-height 300ms cubic-bezier(0.4, 0, 0.2, 1)",
                     overflow: "hidden",
                 }}
             >
-                <div ref={contentRef}>
+                <div>
                     <div className="px-5 pb-5 pt-1 border-t border-slate-200/70 space-y-4">
                         {/* Reasoning */}
                         <div>

@@ -14,9 +14,8 @@ import SkillCard from "@/components/SkillCard";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { SkillCardSkeleton, GraphSkeleton } from "@/components/Skeletons";
 import SkillTimeline from "@/components/SkillTimeline";
-import SkillRadar from "@/components/SkillRadar";
+const SkillRadar = dynamic(() => import("@/components/SkillRadar"), { ssr: false });
 import ContributionHeatmap from "@/components/ContributionHeatmap";
-import VerifiedBadge from "@/components/VerifiedBadge";
 import type { GraphNode, GraphLink } from "@/components/GraphVisualizer";
 
 // Dynamically import GraphVisualizer to avoid SSR issues with Three.js
@@ -126,6 +125,7 @@ interface BridgeProject {
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type ViewMode = "cards" | "graph";
+type ResultTab = "skills" | "radar" | "activity" | "graph";
 
 /** Ingestion step-progress loader */
 const INGEST_STEPS = ["Cloning Repository", "Parsing Code", "Building Graph", "Indexing"];
@@ -215,6 +215,7 @@ export default function DashboardPage() {
     const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [viewMode, setViewMode] = useState<ViewMode>("cards");
+    const [resultTab, setResultTab] = useState<ResultTab>("skills");
     const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
     // graphRepoId tracks which repo_id to use for the graph — can be 'all' for multi-repo
@@ -1077,9 +1078,9 @@ export default function DashboardPage() {
                         </div>
                     )}
 
-            {/* Main Content - Split Screen */}
+            {/* Main Content */}
             <main className="max-w-7xl mx-auto p-6 space-y-6">
-                <div className="grid grid-cols-2 gap-6 h-[calc(100vh-380px)]">
+                <div className="grid grid-cols-[380px_1fr] gap-6 items-start">
 
                     {/* Left Panel - PDF Viewer */}
                     <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-white shadow-[0_8px_30px_rgb(0,0,0,0.04)] overflow-hidden flex flex-col hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-shadow duration-300">
@@ -1310,212 +1311,222 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    {/* Right Panel - Evidence & Skill Cards / Graph View */}
-                    <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-white shadow-[0_8px_30px_rgb(0,0,0,0.04)] overflow-hidden flex flex-col hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-shadow duration-300">
-                        <div className="px-5 py-3 border-b border-slate-100 bg-white/50 backdrop-blur-md flex items-center justify-between">
-                            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
-                                {viewMode === "cards" ? <Target className="w-4 h-4 text-violet-500" /> : <Network className="w-4 h-4 text-fuchsia-500" />}
-                                {viewMode === "cards" ? "Verification Results" : "Knowledge Graph"}
+                    {/* ═══════════════════════════════════════════════════════
+                         RIGHT PANEL — Tabbed Results
+                    ═══════════════════════════════════════════════════════ */}
+                    <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-white shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex flex-col min-h-[600px]">
+
+                        {/* Panel header: title + action buttons */}
+                        <div className="px-5 py-3 border-b border-slate-100 bg-white/50 backdrop-blur-md flex items-center justify-between gap-2 flex-shrink-0">
+                            <h2 className="font-semibold text-slate-800 flex items-center gap-2 text-sm">
+                                <Target className="w-4 h-4 text-violet-500" />
+                                Verification Results
+                                {analysisResult && (
+                                    <span className="text-xs font-normal text-slate-400 ml-1">
+                                        {analysisResult.claims_extracted} claims
+                                    </span>
+                                )}
                             </h2>
 
-                            <div className="flex items-center gap-2">
-                                {analysisResult && viewMode === "cards" && (
-                                    <>
-                                        <span className="text-sm text-slate-500 mr-2">
-                                            {analysisResult.claims_extracted} claims analyzed
-                                        </span>
-                                        <button
-                                            onClick={handleExportReport}
-                                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors border border-emerald-200"
-                                        >
-                                            <Download className="w-3.5 h-3.5" />
-                                            Export
-                                        </button>
-                                        <button
-                                            onClick={handleSaveAnalysis}
-                                            disabled={isSaving}
-                                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors border border-blue-200 disabled:opacity-50"
-                                        >
-                                            {saveSuccess ? <CheckCircle className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-                                            {saveSuccess ? "Saved!" : isSaving ? "Saving..." : "Save"}
-                                        </button>
-                                        {/* Feature 1 — Share Button */}
-                                        <button
-                                            id="share-analysis-btn"
-                                            onClick={handleShareAnalysis}
-                                            disabled={isSharing}
-                                            title={shareToken ? `Copied! /profile/${shareToken}` : "Share verified profile"}
-                                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all border disabled:opacity-50"
-                                            style={{
-                                                background: shareCopied ? "rgba(16,185,129,0.08)" : "rgba(99,102,241,0.06)",
-                                                borderColor: shareCopied ? "rgba(16,185,129,0.3)" : "rgba(99,102,241,0.25)",
-                                                color: shareCopied ? "#10b981" : "#6366f1",
-                                            }}
-                                        >
-                                            {isSharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
-                                             shareCopied ? <Check className="w-3.5 h-3.5" /> :
-                                             <Share2 className="w-3.5 h-3.5" />}
-                                            {isSharing ? "Sharing…" : shareCopied ? "Link copied!" : "Share"}
-                                        </button>
-                                        <a
-                                            href="/compare"
-                                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-violet-50 text-violet-700 rounded-lg hover:bg-violet-100 transition-colors border border-violet-200"
-                                        >
-                                            Compare
-                                        </a>
-                                    </>
-                                )}
-
-                                {/* Toggle View Button */}
-                                <div className="flex bg-slate-200 rounded-lg p-1">
+                            {/* Action buttons — only when results exist */}
+                            {analysisResult && (
+                                <div className="flex items-center gap-1.5">
                                     <button
-                                        id="view-cards-btn"
-                                        onClick={() => setViewMode("cards")}
-                                        className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${viewMode === "cards"
-                                            ? "bg-white text-slate-900 shadow-sm"
-                                            : "text-slate-600 hover:text-slate-900"
-                                            }`}
+                                        onClick={handleExportReport}
+                                        title="Export report"
+                                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors border border-emerald-200"
                                     >
-                                        <List className="w-3.5 h-3.5" />
-                                        Cards
+                                        <Download className="w-3.5 h-3.5" />
+                                        Export
                                     </button>
                                     <button
-                                        id="view-graph-btn"
-                                        onClick={() => setViewMode("graph")}
-                                        className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${viewMode === "graph"
-                                            ? "bg-white text-slate-900 shadow-sm"
-                                            : "text-slate-600 hover:text-slate-900"
-                                            }`}
+                                        onClick={handleSaveAnalysis}
+                                        disabled={isSaving}
+                                        title="Save analysis"
+                                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors border border-blue-200 disabled:opacity-50"
                                     >
-                                        <Network className="w-3.5 h-3.5" />
-                                        3D Graph
+                                        {saveSuccess ? <CheckCircle className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+                                        {saveSuccess ? "Saved!" : isSaving ? "Saving…" : "Save"}
                                     </button>
-                                </div>
-
-                                {/* Fullscreen expand button — only in graph mode */}
-                                {viewMode === "graph" && (
                                     <button
-                                        id="graph-fullscreen-btn"
-                                        onClick={() => setIsGraphFullscreen(true)}
-                                        title="Expand to fullscreen"
-                                        className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors border border-indigo-200"
+                                        id="share-analysis-btn"
+                                        onClick={handleShareAnalysis}
+                                        disabled={isSharing}
+                                        title={shareToken ? "Link copied!" : "Share verified profile"}
+                                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-lg transition-all border disabled:opacity-50"
+                                        style={{
+                                            background: shareCopied ? "rgba(16,185,129,0.08)" : "rgba(99,102,241,0.06)",
+                                            borderColor: shareCopied ? "rgba(16,185,129,0.3)" : "rgba(99,102,241,0.25)",
+                                            color: shareCopied ? "#10b981" : "#6366f1",
+                                        }}
                                     >
-                                        <Maximize2 className="w-3.5 h-3.5" />
-                                        Fullscreen
+                                        {isSharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
+                                         shareCopied ? <Check className="w-3.5 h-3.5" /> :
+                                         <Share2 className="w-3.5 h-3.5" />}
+                                        {isSharing ? "Sharing…" : shareCopied ? "Copied!" : "Share"}
                                     </button>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="flex-1 overflow-hidden">
-                            {error && (
-                                <div className="m-4 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
-                                    <AlertCircle className="w-5 h-5 text-red-500 mt-0.5" />
-                                    <div>
-                                        <p className="font-semibold text-red-800">Error</p>
-                                        <p className="text-sm text-red-600 mt-1">{error}</p>
-                                    </div>
+                                    <a
+                                        href="/compare"
+                                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium bg-violet-50 text-violet-700 rounded-lg hover:bg-violet-100 transition-colors border border-violet-200"
+                                    >
+                                        Compare
+                                    </a>
                                 </div>
                             )}
-                            
-                            {viewMode === "cards" ? (
-                                // Skill Cards View
-                                <div className="h-full overflow-y-auto p-4 space-y-3">
-                                    {isAnalyzing ? (
-                                        // Terminal-style Agent UI
-                                        <div className="flex flex-col gap-4 p-6 h-full">
-                                            <div className="flex items-center gap-3">
-                                                <div className="relative flex-shrink-0">
-                                                    <div className="absolute inset-0 bg-indigo-400/20 rounded-full blur-md animate-pulse" />
-                                                    <div className="w-10 h-10 rounded-full bg-white border border-indigo-100 shadow-sm flex items-center justify-center relative z-10">
-                                                        <Loader2 className="w-5 h-5 animate-spin text-indigo-500" />
-                                                    </div>
-                                                </div>
-                                                <div>
-                                                    <h3 className="font-semibold text-slate-800 text-sm">AI Agent Analyzing</h3>
-                                                    <p className="text-xs text-slate-400">Verifying resume claims against code…</p>
+                        </div>
+
+                        {/* Tab bar */}
+                        <div className="flex border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
+                            {([
+                                { id: "skills",   label: "Skills",     icon: <List className="w-3.5 h-3.5" /> },
+                                { id: "radar",    label: "Radar",      icon: <Target className="w-3.5 h-3.5" /> },
+                                { id: "activity", label: "Activity",   icon: <Network className="w-3.5 h-3.5" /> },
+                                { id: "graph",    label: "3D Graph",   icon: <Network className="w-3.5 h-3.5" /> },
+                            ] as { id: ResultTab; label: string; icon: React.ReactNode }[]).map(tab => (
+                                <button
+                                    key={tab.id}
+                                    id={`tab-${tab.id}`}
+                                    onClick={() => setResultTab(tab.id)}
+                                    className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all duration-200 ${
+                                        resultTab === tab.id
+                                            ? "border-indigo-500 text-indigo-600 bg-white"
+                                            : "border-transparent text-slate-500 hover:text-slate-700 hover:bg-white/50"
+                                    }`}
+                                >
+                                    {tab.icon}
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Error banner */}
+                        {error && (
+                            <div className="m-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3 flex-shrink-0">
+                                <AlertCircle className="w-4 h-4 text-red-500 mt-0.5" />
+                                <p className="text-sm text-red-600">{error}</p>
+                            </div>
+                        )}
+
+                        {/* ── Tab: Skills ── */}
+                        {resultTab === "skills" && (
+                            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                {isAnalyzing ? (
+                                    <div className="flex flex-col gap-4 p-6">
+                                        <div className="flex items-center gap-3">
+                                            <div className="relative flex-shrink-0">
+                                                <div className="absolute inset-0 bg-indigo-400/20 rounded-full blur-md animate-pulse" />
+                                                <div className="w-10 h-10 rounded-full bg-white border border-indigo-100 shadow-sm flex items-center justify-center relative z-10">
+                                                    <Loader2 className="w-5 h-5 animate-spin text-indigo-500" />
                                                 </div>
                                             </div>
-                                            <AgentTerminal messages={agentMessages.slice(0, -1)} current={agentStatus} />
+                                            <div>
+                                                <h3 className="font-semibold text-slate-800 text-sm">AI Agent Analyzing</h3>
+                                                <p className="text-xs text-slate-400">Verifying resume claims against code…</p>
+                                            </div>
                                         </div>
-                                    ) : analysisResult?.verification_results.length ? (
-                                        <>
-                                        {analysisResult.verification_results.map((result) => (
-                                            <SkillCard
-                                                key={result.claim_id}
-                                                result={result}
-                                                apiBaseUrl={API_BASE_URL}
-                                            />
-                                        ))}
-                                        {/* Feature 2 — Skill Radar */}
-                                        <div className="pt-2">
-                                            <SkillRadar
-                                                verifiedSkills={analysisResult.verification_results.map(r => ({
-                                                    topic: r.topic,
-                                                    score: r.score,
-                                                    status: r.status,
-                                                }))}
-                                            />
+                                        <AgentTerminal messages={agentMessages.slice(0, -1)} current={agentStatus} />
+                                    </div>
+                                ) : analysisResult?.verification_results.length ? (
+                                    analysisResult.verification_results.map((result) => (
+                                        <SkillCard
+                                            key={result.claim_id}
+                                            result={result}
+                                            apiBaseUrl={API_BASE_URL}
+                                        />
+                                    ))
+                                ) : (
+                                    <div className="h-64 flex flex-col items-center justify-center text-slate-300">
+                                        <div className="relative mb-4">
+                                            <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-200" />
+                                            <AlertCircle className="w-12 h-12 relative z-10 text-slate-300" />
                                         </div>
-                                        </>
+                                        <p className="font-medium text-slate-400">No results yet</p>
+                                        <p className="text-sm mt-1 text-slate-400">Upload a resume and click Analyze to get started</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* ── Tab: Radar ── */}
+                        {resultTab === "radar" && (
+                            <div className="flex-1 overflow-y-auto p-5">
+                                {analysisResult?.verification_results.length ? (
+                                    <SkillRadar
+                                        verifiedSkills={analysisResult.verification_results.map(r => ({
+                                            topic: r.topic,
+                                            score: r.score,
+                                            status: r.status,
+                                        }))}
+                                    />
+                                ) : (
+                                    <div className="h-64 flex flex-col items-center justify-center text-slate-300">
+                                        <Target className="w-12 h-12 mb-3 text-slate-200" />
+                                        <p className="font-medium text-slate-400">Run an analysis first</p>
+                                        <p className="text-sm text-slate-400 mt-1">Radar chart will appear here</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* ── Tab: Activity ── */}
+                        {resultTab === "activity" && (
+                            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                                {/* Contribution Heatmap */}
+                                {repoId ? (
+                                    <ContributionHeatmap repoId={repoId} />
+                                ) : (
+                                    <div className="bg-slate-50 rounded-xl border border-dashed border-slate-200 p-6 text-center">
+                                        <p className="text-sm text-slate-400">Ingest a repository to see contribution heatmap</p>
+                                    </div>
+                                )}
+                                {/* Skill Timeline */}
+                                {Object.keys(timelineData).length > 0 && (
+                                    <SkillTimeline timeline={timelineData} />
+                                )}
+                                {!repoId && Object.keys(timelineData).length === 0 && null}
+                            </div>
+                        )}
+
+                        {/* ── Tab: Graph ── */}
+                        {resultTab === "graph" && (
+                            <div className="flex-1" style={{ minHeight: 500 }}>
+                                <ErrorBoundary fallbackTitle="3D Graph failed to load">
+                                    {isIngesting ? (
+                                        <IngestionLoader active={isIngesting} />
+                                    ) : isLoadingGraph ? (
+                                        <GraphSkeleton />
+                                    ) : graphNodes.length > 0 ? (
+                                        <GraphVisualizer
+                                            nodes={graphNodes}
+                                            links={graphLinks}
+                                            onNodeClick={handleNodeClick}
+                                            graphMeta={graphMeta}
+                                        />
                                     ) : (
-                                        <div className="h-full flex flex-col items-center justify-center text-slate-300">
+                                        <div className="h-full flex flex-col items-center justify-center bg-slate-900 rounded-b-2xl text-slate-400 min-h-[400px]">
                                             <div className="relative mb-4">
-                                                <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-200" />
-                                                <AlertCircle className="w-12 h-12 relative z-10 text-slate-300" />
+                                                <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-700" />
+                                                <Network className="w-12 h-12 relative z-10" />
                                             </div>
-                                            <p className="font-medium text-slate-400">No results yet</p>
-                                            <p className="text-sm mt-1 text-slate-400">
-                                                Upload a resume and click Analyze to get started
-                                            </p>
+                                            <p className="font-medium">No graph data</p>
+                                            <p className="text-sm mt-1">Ingest a repository to see the knowledge graph</p>
                                         </div>
                                     )}
-                                </div>
-                            ) : (
-                                // 3D Graph View — wrapped in ErrorBoundary
-                                <ErrorBoundary fallbackTitle="3D Graph failed to load">
-                                    <div className="h-full">
-                                        {isIngesting ? (
-                                            <IngestionLoader active={isIngesting} />
-                                        ) : isLoadingGraph ? (
-                                            <GraphSkeleton />
-                                        ) : graphNodes.length > 0 ? (
-                                            <GraphVisualizer
-                                                nodes={graphNodes}
-                                                links={graphLinks}
-                                                onNodeClick={handleNodeClick}
-                                                graphMeta={graphMeta}
-                                            />
-                                        ) : (
-                                            <div className="h-full flex flex-col items-center justify-center bg-slate-900 rounded-lg text-slate-400">
-                                                <div className="relative mb-4">
-                                                    <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-700" />
-                                                    <Network className="w-12 h-12 relative z-10" />
-                                                </div>
-                                                <p className="font-medium">No graph data</p>
-                                                <p className="text-sm mt-1">
-                                                    Ingest a repository to see the knowledge graph
-                                                </p>
-                                            </div>
-                                        )}
-                                    </div>
+                                    {/* Fullscreen button */}
+                                    {graphNodes.length > 0 && (
+                                        <button
+                                            id="graph-fullscreen-btn"
+                                            onClick={() => setIsGraphFullscreen(true)}
+                                            className="absolute bottom-4 right-4 flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-indigo-600/90 text-white hover:bg-indigo-700 transition-colors shadow-lg"
+                                        >
+                                            <Maximize2 className="w-3.5 h-3.5" />
+                                            Fullscreen
+                                        </button>
+                                    )}
                                 </ErrorBoundary>
-                            )}
-                        </div>
-
-                        {/* Skill Timeline (Feature 8) */}
-                        {Object.keys(timelineData).length > 0 && (
-                            <div className="px-5 py-4 border-t border-slate-100">
-                                <SkillTimeline timeline={timelineData} />
                             </div>
                         )}
 
-                        {/* Feature 4 — Contribution Heatmap (show for first ingested repo) */}
-                        {repoId && (
-                            <div className="px-5 py-4 border-t border-slate-100">
-                                <ContributionHeatmap repoId={repoId} />
-                            </div>
-                        )}
                     </div>
                 </div>
 

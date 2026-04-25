@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import { GitCommit, TrendingUp, Calendar, Flame } from "lucide-react";
 
 interface WeekData {
-    week: number;    // UNIX epoch (start of week)
+    week: number;
     total: number;
-    days: number[];  // [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+    days: number[];
 }
 
 interface HeatmapSummary {
@@ -29,20 +29,17 @@ interface ContributionHeatmapProps {
     repoId: string;
 }
 
-// Colour intensity scale (dark theme — green family)
 function getCellColor(count: number, max: number): string {
-    if (count === 0) return "rgba(255,255,255,0.04)";
+    if (count === 0) return "#f1f5f9";   // slate-100 — matches light theme
     const ratio = Math.min(count / Math.max(max, 1), 1);
-    if (ratio < 0.25) return "rgba(74,222,128,0.25)";
-    if (ratio < 0.50) return "rgba(74,222,128,0.50)";
-    if (ratio < 0.75) return "rgba(34,197,94,0.72)";
-    return "rgba(22,163,74,0.95)";
+    if (ratio < 0.25) return "#bbf7d0";  // green-200
+    if (ratio < 0.50) return "#4ade80";  // green-400
+    if (ratio < 0.75) return "#16a34a";  // green-600
+    return "#14532d";                    // green-900
 }
 
-// Format epoch to short month label
 function epochToMonth(epoch: number): string {
-    const d = new Date(epoch * 1000);
-    return d.toLocaleString("default", { month: "short" });
+    return new Date(epoch * 1000).toLocaleString("default", { month: "short" });
 }
 
 export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps) {
@@ -55,29 +52,23 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
         if (!repoId) return;
         setLoading(true);
         setError(null);
-
         fetch(`/api/heatmap/${repoId}`)
-            .then(r => {
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                return r.json();
-            })
-            .then(d => {
-                setData(d);
-                setLoading(false);
-            })
-            .catch(e => {
-                setError(e.message);
-                setLoading(false);
-            });
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(d => { setData(d); setLoading(false); })
+            .catch(e => { setError(e.message); setLoading(false); });
     }, [repoId]);
 
     if (loading) {
         return (
-            <div className="rounded-2xl border border-white/8 p-6 animate-pulse" style={{ background: "rgba(255,255,255,0.03)" }}>
-                <div className="h-4 bg-white/10 rounded w-48 mb-4" />
-                <div className="grid grid-cols-[repeat(52,1fr)] gap-0.5">
-                    {Array.from({ length: 52 * 7 }).map((_, i) => (
-                        <div key={i} className="w-3 h-3 rounded-sm bg-white/5" />
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 animate-pulse">
+                <div className="h-4 bg-slate-100 rounded w-48 mb-4" />
+                <div className="flex gap-0.5">
+                    {Array.from({ length: 52 }).map((_, i) => (
+                        <div key={i} className="flex flex-col gap-0.5">
+                            {Array.from({ length: 7 }).map((_, j) => (
+                                <div key={j} className="w-3 h-3 rounded-sm bg-slate-100" />
+                            ))}
+                        </div>
                     ))}
                 </div>
             </div>
@@ -86,15 +77,12 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
 
     if (error || !data || data.weeks.length === 0) {
         return (
-            <div
-                className="rounded-2xl border border-white/8 p-6"
-                style={{ background: "rgba(255,255,255,0.03)" }}
-            >
-                <div className="flex items-center gap-2 mb-2">
-                    <Calendar className="w-4 h-4 text-slate-500" />
-                    <span className="text-sm font-semibold text-slate-400">Contribution Heatmap</span>
+            <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <div className="flex items-center gap-2 mb-1">
+                    <Calendar className="w-4 h-4 text-slate-400" />
+                    <span className="text-sm font-semibold text-slate-600">Contribution Heatmap</span>
                 </div>
-                <p className="text-xs text-slate-500 italic">
+                <p className="text-xs text-slate-400 italic">
                     {error?.includes("404")
                         ? "Heatmap unavailable — re-ingest the repository to enable this feature."
                         : "Heatmap data could not be loaded."}
@@ -106,39 +94,29 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
     const { weeks, summary, owner, repo_name } = data;
     const maxCommits = Math.max(...weeks.map(w => w.total), 1);
 
-    // Build month label positions (show label when month changes across weeks)
     const monthLabels: Array<{ col: number; label: string }> = [];
     let lastMonth = -1;
     weeks.forEach((w, i) => {
         const m = new Date(w.week * 1000).getMonth();
-        if (m !== lastMonth) {
-            monthLabels.push({ col: i, label: epochToMonth(w.week) });
-            lastMonth = m;
-        }
+        if (m !== lastMonth) { monthLabels.push({ col: i, label: epochToMonth(w.week) }); lastMonth = m; }
     });
 
     return (
-        <div
-            className="rounded-2xl border border-white/8 p-6"
-            style={{ background: "rgba(255,255,255,0.03)", backdropFilter: "blur(12px)" }}
-        >
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
             {/* Header */}
-            <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-                <div className="flex items-center gap-2.5">
-                    <div
-                        className="w-9 h-9 rounded-xl flex items-center justify-center"
-                        style={{ background: "linear-gradient(135deg, #22c55e, #16a34a)" }}
-                    >
-                        <GitCommit className="w-4 h-4 text-white" />
+            <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-sm">
+                        <GitCommit className="w-5 h-5 text-white" />
                     </div>
                     <div>
-                        <h3 className="font-bold text-white">Contribution Activity</h3>
-                        <p className="text-xs text-slate-400">
+                        <h3 className="font-bold text-slate-800 text-base">Contribution Activity</h3>
+                        <p className="text-xs text-slate-500">
                             <a
                                 href={`https://github.com/${owner}/${repo_name}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="hover:text-green-400 transition-colors"
+                                className="hover:text-green-600 transition-colors"
                             >
                                 {owner}/{repo_name}
                             </a>
@@ -147,24 +125,23 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
                     </div>
                 </div>
 
-                {/* Stats row */}
-                <div className="flex gap-3 flex-wrap">
-                    <StatPill icon={<GitCommit className="w-3 h-3" />} label="Total" value={summary.total_commits} color="text-green-400" />
-                    <StatPill icon={<Flame className="w-3 h-3" />} label="Peak week" value={summary.peak_week_commits} color="text-orange-400" />
-                    <StatPill icon={<TrendingUp className="w-3 h-3" />} label="Consistency" value={`${summary.consistency_score}%`} color="text-blue-400" />
+                <div className="flex gap-2 flex-wrap">
+                    <StatPill icon={<GitCommit className="w-3 h-3" />} label="Commits" value={summary.total_commits} color="text-emerald-600" bg="bg-emerald-50 border-emerald-200" />
+                    <StatPill icon={<Flame className="w-3 h-3" />} label="Peak" value={summary.peak_week_commits} color="text-orange-600" bg="bg-orange-50 border-orange-200" />
+                    <StatPill icon={<TrendingUp className="w-3 h-3" />} label="Consistency" value={`${summary.consistency_score}%`} color="text-blue-600" bg="bg-blue-50 border-blue-200" />
                 </div>
             </div>
 
-            {/* Heatmap grid */}
-            <div className="overflow-x-auto pb-1">
-                <div className="inline-block min-w-full">
+            {/* Grid */}
+            <div className="overflow-x-auto">
+                <div className="inline-block">
                     {/* Month labels */}
                     <div className="flex mb-1 relative" style={{ paddingLeft: "20px" }}>
                         {monthLabels.map(({ col, label }) => (
                             <div
                                 key={`${col}-${label}`}
-                                className="absolute text-[10px] text-slate-500 font-medium"
-                                style={{ left: `calc(20px + ${col} * (14px))` }}
+                                className="absolute text-[10px] text-slate-400 font-medium"
+                                style={{ left: `calc(20px + ${col} * 14px)` }}
                             >
                                 {label}
                             </div>
@@ -172,14 +149,11 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
                         <div style={{ height: "14px" }} />
                     </div>
 
-                    {/* Day labels + grid */}
                     <div className="flex gap-0.5">
-                        {/* Day of week labels */}
+                        {/* Day labels */}
                         <div className="flex flex-col gap-0.5 mr-1 justify-around">
                             {["", "M", "", "W", "", "F", ""].map((d, i) => (
-                                <div key={i} className="text-[9px] text-slate-600 w-3.5 text-center leading-3 h-3">
-                                    {d}
-                                </div>
+                                <div key={i} className="text-[9px] text-slate-400 w-3.5 text-center leading-3 h-3">{d}</div>
                             ))}
                         </div>
 
@@ -188,18 +162,16 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
                             <div key={week.week} className="flex flex-col gap-0.5">
                                 {week.days.map((count, di) => {
                                     const date = new Date((week.week + di * 86400) * 1000);
-                                    const dateStr = date.toLocaleDateString("en-US", {
-                                        month: "short", day: "numeric", year: "numeric"
-                                    });
+                                    const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+                                    const isHovered = hoveredCell?.week === wi && hoveredCell?.day === di;
                                     return (
                                         <div
                                             key={di}
-                                            className="w-3 h-3 rounded-sm cursor-default transition-all duration-100 hover:scale-125 hover:z-10 relative"
+                                            className="w-3 h-3 rounded-sm cursor-default transition-all duration-75 hover:scale-150 hover:z-10"
                                             style={{
                                                 background: getCellColor(count, maxCommits),
-                                                border: hoveredCell?.week === wi && hoveredCell?.day === di
-                                                    ? "1px solid rgba(255,255,255,0.4)"
-                                                    : "1px solid transparent",
+                                                outline: isHovered ? "2px solid #6366f1" : "none",
+                                                outlineOffset: "1px",
                                             }}
                                             onMouseEnter={() => setHoveredCell({ week: wi, day: di, count, date: dateStr })}
                                             onMouseLeave={() => setHoveredCell(null)}
@@ -212,42 +184,37 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
                 </div>
             </div>
 
-            {/* Tooltip */}
-            {hoveredCell && (
-                <div
-                    className="mt-2 px-3 py-1.5 rounded-lg text-xs text-slate-300 border border-white/8 inline-block"
-                    style={{ background: "rgba(15,23,42,0.8)" }}
-                >
-                    <strong className="text-white">{hoveredCell.count} commit{hoveredCell.count !== 1 ? "s" : ""}</strong>
-                    {" on "}
-                    {hoveredCell.date}
-                </div>
-            )}
+            {/* Hover tooltip */}
+            <div className="mt-3 h-6">
+                {hoveredCell ? (
+                    <span className="text-xs text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 inline-block">
+                        <strong className="text-slate-800">{hoveredCell.count} commit{hoveredCell.count !== 1 ? "s" : ""}</strong>
+                        {" on "}{hoveredCell.date}
+                    </span>
+                ) : null}
+            </div>
 
             {/* Legend */}
-            <div className="flex items-center gap-1.5 mt-3">
-                <span className="text-[10px] text-slate-600">Less</span>
-                {[0, 0.25, 0.5, 0.75, 1].map((r) => (
+            <div className="flex items-center gap-1.5 mt-2">
+                <span className="text-[10px] text-slate-400">Less</span>
+                {[0, 0.25, 0.5, 0.75, 1].map(r => (
                     <div
                         key={r}
-                        className="w-3 h-3 rounded-sm"
-                        style={{ background: r === 0 ? "rgba(255,255,255,0.04)" : getCellColor(Math.round(r * maxCommits), maxCommits) }}
+                        className="w-3 h-3 rounded-sm border border-slate-200"
+                        style={{ background: getCellColor(Math.round(r * maxCommits), maxCommits) }}
                     />
                 ))}
-                <span className="text-[10px] text-slate-600">More</span>
+                <span className="text-[10px] text-slate-400">More</span>
             </div>
         </div>
     );
 }
 
-function StatPill({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: number | string; color: string }) {
+function StatPill({ icon, label, value, color, bg }: { icon: React.ReactNode; label: string; value: number | string; color: string; bg: string }) {
     return (
-        <div
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-white/8 text-xs"
-            style={{ background: "rgba(255,255,255,0.03)" }}
-        >
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs ${bg}`}>
             <span className={color}>{icon}</span>
-            <span className="text-slate-400">{label}:</span>
+            <span className="text-slate-500">{label}:</span>
             <span className={`font-bold ${color}`}>{value}</span>
         </div>
     );

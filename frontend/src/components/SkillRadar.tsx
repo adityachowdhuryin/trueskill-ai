@@ -5,11 +5,16 @@ import {
     Radar, RadarChart, PolarGrid, PolarAngleAxis,
     ResponsiveContainer, Tooltip, Legend
 } from "recharts";
-import { Target, TrendingUp, ChevronDown } from "lucide-react";
+import { Target, TrendingUp, ChevronDown, Loader2 } from "lucide-react";
+
+interface SkillEntry {
+    topic: string;
+    score: number;
+    status: string;
+}
 
 interface SkillRadarProps {
-    verifiedSkills: Array<{ topic: string; score: number; status: string }>;
-    /** Optional pre-loaded benchmark. If omitted, shows role selector. */
+    verifiedSkills: SkillEntry[];
     benchmarkScores?: Record<string, number>;
     benchmarkLabel?: string;
 }
@@ -27,52 +32,68 @@ const ROLE_OPTIONS = [
     { slug: "nlp-engineer",             label: "NLP Engineer" },
 ];
 
-// Recharts tooltip
+// Case-insensitive normaliser for topic matching
+const norm = (s: string) => s.toLowerCase().trim();
+
 function CustomTooltip({ active, payload, label }: any) {
     if (!active || !payload?.length) return null;
     return (
-        <div
-            className="rounded-xl border border-white/10 px-4 py-3 text-sm shadow-2xl"
-            style={{ background: "rgba(15,23,42,0.92)", backdropFilter: "blur(12px)" }}
-        >
-            <p className="font-bold text-white mb-1.5">{label}</p>
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-xl">
+            <p className="font-bold text-slate-800 mb-1.5">{label}</p>
             {payload.map((entry: any) => (
-                <p key={entry.name} style={{ color: entry.color }} className="flex items-center gap-1.5">
+                <p key={entry.name} className="flex items-center gap-1.5 text-slate-600">
                     <span className="w-2 h-2 rounded-full inline-block" style={{ background: entry.color }} />
-                    {entry.name}: <strong>{entry.value}</strong>
+                    {entry.name}: <strong style={{ color: entry.color }}>{entry.value}</strong>
                 </p>
             ))}
         </div>
     );
 }
 
+function RadarSkeleton() {
+    return (
+        <div className="flex items-center justify-center h-[420px]">
+            <div className="text-center">
+                <Loader2 className="w-8 h-8 animate-spin text-indigo-400 mx-auto mb-3" />
+                <p className="text-sm text-slate-400">Loading chart…</p>
+            </div>
+        </div>
+    );
+}
+
 export default function SkillRadar({ verifiedSkills, benchmarkScores, benchmarkLabel }: SkillRadarProps) {
+    // SSR guard — Recharts needs the DOM to measure containers
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => setMounted(true), []);
+
     const [selectedRole, setSelectedRole] = useState(ROLE_OPTIONS[0].slug);
     const [benchmark, setBenchmark] = useState<Record<string, number>>(benchmarkScores ?? {});
     const [benchLabel, setBenchLabel] = useState(benchmarkLabel ?? ROLE_OPTIONS[0].label);
     const [loading, setLoading] = useState(false);
     const [dropdownOpen, setDropdownOpen] = useState(false);
 
-    // Build candidate score map from verified skills (normalised to topic title case)
-    const candidateMap: Record<string, number> = {};
+    // Build candidate map with normalised keys
+    const candidateMap: Record<string, { score: number; label: string }> = {};
     for (const skill of verifiedSkills) {
-        candidateMap[skill.topic] = skill.score;
+        candidateMap[norm(skill.topic)] = { score: skill.score, label: skill.topic };
     }
 
-    // Pick the top 8 topics that are either in candidate or benchmark
-    const allTopics = Array.from(new Set([
-        ...Object.keys(candidateMap),
-        ...Object.keys(benchmark),
-    ])).slice(0, 8);
+    // Build benchmark map with normalised keys
+    const benchNorm: Record<string, { score: number; label: string }> = {};
+    for (const [k, v] of Object.entries(benchmark)) {
+        benchNorm[norm(k)] = { score: v, label: k };
+    }
 
-    const chartData = allTopics.map((topic) => ({
-        topic: topic.length > 16 ? topic.slice(0, 14) + "…" : topic,
-        fullTopic: topic,
-        Candidate: candidateMap[topic] ?? 0,
-        Benchmark: benchmark[topic] ?? 0,
+    // Merge all unique topics (prefer candidate label, fallback to benchmark label)
+    const allNormKeys = Array.from(new Set([...Object.keys(candidateMap), ...Object.keys(benchNorm)]));
+    const top8 = allNormKeys.slice(0, 8);
+
+    const chartData = top8.map(key => ({
+        topic: (candidateMap[key]?.label ?? benchNorm[key]?.label ?? key).slice(0, 18),
+        Candidate: candidateMap[key]?.score ?? 0,
+        Benchmark: benchNorm[key]?.score ?? 0,
     }));
 
-    // Fetch benchmark when role changes
     const fetchBenchmark = async (slug: string, label: string) => {
         setLoading(true);
         try {
@@ -82,83 +103,70 @@ export default function SkillRadar({ verifiedSkills, benchmarkScores, benchmarkL
                 setBenchmark(data.scores ?? {});
                 setBenchLabel(label);
             }
-        } catch {
-            // silent — keep previous benchmark
-        } finally {
-            setLoading(false);
-        }
+        } catch { /* keep previous */ }
+        finally { setLoading(false); }
     };
 
-    // Load default benchmark on mount if not provided externally
     useEffect(() => {
         if (!benchmarkScores) {
-            fetchBenchmark(selectedRole, ROLE_OPTIONS[0].label);
+            fetchBenchmark(ROLE_OPTIONS[0].slug, ROLE_OPTIONS[0].label);
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const handleRoleSelect = (slug: string, label: string) => {
         setSelectedRole(slug);
-        setBenchLabel(label);
         setDropdownOpen(false);
         fetchBenchmark(slug, label);
     };
 
     if (verifiedSkills.length === 0) return null;
 
+    // Gap chips — where candidate trails benchmark by > 15 pts
+    const gaps = chartData
+        .filter(d => d.Benchmark - d.Candidate > 15)
+        .sort((a, b) => (b.Benchmark - b.Candidate) - (a.Benchmark - a.Candidate))
+        .slice(0, 4);
+
     return (
-        <div
-            className="rounded-2xl border border-white/8 p-6"
-            style={{
-                background: "rgba(255,255,255,0.03)",
-                backdropFilter: "blur(12px)",
-            }}
-        >
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
             {/* Header */}
-            <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
-                <div className="flex items-center gap-2.5">
-                    <div
-                        className="w-9 h-9 rounded-xl flex items-center justify-center"
-                        style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)" }}
-                    >
-                        <Target className="w-4 h-4 text-white" />
+            <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-sm">
+                        <Target className="w-5 h-5 text-white" />
                     </div>
                     <div>
-                        <h3 className="font-bold text-white">Skill Radar</h3>
-                        <p className="text-xs text-slate-400">Your verified skills vs industry benchmark</p>
+                        <h3 className="font-bold text-slate-800 text-base">Skill Radar</h3>
+                        <p className="text-xs text-slate-500">Your verified skills vs industry benchmark</p>
                     </div>
                 </div>
 
-                {/* Role selector dropdown */}
+                {/* Role selector */}
                 <div className="relative">
                     <button
                         id="radar-role-selector"
                         onClick={() => setDropdownOpen(!dropdownOpen)}
-                        className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-slate-300 border border-white/10 hover:border-violet-500/40 hover:text-white transition-all duration-200"
-                        style={{ background: "rgba(255,255,255,0.04)" }}
                         disabled={loading}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-slate-700 border border-slate-200 bg-slate-50 hover:border-indigo-300 hover:bg-indigo-50 transition-all duration-200 disabled:opacity-60"
                     >
-                        {loading
-                            ? <span className="animate-pulse">Loading…</span>
-                            : <span className="flex items-center gap-1.5">
-                                <TrendingUp className="w-3.5 h-3.5 text-violet-400" />
-                                {benchLabel}
-                                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
-                            </span>
-                        }
+                        <TrendingUp className="w-3.5 h-3.5 text-indigo-500" />
+                        {loading ? <span className="animate-pulse text-slate-400">Loading…</span> : benchLabel}
+                        <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
                     </button>
 
                     {dropdownOpen && (
-                        <div
-                            className="absolute right-0 top-full mt-1 w-56 rounded-xl border border-white/10 shadow-2xl z-50 overflow-hidden"
-                            style={{ background: "rgba(15,23,42,0.97)", backdropFilter: "blur(20px)" }}
-                        >
-                            {ROLE_OPTIONS.map((role) => (
+                        <div className="absolute right-0 top-full mt-1 w-52 rounded-xl border border-slate-200 bg-white shadow-xl z-50 overflow-hidden">
+                            {ROLE_OPTIONS.map(role => (
                                 <button
                                     key={role.slug}
                                     id={`radar-role-${role.slug}`}
                                     onClick={() => handleRoleSelect(role.slug, role.label)}
-                                    className={`w-full text-left px-4 py-2.5 text-sm hover:bg-violet-500/10 hover:text-violet-300 transition-colors ${selectedRole === role.slug ? "text-violet-400 bg-violet-500/10" : "text-slate-300"}`}
+                                    className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
+                                        selectedRole === role.slug
+                                            ? "bg-indigo-50 text-indigo-700 font-semibold"
+                                            : "text-slate-700 hover:bg-slate-50"
+                                    }`}
                                 >
                                     {role.label}
                                 </button>
@@ -168,71 +176,61 @@ export default function SkillRadar({ verifiedSkills, benchmarkScores, benchmarkL
                 </div>
             </div>
 
-            {/* Chart */}
-            <div style={{ height: 320 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                    <RadarChart data={chartData} margin={{ top: 10, right: 30, bottom: 10, left: 30 }}>
-                        <PolarGrid
-                            stroke="rgba(255,255,255,0.06)"
-                            gridType="polygon"
-                        />
-                        <PolarAngleAxis
-                            dataKey="topic"
-                            tick={{
-                                fill: "#94a3b8",
-                                fontSize: 11,
-                                fontWeight: 500,
-                            }}
-                        />
-                        <Radar
-                            name="Your Skills"
-                            dataKey="Candidate"
-                            stroke="#6366f1"
-                            fill="#6366f1"
-                            fillOpacity={0.25}
-                            strokeWidth={2}
-                        />
-                        <Radar
-                            name={benchLabel}
-                            dataKey="Benchmark"
-                            stroke="#f59e0b"
-                            fill="#f59e0b"
-                            fillOpacity={0.12}
-                            strokeWidth={1.5}
-                            strokeDasharray="5 3"
-                        />
-                        <Tooltip content={<CustomTooltip />} />
-                        <Legend
-                            wrapperStyle={{ fontSize: 12, color: "#94a3b8", paddingTop: 12 }}
-                            formatter={(value) => (
-                                <span style={{ color: value === "Your Skills" ? "#818cf8" : "#fbbf24" }}>{value}</span>
-                            )}
-                        />
-                    </RadarChart>
-                </ResponsiveContainer>
-            </div>
+            {/* Chart — only renders client-side */}
+            {!mounted ? <RadarSkeleton /> : (
+                <div style={{ height: 420 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <RadarChart data={chartData} margin={{ top: 10, right: 40, bottom: 10, left: 40 }}>
+                            <PolarGrid stroke="#e2e8f0" gridType="polygon" />
+                            <PolarAngleAxis
+                                dataKey="topic"
+                                tick={{ fill: "#64748b", fontSize: 12, fontWeight: 500 }}
+                            />
+                            <Radar
+                                name="Your Skills"
+                                dataKey="Candidate"
+                                stroke="#6366f1"
+                                fill="#6366f1"
+                                fillOpacity={0.2}
+                                strokeWidth={2.5}
+                                dot={{ fill: "#6366f1", r: 3 }}
+                            />
+                            <Radar
+                                name={benchLabel}
+                                dataKey="Benchmark"
+                                stroke="#f59e0b"
+                                fill="#f59e0b"
+                                fillOpacity={0.1}
+                                strokeWidth={2}
+                                strokeDasharray="6 3"
+                                dot={{ fill: "#f59e0b", r: 3 }}
+                            />
+                            <Tooltip content={<CustomTooltip />} />
+                            <Legend
+                                wrapperStyle={{ fontSize: 13, paddingTop: 16 }}
+                                formatter={(value) => (
+                                    <span style={{ color: value === "Your Skills" ? "#6366f1" : "#d97706" }}>{value}</span>
+                                )}
+                            />
+                        </RadarChart>
+                    </ResponsiveContainer>
+                </div>
+            )}
 
-            {/* Gap summary chips */}
-            {Object.keys(benchmark).length > 0 && (
-                <div className="mt-4 flex flex-wrap gap-2">
-                    {chartData
-                        .filter(d => d.Benchmark - d.Candidate > 15)
-                        .sort((a, b) => (b.Benchmark - b.Candidate) - (a.Benchmark - a.Candidate))
-                        .slice(0, 4)
-                        .map(d => (
+            {/* Gap chips */}
+            {gaps.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Skill Gaps to Close</p>
+                    <div className="flex flex-wrap gap-2">
+                        {gaps.map(d => (
                             <span
-                                key={d.fullTopic}
-                                className="px-2.5 py-1 rounded-full text-xs font-medium border"
-                                style={{
-                                    background: "rgba(245,158,11,0.08)",
-                                    borderColor: "rgba(245,158,11,0.2)",
-                                    color: "#fbbf24",
-                                }}
+                                key={d.topic}
+                                className="px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 border border-amber-200 text-amber-700"
                             >
-                                ↑ {d.fullTopic} gap: +{d.Benchmark - d.Candidate}pts
+                                ↑ {d.topic}: +{d.Benchmark - d.Candidate}pts needed
                             </span>
-                        ))
-                    }
+                        ))}
+                    </div>
                 </div>
             )}
         </div>
