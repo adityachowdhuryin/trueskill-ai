@@ -394,6 +394,7 @@ export default function DashboardPage() {
     const handleShareAnalysis = useCallback(async () => {
         if (!analysisResult) return;
         setIsSharing(true);
+        setError(null);
         try {
             // If not saved yet, save first
             let aid = savedAnalysisId;
@@ -410,23 +411,34 @@ export default function DashboardPage() {
                         overall_score: analysisResult.summary?.average_score || 0,
                     }),
                 });
+                if (!res.ok) {
+                    const errBody = await res.json().catch(() => ({}));
+                    throw new Error(errBody.detail || `Save failed (${res.status})`);
+                }
                 const saved = await res.json();
                 aid = saved.analysis_id;
                 if (aid) setSavedAnalysisId(aid);
             }
-            if (!aid) throw new Error("Could not save analysis");
+            if (!aid) throw new Error("Could not save analysis — no ID returned");
+
             // Now make shareable
             const shareRes = await fetch(`${API_BASE_URL}/api/analyses/${aid}/share`, { method: "POST" });
+            if (!shareRes.ok) {
+                const errBody = await shareRes.json().catch(() => ({}));
+                throw new Error(errBody.detail || `Share failed (${shareRes.status})`);
+            }
             const shareData = await shareRes.json();
             setShareToken(shareData.share_token);
+
             // Copy to clipboard
             const url = `${window.location.origin}/profile/${shareData.share_token}`;
             navigator.clipboard.writeText(url).then(() => {
                 setShareCopied(true);
                 setTimeout(() => setShareCopied(false), 2500);
-            });
-        } catch (err) {
+            }).catch(() => { /* clipboard not available */ });
+        } catch (err: any) {
             console.error("Share failed:", err);
+            setError(`Share failed: ${err.message ?? "Unknown error"}`);
         } finally {
             setIsSharing(false);
         }

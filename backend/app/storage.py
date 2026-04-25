@@ -38,8 +38,9 @@ def _get_conn() -> sqlite3.Connection:
     """)
 
     # Migrate existing tables that lack the new columns (safe no-op if already present)
+    # NOTE: SQLite does NOT support ADD COLUMN with UNIQUE — omit it here
     try:
-        conn.execute("ALTER TABLE analyses ADD COLUMN share_token TEXT UNIQUE")
+        conn.execute("ALTER TABLE analyses ADD COLUMN share_token TEXT")
     except sqlite3.OperationalError:
         pass
     try:
@@ -130,18 +131,20 @@ def get_analysis(analysis_id: str) -> Optional[dict[str, Any]]:
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    """Convert a sqlite3.Row to a plain dict."""
+    """Convert a sqlite3.Row to a plain dict, resilient to missing columns."""
+    # Use keys() so we don't crash on columns that don't exist in older DB snapshots
+    d: dict[str, Any] = {k: row[k] for k in row.keys()}
     return {
-        "id": row["id"],
-        "candidate_name": row["candidate_name"],
-        "repo_names": json.loads(row["repo_names"] or "[]"),
-        "repo_ids": json.loads(row["repo_ids"] or "[]"),
-        "results": json.loads(row["results_json"] or "{}"),
-        "skills": json.loads(row["skills_json"] or "[]"),
-        "overall_score": row["overall_score"],
-        "created_at": row["created_at"],
-        "is_public": bool(row["is_public"]),
-        "share_token": row["share_token"],
+        "id": d.get("id"),
+        "candidate_name": d.get("candidate_name"),
+        "repo_names": json.loads(d.get("repo_names") or "[]"),
+        "repo_ids": json.loads(d.get("repo_ids") or "[]"),
+        "results": json.loads(d.get("results_json") or "{}"),
+        "skills": json.loads(d.get("skills_json") or "[]"),
+        "overall_score": d.get("overall_score", 0),
+        "created_at": d.get("created_at"),
+        "is_public": bool(d.get("is_public", 0)),
+        "share_token": d.get("share_token"),
     }
 
 
