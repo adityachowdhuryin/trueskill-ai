@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { CheckCircle, XCircle, AlertCircle, ChevronDown, ChevronUp, Code, FileCode, Copy, Check } from "lucide-react";
+import { CheckCircle, XCircle, AlertCircle, ChevronDown, ChevronUp, Code, FileCode, Copy, Check, MessageSquare, Loader2 } from "lucide-react";
 
 interface VerificationResult {
     claim_id: string;
@@ -17,6 +17,7 @@ interface VerificationResult {
 interface SkillCardProps {
     result: VerificationResult;
     index?: number;
+    apiBaseUrl?: string;
 }
 
 // ─── Animated circular score ring ────────────────────────────────────────────
@@ -126,11 +127,52 @@ function EvidenceChip({ nodeId }: { nodeId: string }) {
     );
 }
 
+// ─── Interview question level badge ──────────────────────────────────────────
+const LEVEL_STYLES: Record<string, string> = {
+    Easy:   "bg-emerald-50 text-emerald-700 border-emerald-200",
+    Medium: "bg-amber-50 text-amber-700 border-amber-200",
+    Hard:   "bg-red-50 text-red-700 border-red-200",
+};
+
 // ─── Main Card ────────────────────────────────────────────────────────────────
-export default function SkillCard({ result, index = 0 }: SkillCardProps) {
+export default function SkillCard({ result, index = 0, apiBaseUrl = "http://localhost:8000" }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const contentRef = useRef<HTMLDivElement>(null);
     const [contentHeight, setContentHeight] = useState(0);
+
+    // Feature 5 — Interview Questions state
+    const [showInterview, setShowInterview] = useState(false);
+    const [interviewLoading, setInterviewLoading] = useState(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [interviewData, setInterviewData] = useState<any | null>(null);
+
+    const handleGenerateQuestions = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (interviewData) { setShowInterview(!showInterview); return; }
+        setInterviewLoading(true);
+        setShowInterview(true);
+        try {
+            const res = await fetch(`${apiBaseUrl}/api/interview-questions`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    topic: result.topic,
+                    claim_text: result.claim_text,
+                    difficulty: 3,
+                    evidence_node_ids: result.evidence_node_ids,
+                    code_snippets: result.evidence_node_ids.slice(0, 5),
+                    reasoning: result.reasoning,
+                    num_questions: 5,
+                }),
+            });
+            const data = await res.json();
+            setInterviewData(data);
+        } catch {
+            setInterviewData({ questions: [], error: "Failed to generate questions" });
+        } finally {
+            setInterviewLoading(false);
+        }
+    };
 
     const config = statusConfig[result.status];
     const StatusIcon = config.icon;
@@ -233,6 +275,65 @@ export default function SkillCard({ result, index = 0 }: SkillCardProps) {
                                 </div>
                             </div>
                         )}
+
+                        {/* Feature 5 — Interview Prep Button */}
+                        <div className="pt-1">
+                            <button
+                                id={`interview-btn-${result.claim_id}`}
+                                onClick={handleGenerateQuestions}
+                                disabled={interviewLoading}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 hover:scale-105 active:scale-95 disabled:opacity-60"
+                                style={{
+                                    background: showInterview ? "rgba(99,102,241,0.1)" : "rgba(99,102,241,0.06)",
+                                    border: "1px solid rgba(99,102,241,0.25)",
+                                    color: "#6366f1",
+                                }}
+                            >
+                                {interviewLoading
+                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    : <MessageSquare className="w-3.5 h-3.5" />}
+                                {interviewLoading ? "Generating…" : showInterview ? "Hide Interview Prep" : "Interview Prep"}
+                            </button>
+
+                            {/* Questions panel */}
+                            {showInterview && (
+                                <div className="mt-3 space-y-2.5">
+                                    {interviewLoading && (
+                                        <div className="flex items-center gap-2 py-4 justify-center">
+                                            <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                                            <span className="text-xs text-slate-400">Generating personalised questions…</span>
+                                        </div>
+                                    )}
+                                    {interviewData?.interviewer_note && (
+                                        <p className="text-xs text-slate-500 italic px-3 py-2 rounded-lg border border-indigo-100 bg-indigo-50">
+                                            💡 {interviewData.interviewer_note}
+                                        </p>
+                                    )}
+                                    {(interviewData?.questions ?? []).map((q: any, qi: number) => (
+                                        <div
+                                            key={qi}
+                                            className="p-3 rounded-lg border border-slate-200 bg-white/80 space-y-1.5"
+                                        >
+                                            <div className="flex items-center gap-1.5">
+                                                <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded border ${LEVEL_STYLES[q.level] ?? LEVEL_STYLES.Medium}`}>
+                                                    {q.level}
+                                                </span>
+                                                <span className="text-[10px] text-slate-400">Q{qi + 1}</span>
+                                            </div>
+                                            <p className="text-xs font-medium text-slate-800 leading-relaxed">{q.question}</p>
+                                            {q.expected_answer_hint && (
+                                                <p className="text-[11px] text-slate-500 pl-2 border-l-2 border-slate-200 leading-relaxed">
+                                                    {q.expected_answer_hint}
+                                                </p>
+                                            )}
+                                        </div>
+                                    ))}
+                                    {interviewData?.error && (
+                                        <p className="text-xs text-red-500">{interviewData.error}</p>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>

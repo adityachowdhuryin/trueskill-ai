@@ -7,13 +7,16 @@ import {
     Upload, FileText, Loader2, CheckCircle, XCircle, AlertCircle,
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
-    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square
+    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { SkillCardSkeleton, GraphSkeleton } from "@/components/Skeletons";
 import SkillTimeline from "@/components/SkillTimeline";
+import SkillRadar from "@/components/SkillRadar";
+import ContributionHeatmap from "@/components/ContributionHeatmap";
+import VerifiedBadge from "@/components/VerifiedBadge";
 import type { GraphNode, GraphLink } from "@/components/GraphVisualizer";
 
 // Dynamically import GraphVisualizer to avoid SSR issues with Three.js
@@ -263,6 +266,12 @@ export default function DashboardPage() {
     const [isSaving, setIsSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
 
+    // Feature 1 — Shareable badge state
+    const [shareToken, setShareToken] = useState<string | null>(null);
+    const [isSharing, setIsSharing] = useState(false);
+    const [shareCopied, setShareCopied] = useState(false);
+    const [savedAnalysisId, setSavedAnalysisId] = useState<string | null>(null);
+
     // Fetch real graph data when repo is ingested
     const fetchGraphData = useCallback(async (rid: string) => {
         setIsLoadingGraph(true);
@@ -357,7 +366,7 @@ export default function DashboardPage() {
         if (!analysisResult) return;
         setIsSaving(true);
         try {
-            await fetch(`${API_BASE_URL}/api/analyses`, {
+            const res = await fetch(`${API_BASE_URL}/api/analyses`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -369,6 +378,8 @@ export default function DashboardPage() {
                     overall_score: analysisResult.summary?.average_score || 0,
                 }),
             });
+            const data = await res.json();
+            if (data.analysis_id) setSavedAnalysisId(data.analysis_id);
             setSaveSuccess(true);
             setTimeout(() => setSaveSuccess(false), 3000);
         } catch (err) {
@@ -377,6 +388,48 @@ export default function DashboardPage() {
             setIsSaving(false);
         }
     }, [analysisResult, githubUsername, extractedRepos, selectedRepos, multiRepoIds]);
+
+    // Feature 1 — Share analysis handler
+    const handleShareAnalysis = useCallback(async () => {
+        if (!analysisResult) return;
+        setIsSharing(true);
+        try {
+            // If not saved yet, save first
+            let aid = savedAnalysisId;
+            if (!aid) {
+                const res = await fetch(`${API_BASE_URL}/api/analyses`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        candidate_name: githubUsername || "Candidate",
+                        repo_names: extractedRepos.filter(r => selectedRepos.has(r.html_url)).map(r => r.name),
+                        repo_ids: multiRepoIds,
+                        results: analysisResult,
+                        skills: analysisResult.verification_results?.map(v => ({ topic: v.topic, score: v.score, status: v.status, evidence: v.reasoning })) || [],
+                        overall_score: analysisResult.summary?.average_score || 0,
+                    }),
+                });
+                const saved = await res.json();
+                aid = saved.analysis_id;
+                if (aid) setSavedAnalysisId(aid);
+            }
+            if (!aid) throw new Error("Could not save analysis");
+            // Now make shareable
+            const shareRes = await fetch(`${API_BASE_URL}/api/analyses/${aid}/share`, { method: "POST" });
+            const shareData = await shareRes.json();
+            setShareToken(shareData.share_token);
+            // Copy to clipboard
+            const url = `${window.location.origin}/profile/${shareData.share_token}`;
+            navigator.clipboard.writeText(url).then(() => {
+                setShareCopied(true);
+                setTimeout(() => setShareCopied(false), 2500);
+            });
+        } catch (err) {
+            console.error("Share failed:", err);
+        } finally {
+            setIsSharing(false);
+        }
+    }, [analysisResult, savedAnalysisId, githubUsername, extractedRepos, selectedRepos, multiRepoIds]);
 
     // Toggle repo selection for multi-repo
     const toggleRepoSelection = useCallback((url: string) => {
@@ -1286,6 +1339,24 @@ export default function DashboardPage() {
                                             {saveSuccess ? <CheckCircle className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
                                             {saveSuccess ? "Saved!" : isSaving ? "Saving..." : "Save"}
                                         </button>
+                                        {/* Feature 1 — Share Button */}
+                                        <button
+                                            id="share-analysis-btn"
+                                            onClick={handleShareAnalysis}
+                                            disabled={isSharing}
+                                            title={shareToken ? `Copied! /profile/${shareToken}` : "Share verified profile"}
+                                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all border disabled:opacity-50"
+                                            style={{
+                                                background: shareCopied ? "rgba(16,185,129,0.08)" : "rgba(99,102,241,0.06)",
+                                                borderColor: shareCopied ? "rgba(16,185,129,0.3)" : "rgba(99,102,241,0.25)",
+                                                color: shareCopied ? "#10b981" : "#6366f1",
+                                            }}
+                                        >
+                                            {isSharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
+                                             shareCopied ? <Check className="w-3.5 h-3.5" /> :
+                                             <Share2 className="w-3.5 h-3.5" />}
+                                            {isSharing ? "Sharing…" : shareCopied ? "Link copied!" : "Share"}
+                                        </button>
                                         <a
                                             href="/compare"
                                             className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-violet-50 text-violet-700 rounded-lg hover:bg-violet-100 transition-colors border border-violet-200"
@@ -1368,9 +1439,25 @@ export default function DashboardPage() {
                                             <AgentTerminal messages={agentMessages.slice(0, -1)} current={agentStatus} />
                                         </div>
                                     ) : analysisResult?.verification_results.length ? (
-                                        analysisResult.verification_results.map((result) => (
-                                            <SkillCard key={result.claim_id} result={result} />
-                                        ))
+                                        <>
+                                        {analysisResult.verification_results.map((result) => (
+                                            <SkillCard
+                                                key={result.claim_id}
+                                                result={result}
+                                                apiBaseUrl={API_BASE_URL}
+                                            />
+                                        ))}
+                                        {/* Feature 2 — Skill Radar */}
+                                        <div className="pt-2">
+                                            <SkillRadar
+                                                verifiedSkills={analysisResult.verification_results.map(r => ({
+                                                    topic: r.topic,
+                                                    score: r.score,
+                                                    status: r.status,
+                                                }))}
+                                            />
+                                        </div>
+                                        </>
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center text-slate-300">
                                             <div className="relative mb-4">
@@ -1420,6 +1507,13 @@ export default function DashboardPage() {
                         {Object.keys(timelineData).length > 0 && (
                             <div className="px-5 py-4 border-t border-slate-100">
                                 <SkillTimeline timeline={timelineData} />
+                            </div>
+                        )}
+
+                        {/* Feature 4 — Contribution Heatmap (show for first ingested repo) */}
+                        {repoId && (
+                            <div className="px-5 py-4 border-t border-slate-100">
+                                <ContributionHeatmap repoId={repoId} />
                             </div>
                         )}
                     </div>

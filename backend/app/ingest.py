@@ -1064,10 +1064,10 @@ def _store_file_dates(repo_id: str, file_dates: dict[str, dict[str, str]]) -> No
 async def ingest_repository(github_url: str) -> dict[str, Any]:
     """
     Full ingestion pipeline: clone -> parse -> insert into Neo4j.
-    
+
     Args:
         github_url: GitHub repository URL
-        
+
     Returns:
         Dictionary with repo_id and stats
     """
@@ -1075,23 +1075,37 @@ async def ingest_repository(github_url: str) -> dict[str, Any]:
     try:
         # Step 1: Clone repository
         repo_id, repo_path = clone_repo(github_url)
-        
+
         # Step 2: Parse codebase
         graph_data = parse_codebase(repo_path, repo_id)
-        
+
         # Step 3: Insert into Neo4j
         stats = insert_into_neo4j(graph_data)
 
         # Step 4: Extract and store file dates for timeline
         file_dates = extract_file_dates(repo_path)
         _store_file_dates(repo_id, file_dates)
-        
+
+        # Step 5: Register repo metadata in SQLite (owner/name for heatmap lookups)
+        try:
+            from .storage import register_repo
+            # Parse owner and repo_name from URL
+            # e.g. https://github.com/octocat/Hello-World → owner=octocat, repo_name=Hello-World
+            url_clean = str(github_url).rstrip("/").replace(".git", "")
+            parts = url_clean.split("/")
+            if len(parts) >= 2:
+                owner = parts[-2]
+                repo_name = parts[-1]
+                register_repo(repo_id, github_url, owner, repo_name)
+        except Exception as reg_err:
+            print(f"⚠ Could not register repo metadata: {reg_err}")
+
         return {
             "repo_id": repo_id,
             "status": "success",
             "stats": stats
         }
-        
+
     finally:
         # Clean up cloned repo
         if repo_path:
