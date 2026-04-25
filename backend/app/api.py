@@ -1178,3 +1178,212 @@ async def resume_toolkit_draft_email(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email drafting failed: {str(e)}")
+
+
+# =============================================================================
+# Feature 1 — Shareable Verified Badge
+# =============================================================================
+
+@router.post("/analyses/{analysis_id}/share")
+async def share_analysis(analysis_id: str):
+    """
+    POST /api/analyses/{analysis_id}/share
+    Makes an analysis publicly shareable. Returns a share_token that can be
+    embedded in /profile/{token} URLs.
+    """
+    from .storage import make_shareable
+    token = make_shareable(analysis_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return {
+        "status": "shared",
+        "share_token": token,
+        "profile_url": f"/profile/{token}",
+    }
+
+
+@router.get("/profile/{share_token}")
+async def get_public_profile(share_token: str):
+    """
+    GET /api/profile/{share_token}
+    Returns a public (read-only) analysis result for the given share token.
+    No authentication required — secured by the unguessable token.
+    """
+    from .storage import get_analysis_by_token
+    data = get_analysis_by_token(share_token)
+    if not data:
+        raise HTTPException(status_code=404, detail="Profile not found or not public")
+    return data
+
+
+# =============================================================================
+# Feature 2 — Skill Radar Benchmarks
+# =============================================================================
+
+@router.get("/benchmarks")
+async def list_benchmarks():
+    """GET /api/benchmarks — list all available seeded role benchmarks."""
+    from .benchmarks import list_available_roles
+    return {"roles": list_available_roles()}
+
+
+@router.get("/benchmarks/{role_slug}")
+async def get_role_benchmark(role_slug: str):
+    """
+    GET /api/benchmarks/{role_slug}
+    Returns benchmark skill scores for a named engineering role.
+    Supports slugs like: software-engineer, ml-engineer, data-scientist, devops-engineer, etc.
+    """
+    from .benchmarks import get_benchmark
+    result = get_benchmark(role_slug)
+    if result["source"] == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail=f"No seeded benchmark for '{role_slug}'. Use POST /api/benchmarks/generate for custom roles."
+        )
+    return result
+
+
+class BenchmarkGenerateRequest(BaseModel):
+    role_description: str
+    skill_topics: list[str] = []
+
+
+@router.post("/benchmarks/generate")
+async def generate_benchmark(request: BenchmarkGenerateRequest, req: Request):
+    """
+    POST /api/benchmarks/generate
+    Generate a benchmark for any custom role using the LLM.
+    Body: { role_description: "Senior GenAI Engineer", skill_topics: ["Python", "LLMs", ...] }
+    """
+    from .benchmarks import get_benchmark_llm
+    check_rate_limit(req.client.host if req.client else "unknown", "benchmark-generate")
+    try:
+        result = await get_benchmark_llm(
+            role_description=request.role_description,
+            skill_topics=request.skill_topics,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Benchmark generation failed: {str(e)}")
+
+
+# =============================================================================
+# Feature 4 — Contribution Heatmap
+# =============================================================================
+
+@router.get("/heatmap/{repo_id}")
+async def get_contribution_heatmap(repo_id: str):
+    """
+    GET /api/heatmap/{repo_id}
+    Returns 52 weeks of commit activity for the repository using the GitHub API.
+    Data: [{ week: epoch_timestamp, total: int, days: [int x7] }, ...]
+    """
+    import httpx
+    from .storage import get_repo_info
+
+    info = get_repo_info(repo_id)
+    if not info:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found. Re-ingest the repo to enable heatmap data."
+        )
+
+    owner = info["owner"]
+    repo_name = info["repo_name"]
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "TrueSkill-AI",
+    }
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+
+    url = f"https://api.github.com/repos/{owner}/{repo_name}/stats/commit_activity"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # GitHub may return 202 (computing) on first call — retry once
+            for attempt in range(2):
+                response = await client.get(url, headers=headers)
+                if response.status_code == 202:
+                    import asyncio
+                    await asyncio.sleep(3)
+                    continue
+                if response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="GitHub repository not found or is private")
+                if response.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"GitHub API error: {response.status_code}")
+                break
+
+        weeks = response.json() if response.status_code == 200 else []
+
+        # Compute summary stats
+        total_commits = sum(w.get("total", 0) for w in weeks)
+        active_weeks = sum(1 for w in weeks if w.get("total", 0) > 0)
+        peak_week = max(weeks, key=lambda w: w.get("total", 0), default={})
+
+        return {
+            "repo_id": repo_id,
+            "owner": owner,
+            "repo_name": repo_name,
+            "weeks": weeks,          # 52 items, each: {week, total, days[7]}
+            "summary": {
+                "total_commits": total_commits,
+                "active_weeks": active_weeks,
+                "inactive_weeks": 52 - active_weeks,
+                "peak_week_commits": peak_week.get("total", 0),
+                "consistency_score": round((active_weeks / 52) * 100),
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Heatmap fetch failed: {str(e)}")
+
+
+# =============================================================================
+# Feature 5 — AI Interview Question Generator
+# =============================================================================
+
+class InterviewQuestionsRequest(BaseModel):
+    topic: str
+    claim_text: str
+    difficulty: int = 3
+    evidence_node_ids: list[str] = []
+    code_snippets: list[str] = []
+    reasoning: str = ""
+    num_questions: int = 5
+
+
+@router.post("/interview-questions")
+async def generate_interview_questions_endpoint(
+    request: InterviewQuestionsRequest,
+    req: Request,
+):
+    """
+    POST /api/interview-questions
+    Generates personalised technical interview questions for a verified skill claim.
+    Uses the actual code evidence (function names, imports) found during verification.
+    """
+    from .interview import generate_interview_questions
+    check_rate_limit(req.client.host if req.client else "unknown", "interview-questions")
+
+    if not request.topic.strip():
+        raise HTTPException(status_code=400, detail="topic cannot be empty")
+
+    try:
+        result = await generate_interview_questions(
+            topic=request.topic,
+            claim_text=request.claim_text,
+            difficulty=request.difficulty,
+            evidence_node_ids=request.evidence_node_ids,
+            code_snippets=request.code_snippets,
+            reasoning=request.reasoning,
+            num_questions=request.num_questions,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Interview question generation failed: {str(e)}")
+

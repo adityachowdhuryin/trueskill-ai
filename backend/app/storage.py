@@ -1,10 +1,12 @@
 """
 SQLite-based storage for candidate analysis results.
 Enables saving, listing, and comparing analyses across candidates.
+Also maintains a repo_registry table for heatmap/GitHub URL lookups.
 """
 
 import json
 import os
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime
@@ -18,6 +20,8 @@ def _get_conn() -> sqlite3.Connection:
     """Get a SQLite connection, creating tables if needed."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+
+    # Analyses table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analyses (
             id TEXT PRIMARY KEY,
@@ -27,12 +31,40 @@ def _get_conn() -> sqlite3.Connection:
             results_json TEXT NOT NULL,
             skills_json TEXT,
             overall_score REAL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            share_token TEXT UNIQUE,
+            is_public INTEGER DEFAULT 0
         )
     """)
+
+    # Migrate existing tables that lack the new columns (safe no-op if already present)
+    try:
+        conn.execute("ALTER TABLE analyses ADD COLUMN share_token TEXT UNIQUE")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE analyses ADD COLUMN is_public INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    # Repo registry — maps repo_id → GitHub metadata for heatmap lookups
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS repo_registry (
+            repo_id TEXT PRIMARY KEY,
+            github_url TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo_name TEXT NOT NULL,
+            ingested_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     return conn
 
+
+# =============================================================================
+# Analysis CRUD
+# =============================================================================
 
 def save_analysis(data: dict[str, Any]) -> str:
     """Save an analysis result. Returns the analysis ID."""
@@ -65,7 +97,7 @@ def list_analyses() -> list[dict[str, Any]]:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, candidate_name, repo_names, overall_score, created_at "
+            "SELECT id, candidate_name, repo_names, overall_score, created_at, is_public "
             "FROM analyses ORDER BY created_at DESC"
         ).fetchall()
         return [
@@ -75,6 +107,7 @@ def list_analyses() -> list[dict[str, Any]]:
                 "repo_names": json.loads(r["repo_names"] or "[]"),
                 "overall_score": r["overall_score"],
                 "created_at": r["created_at"],
+                "is_public": bool(r["is_public"]),
             }
             for r in rows
         ]
@@ -91,15 +124,113 @@ def get_analysis(analysis_id: str) -> Optional[dict[str, Any]]:
         ).fetchone()
         if not row:
             return None
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert a sqlite3.Row to a plain dict."""
+    return {
+        "id": row["id"],
+        "candidate_name": row["candidate_name"],
+        "repo_names": json.loads(row["repo_names"] or "[]"),
+        "repo_ids": json.loads(row["repo_ids"] or "[]"),
+        "results": json.loads(row["results_json"] or "{}"),
+        "skills": json.loads(row["skills_json"] or "[]"),
+        "overall_score": row["overall_score"],
+        "created_at": row["created_at"],
+        "is_public": bool(row["is_public"]),
+        "share_token": row["share_token"],
+    }
+
+
+# =============================================================================
+# Sharing
+# =============================================================================
+
+def make_shareable(analysis_id: str) -> Optional[str]:
+    """
+    Generate (or return existing) share token for an analysis.
+    Sets is_public=1. Returns the share_token, or None if analysis not found.
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, share_token FROM analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+        if not row:
+            return None
+
+        token = row["share_token"]
+        if not token:
+            token = secrets.token_urlsafe(24)  # 32-char URL-safe token
+            conn.execute(
+                "UPDATE analyses SET share_token = ?, is_public = 1 WHERE id = ?",
+                (token, analysis_id)
+            )
+            conn.commit()
+        else:
+            # Already has a token — just ensure is_public is set
+            conn.execute(
+                "UPDATE analyses SET is_public = 1 WHERE id = ?", (analysis_id,)
+            )
+            conn.commit()
+
+        return token
+    finally:
+        conn.close()
+
+
+def get_analysis_by_token(share_token: str) -> Optional[dict[str, Any]]:
+    """Retrieve a public analysis by its share token."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM analyses WHERE share_token = ? AND is_public = 1",
+            (share_token,)
+        ).fetchone()
+        if not row:
+            return None
+        return _row_to_dict(row)
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# Repo Registry (for heatmap lookups)
+# =============================================================================
+
+def register_repo(repo_id: str, github_url: str, owner: str, repo_name: str) -> None:
+    """Store repo metadata at ingestion time."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO repo_registry
+               (repo_id, github_url, owner, repo_name, ingested_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (repo_id, github_url, owner, repo_name, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_repo_info(repo_id: str) -> Optional[dict[str, str]]:
+    """Look up GitHub metadata for a repo_id."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM repo_registry WHERE repo_id = ?", (repo_id,)
+        ).fetchone()
+        if not row:
+            return None
         return {
-            "id": row["id"],
-            "candidate_name": row["candidate_name"],
-            "repo_names": json.loads(row["repo_names"] or "[]"),
-            "repo_ids": json.loads(row["repo_ids"] or "[]"),
-            "results": json.loads(row["results_json"] or "{}"),
-            "skills": json.loads(row["skills_json"] or "[]"),
-            "overall_score": row["overall_score"],
-            "created_at": row["created_at"],
+            "repo_id": row["repo_id"],
+            "github_url": row["github_url"],
+            "owner": row["owner"],
+            "repo_name": row["repo_name"],
+            "ingested_at": row["ingested_at"],
         }
     finally:
         conn.close()
