@@ -51,3 +51,6 @@ htmlcov/
 
 # Neo4j AuraDB credential files (contain sensitive passwords)
 Neo4j-*.txt
+
+# Local SQLite dev database (auto-created on first run)
+backend/trueskill_analyses.db
