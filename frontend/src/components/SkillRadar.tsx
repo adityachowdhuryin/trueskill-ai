@@ -193,7 +193,6 @@ export default function SkillRadar({ verifiedSkills, benchmarkScores, benchmarkL
                                 fill="#6366f1"
                                 fillOpacity={0.2}
                                 strokeWidth={2.5}
-                                dot={{ fill: "#6366f1", r: 3 }}
                             />
                             <Radar
                                 name={benchLabel}
@@ -203,7 +202,6 @@ export default function SkillRadar({ verifiedSkills, benchmarkScores, benchmarkL
                                 fillOpacity={0.1}
                                 strokeWidth={2}
                                 strokeDasharray="6 3"
-                                dot={{ fill: "#f59e0b", r: 3 }}
                             />
                             <Tooltip content={<CustomTooltip />} />
                             <Legend

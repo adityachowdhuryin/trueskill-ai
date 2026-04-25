@@ -7,7 +7,7 @@ import {
     Upload, FileText, Loader2, CheckCircle, XCircle, AlertCircle,
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
-    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check
+    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check, ExternalLink
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
@@ -1352,18 +1352,23 @@ export default function DashboardPage() {
                                         id="share-analysis-btn"
                                         onClick={handleShareAnalysis}
                                         disabled={isSharing}
-                                        title={shareToken ? "Link copied!" : "Share verified profile"}
-                                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-lg transition-all border disabled:opacity-50"
+                                        title={shareToken ? "Link copied! Click to copy again" : "Create a shareable verified profile link"}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all border disabled:opacity-50 shadow-sm"
                                         style={{
-                                            background: shareCopied ? "rgba(16,185,129,0.08)" : "rgba(99,102,241,0.06)",
-                                            borderColor: shareCopied ? "rgba(16,185,129,0.3)" : "rgba(99,102,241,0.25)",
-                                            color: shareCopied ? "#10b981" : "#6366f1",
+                                            background: shareCopied
+                                                ? "linear-gradient(135deg, #10b981, #059669)"
+                                                : "linear-gradient(135deg, #6366f1, #7c3aed)",
+                                            borderColor: "transparent",
+                                            color: "white",
+                                            boxShadow: shareCopied
+                                                ? "0 2px 8px rgba(16,185,129,0.35)"
+                                                : "0 2px 8px rgba(99,102,241,0.35)",
                                         }}
                                     >
                                         {isSharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
                                          shareCopied ? <Check className="w-3.5 h-3.5" /> :
                                          <Share2 className="w-3.5 h-3.5" />}
-                                        {isSharing ? "Sharing…" : shareCopied ? "Copied!" : "Share"}
+                                        {isSharing ? "Sharing…" : shareCopied ? "Copied!" : "Share Profile"}
                                     </button>
                                     <a
                                         href="/compare"
@@ -1398,6 +1403,48 @@ export default function DashboardPage() {
                                 </button>
                             ))}
                         </div>
+
+                        {/* ── Shared Profile Banner — shown when shareToken is set */}
+                        {shareToken && (
+                            <div className="mx-4 mt-3 mb-1 flex items-center gap-3 px-4 py-3 rounded-xl border border-indigo-200 bg-gradient-to-r from-indigo-50 to-violet-50 flex-shrink-0">
+                                <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-sm">
+                                    <ShieldCheck className="w-4 h-4 text-white" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-bold text-indigo-800">Verified Profile Created!</p>
+                                    <a
+                                        href={`/profile/${shareToken}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-mono truncate block"
+                                    >
+                                        {typeof window !== "undefined" ? `${window.location.origin}/profile/${shareToken}` : `/profile/${shareToken}`}
+                                    </a>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        if (typeof window !== "undefined") {
+                                            navigator.clipboard.writeText(`${window.location.origin}/profile/${shareToken}`);
+                                            setShareCopied(true);
+                                            setTimeout(() => setShareCopied(false), 2000);
+                                        }
+                                    }}
+                                    className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-50 transition-colors shadow-sm"
+                                >
+                                    {shareCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                    {shareCopied ? "Copied!" : "Copy link"}
+                                </button>
+                                <a
+                                    href={`/profile/${shareToken}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-50 transition-colors shadow-sm"
+                                >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                    View
+                                </a>
+                            </div>
+                        )}
 
                         {/* Error banner */}
                         {error && (

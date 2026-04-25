@@ -178,7 +178,7 @@ export default function SkillCard({ result, index = 0, apiBaseUrl = "http://loca
 
     return (
         <div
-            className={`group relative rounded-xl border ${config.border} ${config.hoverBorder} ${config.bg} transition-all duration-300 cursor-pointer overflow-hidden animate-slide-up`}
+            className={`group relative rounded-xl border ${config.border} ${config.hoverBorder} ${config.bg} transition-all duration-300 cursor-pointer animate-slide-up`}
             style={{ animationDelay: `${index * 60}ms` }}
             onClick={() => setIsExpanded(!isExpanded)}
         >
@@ -203,6 +203,15 @@ export default function SkillCard({ result, index = 0, apiBaseUrl = "http://loca
                     {/* Status Badge */}
                     <span className={`hidden sm:inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${config.badgeBg} ${config.badgeText} border ${config.badgeBorder}`}>
                         {result.status}
+                    </span>
+
+                    {/* Interview Prep hint chip — always visible on header */}
+                    <span
+                        title="Expand to generate AI Interview Prep questions"
+                        className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-indigo-200 bg-indigo-50 text-indigo-500 text-[10px] font-semibold opacity-70 group-hover:opacity-100 transition-opacity"
+                    >
+                        <MessageSquare className="w-2.5 h-2.5" />
+                        Prep
                     </span>
 
                     {/* Expand icon */}
