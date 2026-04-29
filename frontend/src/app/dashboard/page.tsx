@@ -1486,11 +1486,24 @@ export default function DashboardPage() {
                                         <AgentTerminal messages={agentMessages.slice(0, -1)} current={agentStatus} />
                                     </div>
                                 ) : analysisResult?.verification_results.length ? (
-                                    analysisResult.verification_results.map((result) => (
+                                    [...analysisResult.verification_results]
+                                        .sort((a, b) => {
+                                            // Primary: status order Verified > Partial > Unverified
+                                            const statusOrder: Record<string, number> = {
+                                                "Verified": 0,
+                                                "Partially Verified": 1,
+                                                "Unverified": 2,
+                                            };
+                                            const statusDiff = (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3);
+                                            if (statusDiff !== 0) return statusDiff;
+                                            // Secondary: score descending
+                                            return b.score - a.score;
+                                        })
+                                        .map((result, idx) => (
                                         <SkillCard
                                             key={result.claim_id}
                                             result={result}
-                                            apiBaseUrl={API_BASE_URL}
+                                            index={idx}
                                         />
                                     ))
                                 ) : (

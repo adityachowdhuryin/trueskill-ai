@@ -282,9 +282,11 @@ Return the claims as JSON."""
         parsed = parse_json_response(response.content)
         claims = parsed.get("claims", [])
         
-        # Add unique IDs to each claim
+        # Add unique IDs to each claim — prefix with repo_id slice to prevent
+        # collisions when multiple repos are analyzed and results are merged
+        repo_prefix = state["repo_id"][:6] if state.get("repo_id") else "repo"
         for i, claim in enumerate(claims):
-            claim["id"] = f"claim_{i}"
+            claim["id"] = f"{repo_prefix}_{i}"
         
         state["claims"] = claims
         
@@ -620,13 +622,14 @@ async def analyze_resume_stream(
 def _generate_summary(results: list[dict]) -> dict:
     """Generate a summary of verification results."""
     if not results:
-        return {"verified": 0, "partial": 0, "unverified": 0, "avg_score": 0}
-    
+        # Keys must match the real-case return AND the frontend AnalysisResponse type
+        return {"verified": 0, "partially_verified": 0, "unverified": 0, "total_claims": 0, "average_score": 0}
+
     verified = sum(1 for r in results if r["status"] == "Verified")
     partial = sum(1 for r in results if r["status"] == "Partially Verified")
     unverified = sum(1 for r in results if r["status"] == "Unverified")
     avg_score = sum(r["score"] for r in results) / len(results)
-    
+
     return {
         "verified": verified,
         "partially_verified": partial,

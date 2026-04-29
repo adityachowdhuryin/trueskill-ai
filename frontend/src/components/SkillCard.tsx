@@ -17,7 +17,6 @@ interface VerificationResult {
 interface SkillCardProps {
     result: VerificationResult;
     index?: number;
-    apiBaseUrl?: string;
 }
 
 // ─── Animated circular score ring ────────────────────────────────────────────
@@ -135,7 +134,7 @@ const LEVEL_STYLES: Record<string, string> = {
 };
 
 // ─── Main Card ────────────────────────────────────────────────────────────────
-export default function SkillCard({ result, index = 0, apiBaseUrl = "http://localhost:8000" }: SkillCardProps) {
+export default function SkillCard({ result, index = 0 }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
 
     // Feature 5 — Interview Questions state
@@ -150,7 +149,7 @@ export default function SkillCard({ result, index = 0, apiBaseUrl = "http://loca
         setInterviewLoading(true);
         setShowInterview(true);
         try {
-            const res = await fetch(`${apiBaseUrl}/api/interview-questions`, {
+            const res = await fetch(`/api/interview-questions`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
