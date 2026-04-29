@@ -124,7 +124,9 @@ CREATE TABLE analyses (
     results_json TEXT,
     skills_json TEXT,
     overall_score REAL,
-    created_at TEXT
+    created_at TEXT,
+    is_public INTEGER DEFAULT 0,
+    share_token TEXT    -- random URL-safe token for public profile sharing
 )
 ```
 
@@ -150,6 +152,10 @@ START → Parser Node → Auditor Node → Grader Node → END
 - +30 from LLM reasoning quality assessment
 
 **Topic synonym expansion** (`TOPIC_SYNONYMS` map) covers 15+ tech domains for broader graph matching.
+
+**`claim_id` uniqueness:** Each claim is assigned an ID prefixed with the first 6 characters of `repo_id` (e.g. `abc123_0`). This prevents collisions when results from multiple repo analysis runs are merged by topic — duplicate `claim_0` IDs from separate runs no longer cause React key warnings or incorrect evidence attribution.
+
+**`_generate_summary()` consistency:** Both the empty-result path and the normal path return identical keys (`verified`, `partially_verified`, `unverified`, `total_claims`, `average_score`) matching the frontend `AnalysisResponse` TypeScript type.
 
 ### Workflow 2: The ATS Pipeline
 Standalone async call (no graph dependency):
@@ -197,6 +203,14 @@ POST   /api/analyses                   { ...analysis_data }     → { analysis_i
 GET    /api/analyses                                            → { analyses: [] }
 GET    /api/analyses/{id}                                       → analysis dict
 GET    /api/compare?ids=id1,id2                                → { analyses: [] }
+POST   /api/analyses/{id}/share                                → { share_token, profile_url }
+GET    /api/profile/{token}                                    → public analysis dict (no auth)
+```
+
+### Benchmarks & Interview Prep
+```
+POST   /api/benchmarks/generate        { role_description, skill_topics[] } → { scores: {topic: int} }
+POST   /api/interview-questions        { topic, claim_text, difficulty, num_questions } → { questions[] }
 ```
 
 ### Career & ATS Tools
@@ -237,9 +251,29 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | Route | Component | Description |
 |---|---|---|
 | `/` | `page.tsx` | Animated landing page with feature cards + tech stack footer |
-| `/dashboard` | `dashboard/page.tsx` | Main workflow: upload PDF → select repo → run analysis → view results + 3D graph |
+| `/dashboard` | `dashboard/page.tsx` | Main workflow: upload PDF → select repo → run analysis → tabbed results (Skills / Radar / Activity / Graph) |
 | `/compare` | `compare/page.tsx` | Side-by-side multi-candidate comparison with gauge charts |
 | `/resume-toolkit` | `resume-toolkit/page.tsx` | 4-step AI Resume Toolkit (Jobs → ATS → Manager → Email) |
+| `/profile/[token]` | `profile/[id]/page.tsx` | Public shareable verified profile page (no auth required) |
+
+### Dashboard Tabs
+| Tab | Description |
+|---|---|
+| **Skills** | Sorted skill cards (Verified → Partial → Unverified). Filter toolbar: search by name, filter by status, Expand All / Collapse All. Each card shows animated score bar, parsed code evidence (file → function), AI reasoning, complexity analysis, and AI Interview Prep questions. |
+| **Radar** | Skill radar chart comparing verified scores vs LLM-generated role benchmarks (via `POST /api/benchmarks/generate`). Shows gap analysis cards and summary pills. |
+| **Activity** | Contribution heatmap + language skill timeline. |
+| **Graph** | Interactive 3D force-graph of the Neo4j knowledge graph. |
+
+### Key Frontend Components
+| Component | Description |
+|---|---|
+| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, Interview Prep with collapsible hints + Copy All |
+| `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand via `POST /api/benchmarks/generate` so traces always align |
+| `ContributionHeatmap.tsx` | GitHub-style commit heatmap |
+| `SkillTimeline.tsx` | Language timeline chart |
+| `GraphVisualizer.tsx` | 3D force-graph with smart sampling banner |
+| `VerifiedBadge.tsx` | Shareable public profile badge |
+| `ATSScorePanel.tsx` | ATS evaluation results panel |
 
 ---
 

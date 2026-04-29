@@ -8,22 +8,23 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 
 ## Project Structure
 
-```
 trueskill-ai/
 ├── backend/                         # FastAPI Python backend
 │   ├── app/
-│   │   ├── api.py                   # All API routes (18+ endpoints)
+│   │   ├── api.py                   # All API routes (20+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
 │   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring & HTML report
+│   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
+│   │   ├── interview.py             # AI interview question generator
 │   │   ├── coach.py                 # Gap analysis & bridge project generator
 │   │   ├── job_finder.py            # Jooble job search & Apollo.io hiring manager lookup
 │   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
-│   │   ├── storage.py               # SQLite persistence for saved analyses
+│   │   ├── storage.py               # SQLite persistence (analyses + share tokens)
 │   │   ├── db.py                    # Neo4j AuraDB driver & query helpers
-│   │   └── llm.py                   # Shared LLM client (Gemini 2.5 Flash)
+│   │   └── llm.py                   # Shared LLM client (Groq Llama 3.3 70B)
 │   ├── main.py                      # FastAPI entry point
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -34,12 +35,16 @@ trueskill-ai/
 │       │   ├── page.tsx             # Landing / marketing page
 │       │   ├── dashboard/           # Main verification dashboard
 │       │   ├── compare/             # Multi-candidate comparison view
-│       │   └── resume-toolkit/      # 4-step AI Resume Toolkit
+│       │   ├── resume-toolkit/      # 4-step AI Resume Toolkit
+│       │   └── profile/[id]/        # Public shareable verified profile page
 │       └── components/
 │           ├── GraphVisualizer.tsx  # 3D force-graph with smart sampling banner
 │           ├── GraphFullscreenModal.tsx
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
-│           ├── SkillCard.tsx        # Per-claim verification card
+│           ├── SkillCard.tsx        # Per-claim card: score bar, parsed evidence, interview prep
+│           ├── SkillRadar.tsx       # Radar chart with LLM-generated benchmarks
+│           ├── ContributionHeatmap.tsx # GitHub-style commit heatmap
+│           ├── VerifiedBadge.tsx    # Shareable public profile badge
 │           ├── ResumeOptimizer.tsx  # ATS keyword rewriting UI
 │           ├── EmailComposer.tsx    # Personalized outreach email UI
 │           ├── JobCard.tsx          # Job posting card
@@ -117,13 +122,21 @@ npm run dev
 | `GET`  | `/api/skill-timeline/{repo_id}` | File timeline grouped by language |
 | `GET`  | `/api/forensics/{repo_id}` | Authorship & stylometry data |
 
-### Saved Analyses & Comparison
+### Saved Analyses & Sharing
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/analyses` | Save an analysis result |
 | `GET`  | `/api/analyses` | List all saved analyses |
 | `GET`  | `/api/analyses/{id}` | Get a specific saved analysis |
 | `GET`  | `/api/compare?ids=...` | Compare multiple analyses |
+| `POST` | `/api/analyses/{id}/share` | Generate a public share token |
+| `GET`  | `/api/profile/{token}` | Retrieve public profile (no auth) |
+
+### Benchmarks & Interview Prep
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/benchmarks/generate` | LLM-generates role benchmark scores for a given skill topic list |
+| `POST` | `/api/interview-questions` | Generates personalised interview questions for a verified skill |
 
 ### Career & ATS Tools
 | Method | Endpoint | Description |
@@ -206,6 +219,30 @@ A self-contained page (`/resume-toolkit`) that guides users through:
 2. **ATS Optimization** — Resume vs JD keyword analysis → LLM rewrites Skills/Summary
 3. **Hiring Manager Lookup** — Apollo.io paid search → free-tier `/people/match` → email pattern fallback
 4. **Outreach Email** — LLM drafts a personalized cold email for the role
+
+### Skills Verification Section
+The dashboard Skills tab is a premium credential report panel:
+- **Sorted display:** Verified → Partially Verified → Unverified, then score descending
+- **Filter toolbar:** Instant search by skill name, status dropdown, Expand All / Collapse All, live results count
+- **Animated score bar:** Fills 0→score on mount, color-coded green/amber/red
+- **Parsed evidence nodes:** `path/file.py:function_name` rendered as `📄 file.py → function_name` with file-type badges (PY/TS/JS)
+- **Sectioned card layout:** AI Reasoning / Complexity Analysis / Code Evidence / Interview Prep
+- **AI Interview Prep:** 5 personalised questions per skill with per-question collapsible hints and Copy All button
+- **Unverified skills:** Friendly actionable message instead of raw error text
+
+### Shareable Verified Profile
+After running an analysis:
+1. Click **Share Profile** → backend generates a random URL-safe token stored in SQLite
+2. A public profile URL (`/profile/<token>`) is copied to clipboard
+3. The `/profile/[id]` page shows the full verified credential report — no login required
+4. Share tokens survive server restarts (persisted in SQLite)
+
+### Skill Radar + Benchmarking
+The Radar tab compares verified skill scores against LLM-generated role benchmarks:
+- Sends the candidate's **exact verified topic names** to `POST /api/benchmarks/generate`
+- LLM returns a score for each topic for the selected role (e.g. "ML Engineer")
+- Both traces use the same topic list → no alignment zeros possible
+- Shows gap analysis cards (Areas to Improve / Above Benchmark) and summary pills
 
 ### Candidate Comparison
 The `/compare` page loads two or more saved analyses side-by-side for HR-style screening.
