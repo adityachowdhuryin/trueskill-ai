@@ -7,7 +7,8 @@ import {
     Upload, FileText, Loader2, CheckCircle, XCircle, AlertCircle,
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
-    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check, ExternalLink
+    Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check, ExternalLink,
+    Search, ChevronsUpDown, Filter
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
@@ -272,6 +273,11 @@ export default function DashboardPage() {
     const [isSharing, setIsSharing] = useState(false);
     const [shareCopied, setShareCopied] = useState(false);
     const [savedAnalysisId, setSavedAnalysisId] = useState<string | null>(null);
+
+    // Skills tab — filter / search / expand-all
+    const [skillSearch, setSkillSearch] = useState("");
+    const [skillFilter, setSkillFilter] = useState<"All" | "Verified" | "Partially Verified" | "Unverified">("All");
+    const [expandAll, setExpandAll] = useState<boolean | undefined>(undefined);
 
     // Fetch real graph data when repo is ingested
     const fetchGraphData = useCallback(async (rid: string) => {
@@ -1468,7 +1474,7 @@ export default function DashboardPage() {
 
                         {/* ── Tab: Skills ── */}
                         {resultTab === "skills" && (
-                            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                            <div className="flex-1 overflow-y-auto flex flex-col">
                                 {isAnalyzing ? (
                                     <div className="flex flex-col gap-4 p-6">
                                         <div className="flex items-center gap-3">
@@ -1486,28 +1492,107 @@ export default function DashboardPage() {
                                         <AgentTerminal messages={agentMessages.slice(0, -1)} current={agentStatus} />
                                     </div>
                                 ) : analysisResult?.verification_results.length ? (
-                                    [...analysisResult.verification_results]
-                                        .sort((a, b) => {
-                                            // Primary: status order Verified > Partial > Unverified
-                                            const statusOrder: Record<string, number> = {
-                                                "Verified": 0,
-                                                "Partially Verified": 1,
-                                                "Unverified": 2,
-                                            };
-                                            const statusDiff = (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3);
-                                            if (statusDiff !== 0) return statusDiff;
-                                            // Secondary: score descending
-                                            return b.score - a.score;
-                                        })
-                                        .map((result, idx) => (
-                                        <SkillCard
-                                            key={result.claim_id}
-                                            result={result}
-                                            index={idx}
-                                        />
-                                    ))
+                                    <>
+                                        {/* ── Filter Toolbar ── */}
+                                        <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-slate-100 bg-slate-50/80 space-y-2">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                {/* Search */}
+                                                <div className="relative flex-1 min-w-[140px]">
+                                                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Search skills…"
+                                                        value={skillSearch}
+                                                        onChange={e => setSkillSearch(e.target.value)}
+                                                        onClick={e => e.stopPropagation()}
+                                                        className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 placeholder:text-slate-400"
+                                                    />
+                                                </div>
+
+                                                {/* Status filter */}
+                                                <div className="relative">
+                                                    <Filter className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                                                    <select
+                                                        value={skillFilter}
+                                                        onChange={e => setSkillFilter(e.target.value as typeof skillFilter)}
+                                                        onClick={e => e.stopPropagation()}
+                                                        className="pl-7 pr-6 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 text-slate-600 appearance-none cursor-pointer"
+                                                    >
+                                                        <option value="All">All</option>
+                                                        <option value="Verified">✅ Verified</option>
+                                                        <option value="Partially Verified">⚠️ Partial</option>
+                                                        <option value="Unverified">❌ Unverified</option>
+                                                    </select>
+                                                </div>
+
+                                                {/* Expand / Collapse All */}
+                                                <button
+                                                    onClick={e => { e.stopPropagation(); setExpandAll(v => v === true ? false : true); }}
+                                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 hover:bg-indigo-50/50 transition-colors"
+                                                >
+                                                    <ChevronsUpDown className="w-3 h-3" />
+                                                    {expandAll ? "Collapse All" : "Expand All"}
+                                                </button>
+                                            </div>
+
+                                            {/* Results count */}
+                                            {(() => {
+                                                const total = analysisResult.verification_results.length;
+                                                const filtered = analysisResult.verification_results.filter(r =>
+                                                    (skillFilter === "All" || r.status === skillFilter) &&
+                                                    r.topic.toLowerCase().includes(skillSearch.toLowerCase())
+                                                ).length;
+                                                return (
+                                                    <p className="text-[10px] text-slate-400 font-medium">
+                                                        {filtered === total
+                                                            ? `${total} skill${total !== 1 ? "s" : ""}`
+                                                            : `Showing ${filtered} of ${total} skills`}
+                                                    </p>
+                                                );
+                                            })()}
+                                        </div>
+
+                                        {/* ── Skill Cards ── */}
+                                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                            {[...analysisResult.verification_results]
+                                                .filter(r =>
+                                                    (skillFilter === "All" || r.status === skillFilter) &&
+                                                    r.topic.toLowerCase().includes(skillSearch.toLowerCase())
+                                                )
+                                                .sort((a, b) => {
+                                                    const order: Record<string, number> = { "Verified": 0, "Partially Verified": 1, "Unverified": 2 };
+                                                    const diff = (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                                                    return diff !== 0 ? diff : b.score - a.score;
+                                                })
+                                                .map((result, idx) => (
+                                                    <SkillCard
+                                                        key={result.claim_id}
+                                                        result={result}
+                                                        index={idx}
+                                                        forceExpanded={expandAll}
+                                                    />
+                                                ))}
+
+                                            {/* Empty filter state */}
+                                            {analysisResult.verification_results.filter(r =>
+                                                (skillFilter === "All" || r.status === skillFilter) &&
+                                                r.topic.toLowerCase().includes(skillSearch.toLowerCase())
+                                            ).length === 0 && (
+                                                <div className="flex flex-col items-center justify-center py-12 gap-3 text-slate-400">
+                                                    <Search className="w-8 h-8 text-slate-300" />
+                                                    <p className="text-sm font-medium">No skills match your filter</p>
+                                                    <button
+                                                        onClick={() => { setSkillSearch(""); setSkillFilter("All"); }}
+                                                        className="text-xs text-indigo-500 hover:underline"
+                                                    >
+                                                        Clear filters
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
                                 ) : (
-                                    <div className="h-64 flex flex-col items-center justify-center text-slate-300">
+                                    <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-8">
                                         <div className="relative mb-4">
                                             <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-200" />
                                             <AlertCircle className="w-12 h-12 relative z-10 text-slate-300" />
