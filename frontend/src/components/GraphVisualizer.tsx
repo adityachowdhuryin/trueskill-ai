@@ -3,7 +3,8 @@
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import * as THREE from "three";
-import { Search, X, Filter, Layers } from "lucide-react";
+import { Search, X, Filter, Layers, Eye, RotateCcw, Camera } from "lucide-react";
+import CodeViewer from "./CodeViewer";
 
 // Dynamically import ForceGraph3D to avoid SSR issues
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
@@ -44,6 +45,7 @@ interface GraphVisualizerProps {
     isFullscreen?: boolean;
     showSearch?: boolean;
     graphMeta?: Record<string, unknown> | null;  // sampling metadata from backend
+    repoIds?: string[];  // for Code Drill-Down from the graph panel
 }
 
 // Vibrant, neon-accented color palette for node types
@@ -125,9 +127,10 @@ interface NodeInfoPanelProps {
     node: GraphNode | null;
     links: GraphLink[];
     onClose: () => void;
+    onViewCode?: (node: GraphNode) => void;
 }
 
-function NodeInfoPanel({ node, links, onClose }: NodeInfoPanelProps) {
+function NodeInfoPanel({ node, links, onClose, onViewCode }: NodeInfoPanelProps) {
     if (!node) return null;
 
     const nodeColor = NODE_COLORS[node.type] ?? "#64748b";
@@ -232,6 +235,24 @@ function NodeInfoPanel({ node, links, onClose }: NodeInfoPanelProps) {
                     <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Connections</p>
                     <p className="text-sm font-bold text-slate-200">{inbound}</p>
                 </div>
+
+                {/* View Source — Function nodes only */}
+                {node.type === "Function" && onViewCode && (
+                    <button
+                        onClick={() => onViewCode(node)}
+                        className="w-full flex items-center justify-center gap-2 mt-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                            background: "rgba(99,102,241,0.15)",
+                            border: "1px solid rgba(99,102,241,0.35)",
+                            color: "#a5b4fc",
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.background = "rgba(99,102,241,0.28)")}
+                        onMouseLeave={e => (e.currentTarget.style.background = "rgba(99,102,241,0.15)")}
+                    >
+                        <Eye size={12} />
+                        View Source Code
+                    </button>
+                )}
             </div>
         </div>
     );
@@ -247,6 +268,7 @@ export default function GraphVisualizer({
     isFullscreen = false,
     showSearch = true,
     graphMeta = null,
+    repoIds = [],
 }: GraphVisualizerProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fgRef = useRef<any>();
@@ -258,6 +280,9 @@ export default function GraphVisualizer({
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [showLegend, setShowLegend] = useState(true);
     const [showSearchBar, setShowSearchBar] = useState(false);
+    const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+    const [codeViewerNode, setCodeViewerNode] = useState<GraphNode | null>(null);
+    const bloomAdded = useRef(false);
     const autoRotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const userInteracted = useRef(false);
 
@@ -288,6 +313,20 @@ export default function GraphVisualizer({
         return map;
     }, [links]);
 
+    // Neighbor set for focus-mode highlighting
+    const neighborSet = useMemo(() => {
+        const map: Record<string, Set<string>> = {};
+        links.forEach(l => {
+            const src = typeof l.source === "object" ? (l.source as GraphNodeInternal).id ?? "" : (l.source as string);
+            const tgt = typeof l.target === "object" ? (l.target as GraphNodeInternal).id ?? "" : (l.target as string);
+            if (!map[src]) map[src] = new Set();
+            if (!map[tgt]) map[tgt] = new Set();
+            map[src].add(tgt);
+            map[tgt].add(src);
+        });
+        return map;
+    }, [links]);
+
     // Get color for a node
     const getNodeColor = useCallback((node: GraphNode): string => {
         if (colorMode === "complexity") return getComplexityColor(node.complexity_score);
@@ -305,7 +344,13 @@ export default function GraphVisualizer({
                 const baseSize = n.type === "File" ? 10 : n.type === "Class" ? 7 : 4;
                 const sizeByDegree = Math.max(baseSize, Math.min(baseSize + degree * 0.4, 20));
                 const color = getNodeColor(n);
-                const dimmed = query.length > 0 && !n.name.toLowerCase().includes(query);
+                // Dim if search active and name doesn't match
+                const searchDimmed = query.length > 0 && !n.name.toLowerCase().includes(query);
+                // Dim if a different node is hovered and this node isn't its neighbor
+                const focusDimmed = hoveredNodeId !== null
+                    && n.id !== hoveredNodeId
+                    && !neighborSet[hoveredNodeId]?.has(n.id);
+                const dimmed = searchDimmed || focusDimmed;
                 return { ...n, color, val: sizeByDegree, __degree: degree, __dimmed: dimmed };
             });
 
@@ -314,47 +359,42 @@ export default function GraphVisualizer({
             const src = typeof l.source === "object" ? (l.source as GraphNodeInternal).id : (l.source as string);
             const tgt = typeof l.target === "object" ? (l.target as GraphNodeInternal).id : (l.target as string);
             return nodeIds.has(src) && nodeIds.has(tgt);
-        }).map(l => ({ ...l, ...getLinkConfig(l.type) }));
+        }).map(l => {
+            const src = typeof l.source === "object" ? (l.source as GraphNodeInternal).id ?? "" : (l.source as string);
+            const tgt = typeof l.target === "object" ? (l.target as GraphNodeInternal).id ?? "" : (l.target as string);
+            // Dim link if neither endpoint is the hovered node or its neighbors
+            const linkDimmed = hoveredNodeId !== null
+                && src !== hoveredNodeId && tgt !== hoveredNodeId
+                && !neighborSet[hoveredNodeId]?.has(src)
+                && !neighborSet[hoveredNodeId]?.has(tgt);
+            return { ...l, ...getLinkConfig(l.type), __linkDimmed: linkDimmed };
+        });
 
         return { nodes: filteredNodes, links: filteredLinks };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [nodes, links, hiddenTypes, colorMode, query, degreeMap]);
+    }, [nodes, links, hiddenTypes, colorMode, query, degreeMap, neighborSet, hoveredNodeId]);
 
-    // Custom Three.js node object — glowing sphere
+    // Custom Three.js node object — glowing sphere (glow provided by bloom post-process)
     const nodeThreeObject = useCallback((rawNode: object) => {
         const n = rawNode as GraphNodeInternal & { __dimmed?: boolean; val?: number };
         const color = n.color ?? getNodeColor(n);
         const emissive = colorMode === "type" ? (NODE_EMISSIVE[n.type] ?? "#64748b") : color;
         const radius = (n.val ?? 4) * 0.45;
-        const opacity = n.__dimmed ? 0.12 : 1;
+        const opacity = n.__dimmed ? 0.06 : 1;
+        const emissiveIntensity = n.__dimmed ? 0.0 : 0.7;
 
         const group = new THREE.Group();
-
-        // Core sphere
         const mat = new THREE.MeshLambertMaterial({
             color: new THREE.Color(color),
             emissive: new THREE.Color(emissive),
-            emissiveIntensity: n.__dimmed ? 0.05 : 0.6,
+            emissiveIntensity,
             transparent: true,
             opacity,
         });
         const sphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), mat);
         group.add(sphere);
-
-        // Outer glow shell (slightly larger, more transparent)
-        const glowMat = new THREE.MeshLambertMaterial({
-            color: new THREE.Color(emissive),
-            emissive: new THREE.Color(emissive),
-            emissiveIntensity: n.__dimmed ? 0 : 0.25,
-            transparent: true,
-            opacity: n.__dimmed ? 0 : 0.25,
-            side: THREE.BackSide,
-        });
-        const glowSphere = new THREE.Mesh(new THREE.SphereGeometry(radius * 1.6, 12, 12), glowMat);
-        group.add(glowSphere);
-
         return group;
-    }, [colorMode, getNodeColor]);
+    }, [colorMode, getNodeColor, hoveredNodeId]);  // hoveredNodeId triggers rebuild for dimming
 
     // Auto-rotate camera on load
     useEffect(() => {
@@ -381,9 +421,11 @@ export default function GraphVisualizer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [graphData.nodes.length > 0]);
 
-    // Hover cursor
+    // Hover cursor + neighborhood focus
     const handleNodeHover = useCallback((node: object | null) => {
         document.body.style.cursor = node ? "pointer" : "default";
+        const n = node as GraphNodeInternal | null;
+        setHoveredNodeId(n?.id ?? null);
     }, []);
 
     // Node click → zoom + info panel
@@ -404,9 +446,43 @@ export default function GraphVisualizer({
         }
     }, [onNodeClick]);
 
-    // Stop auto-rotate on any user camera interaction
+    // Post-physics setup: Bloom, Scene Fog, and Physics tweaks (runs once after simulation settles)
     const handleEngineStop = useCallback(() => {
-        // engineStop fires after physics settles — fine to keep rotation until actual drag
+        const fg = fgRef.current;
+        if (!fg) return;
+
+        // ── 1. UnrealBloom post-processing (run only once) ──
+        if (!bloomAdded.current) {
+            bloomAdded.current = true;
+            import("three/examples/jsm/postprocessing/UnrealBloomPass.js")
+                .then(({ UnrealBloomPass }) => {
+                    const composer = fg.postProcessingComposer();
+                    if (!composer) return;
+                    const bloom = new UnrealBloomPass(
+                        new THREE.Vector2(window.innerWidth, window.innerHeight),
+                        1.1,   // strength — controls glow intensity
+                        0.5,   // radius
+                        0.08   // threshold — low = even medium-brightness nodes glow
+                    );
+                    composer.addPass(bloom);
+                })
+                .catch(() => { /* bloom unavailable, degrade gracefully */ });
+
+            // ── 2. Scene fog for depth perception ──
+            try {
+                const scene = fg.scene();
+                scene.fog = new THREE.FogExp2(0x020617, 0.0022);
+            } catch { /* ignore */ }
+
+            // ── 3. Physics: stronger charge repulsion ──
+            try {
+                const charge = fg.d3Force("charge");
+                if (charge && typeof (charge as Record<string, unknown>)["strength"] === "function") {
+                    (charge as { strength: (v: number) => void }).strength(-180);
+                    fg.d3ReheatSimulation();
+                }
+            } catch { /* ignore */ }
+        }
     }, []);
 
     const handleNodeLabel = useCallback((rawNode: object): string => {
@@ -493,6 +569,49 @@ export default function GraphVisualizer({
                         Search
                     </button>
                 )}
+
+                {/* Reset Camera */}
+                <button
+                    onClick={() => {
+                        userInteracted.current = false;
+                        fgRef.current?.zoomToFit(600, 80);
+                    }}
+                    title="Reset camera to overview"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                    style={{
+                        background: "rgba(30,41,59,0.85)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        color: "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <RotateCcw size={12} />
+                    Reset
+                </button>
+
+                {/* Export PNG */}
+                <button
+                    onClick={() => {
+                        const renderer = fgRef.current?.renderer();
+                        if (!renderer) return;
+                        const url = renderer.domElement.toDataURL("image/png");
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = "knowledge-graph.png";
+                        a.click();
+                    }}
+                    title="Download graph as PNG"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                    style={{
+                        background: "rgba(30,41,59,0.85)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        color: "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <Camera size={12} />
+                    Export
+                </button>
             </div>
 
             {/* ─── Legend panel ────────────────────────────────────────────── */}
@@ -598,7 +717,7 @@ export default function GraphVisualizer({
                 </div>
             )}
 
-            {/* ─── Type filter chips (shown when search active) ─────────── */}
+            {/* Type filter chips (shown when search active) */}
             {showSearchBar && (
                 <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5">
                     <Filter size={10} className="text-slate-600" />
@@ -630,13 +749,19 @@ export default function GraphVisualizer({
                 nodeThreeObjectExtend={false}
                 nodeLabel={handleNodeLabel}
                 nodeOpacity={1}
-                linkColor={(link: object) => (link as { color: string }).color}
+                linkColor={(link: object) => {
+                    const l = link as { color: string; __linkDimmed?: boolean };
+                    return l.__linkDimmed ? "#020617" : l.color;
+                }}
                 linkWidth={(link: object) => (link as { width: number }).width ?? 1}
-                linkOpacity={0.6}
+                linkOpacity={0.65}
                 linkDirectionalArrowLength={4}
                 linkDirectionalArrowRelPos={1}
                 linkDirectionalArrowColor={(link: object) => (link as { color: string }).color}
-                linkDirectionalParticles={(link: object) => (link as { particles: number }).particles ?? 0}
+                linkDirectionalParticles={(link: object) => {
+                    const l = link as { particles: number; __linkDimmed?: boolean };
+                    return l.__linkDimmed ? 0 : (l.particles ?? 0);
+                }}
                 linkDirectionalParticleSpeed={0.005}
                 linkDirectionalParticleWidth={(link: object) => (link as { particleWidth: number }).particleWidth ?? 1}
                 linkDirectionalParticleColor={(link: object) => (link as { color: string }).color}
@@ -648,11 +773,12 @@ export default function GraphVisualizer({
                 showNavInfo={false}
             />
 
-            {/* ─── Node Info Sidebar ────────────────────────────────────────── */}
+            {/* ─── Node Info Sidebar ─────────────────────────────────────────── */}
             <NodeInfoPanel
                 node={selectedNode}
                 links={links}
                 onClose={() => setSelectedNode(null)}
+                onViewCode={(n) => setCodeViewerNode(n)}
             />
 
             {/* ─── Sampling indicator banner ────────────────────────────── */}
@@ -682,7 +808,7 @@ export default function GraphVisualizer({
                 🖱 Drag · Scroll · Click node
             </div>
 
-            {/* ─── Stats badge ─────────────────────────────────────────────── */}
+            {/* ─── Stats badge ─────────────────────────────────────────── */}
             <div
                 className="absolute bottom-3 left-3 z-10 flex items-center gap-3 text-[11px] px-3 py-1.5 rounded-lg"
                 style={{ background: "rgba(15,23,42,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.05)" }}
@@ -691,6 +817,19 @@ export default function GraphVisualizer({
                 <span className="w-px h-3 bg-white/10" />
                 <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.links.length}</span> edges</span>
             </div>
+
+            {/* ─── Code Drill-Down Modal ────────────────────────────────────── */}
+            {codeViewerNode && (
+                <CodeViewer
+                    nodeId={codeViewerNode.file_path
+                        ? `${codeViewerNode.file_path}:${codeViewerNode.name}`
+                        : String(codeViewerNode.id ?? codeViewerNode.name)}
+                    repoIds={repoIds.length > 0 ? repoIds : (codeViewerNode.repo_id ? [codeViewerNode.repo_id] : [])}
+                    fileName={codeViewerNode.file_path?.split("/").pop() ?? codeViewerNode.name}
+                    functionName={codeViewerNode.name}
+                    onClose={() => setCodeViewerNode(null)}
+                />
+            )}
         </div>
     );
 }
