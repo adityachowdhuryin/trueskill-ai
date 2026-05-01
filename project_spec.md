@@ -265,7 +265,7 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 |---|---|---|
 | **Cyclomatic Complexity** | ✅ Implemented | `ingest.py` — full AST traversal counts decision points (if/for/while/except/and/or/ternary). Grader scores against claimed difficulty level. |
 | **Stylometry** | ✅ Implemented | `forensics.py` — Shannon entropy of snake_case/camelCase/PascalCase distribution, git history bulk-commit detection, authenticity score 0–100. |
-| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` (file:function references); frontend `GraphVisualizer` can highlight them in the 3D graph. |
+| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` (file:function references); `SkillCard` 👁 View button opens `CodeViewer` modal with source code; `GraphVisualizer` NodeInfoPanel also exposes Code Drill-Down for Function nodes. |
 | **Multi-language support** | ✅ Implemented | tree-sitter parsers for Python, JavaScript, TypeScript, Go, Java, Rust. |
 | **Streaming results** | ✅ Implemented | `/api/analyze` returns SSE with live per-node progress then final JSON. |
 | **Candidate comparison** | ✅ Implemented | SQLite persistence + `/compare` frontend page. |
@@ -299,7 +299,7 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand via `POST /api/benchmarks/generate` so traces always align |
 | `ContributionHeatmap.tsx` | GitHub-style commit heatmap |
 | `SkillTimeline.tsx` | Language timeline chart |
-| `GraphVisualizer.tsx` | 3D force-graph with smart sampling banner |
+| `GraphVisualizer.tsx` | 3D force-graph (**react-force-graph-3d** + Three.js): **Bloom** post-processing via `UnrealBloomPass`, **Neighborhood Focus Mode** (hover dims non-adjacent nodes via direct Three.js material mutation — zero re-renders), **Code Drill-Down** (Function nodes show “👁 View Source” button in NodeInfoPanel), **d3-force physics** tuning (charge −180), **atmospheric fog** (`FogExp2`), **Reset Camera** (`zoomToFit`), **Screenshot export** (`renderer().domElement.toDataURL`), Type / Complexity / Repo colour modes, search + type filters |
 | `VerifiedBadge.tsx` | Shareable public profile badge |
 | `ATSScorePanel.tsx` | ATS evaluation results panel |
 
