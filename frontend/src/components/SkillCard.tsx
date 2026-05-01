@@ -7,6 +7,7 @@ import {
     FileText, Braces, Hash, Eye, EyeOff, ClipboardCopy,
     AlertTriangle, Info,
 } from "lucide-react";
+import CodeViewer from "./CodeViewer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface VerificationResult {
@@ -24,6 +25,7 @@ export interface SkillCardProps {
     result: VerificationResult;
     index?: number;
     forceExpanded?: boolean;
+    repoIds?: string[];  // repo IDs to try for code drill-down
 }
 
 // ─── Status config ────────────────────────────────────────────────────────────
@@ -146,7 +148,13 @@ function fileExtIcon(ext: string) {
     }
 }
 
-function EvidenceRow({ node, onCopy }: { node: ParsedNode; onCopy: () => void }) {
+function EvidenceRow({
+    node,
+    onViewCode,
+}: {
+    node: ParsedNode;
+    onViewCode: () => void;
+}) {
     const [copied, setCopied] = useState(false);
 
     const handleCopy = (e: React.MouseEvent) => {
@@ -155,7 +163,6 @@ function EvidenceRow({ node, onCopy }: { node: ParsedNode; onCopy: () => void })
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
         });
-        onCopy();
     };
 
     return (
@@ -176,6 +183,16 @@ function EvidenceRow({ node, onCopy }: { node: ParsedNode; onCopy: () => void })
                     <span className="text-xs font-mono text-slate-700 truncate">{node.name}</span>
                 )}
             </div>
+            {/* View Code button */}
+            <button
+                onClick={(e) => { e.stopPropagation(); onViewCode(); }}
+                title="View source code"
+                className="opacity-0 group-hover/row:opacity-100 transition-opacity flex items-center gap-1 px-2 py-1 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-600 hover:bg-indigo-100 text-[10px] font-semibold"
+            >
+                <Eye className="w-3 h-3" />
+                View
+            </button>
+            {/* Copy button */}
             <button
                 onClick={handleCopy}
                 title="Copy node ID"
@@ -270,12 +287,15 @@ function Section({ icon, title, badge, children }: {
 }
 
 // ─── Main Card ────────────────────────────────────────────────────────────────
-export default function SkillCard({ result, index = 0, forceExpanded }: SkillCardProps) {
+export default function SkillCard({ result, index = 0, forceExpanded, repoIds = [] }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [showInterview, setShowInterview] = useState(false);
     const [interviewLoading, setInterviewLoading] = useState(false);
     const [interviewData, setInterviewData] = useState<any | null>(null);
     const [allCopied, setAllCopied] = useState(false);
+
+    // Code drill-down state
+    const [codeViewerNode, setCodeViewerNode] = useState<ParsedNode | null>(null);
 
     // forceExpanded override
     useEffect(() => {
@@ -329,6 +349,7 @@ export default function SkillCard({ result, index = 0, forceExpanded }: SkillCar
     const isUnverified = result.status === "Unverified";
 
     return (
+    <>
         <div
             className={`group relative rounded-2xl border-2 ${cfg.border} ${cfg.hoverBorder} ${cfg.bg} shadow-sm hover:shadow-md transition-all duration-300 cursor-pointer`}
             style={{ animationDelay: `${index * 60}ms` }}
@@ -437,7 +458,11 @@ export default function SkillCard({ result, index = 0, forceExpanded }: SkillCar
                             >
                                 <div className="space-y-1.5">
                                     {parsedNodes.map((node, idx) => (
-                                        <EvidenceRow key={idx} node={node} onCopy={() => {}} />
+                                        <EvidenceRow
+                                            key={idx}
+                                            node={node}
+                                            onViewCode={() => setCodeViewerNode(node)}
+                                        />
                                     ))}
                                     {result.evidence_node_ids.length > 12 && (
                                         <p className="text-[10px] text-slate-400 italic pl-2">
@@ -541,5 +566,17 @@ export default function SkillCard({ result, index = 0, forceExpanded }: SkillCar
                 </div>
             </div>
         </div>
+
+        {/* ── Code Drill-Down Modal ── */}
+        {codeViewerNode && (
+            <CodeViewer
+                nodeId={codeViewerNode.raw}
+                repoIds={repoIds.length > 0 ? repoIds : [result.claim_id.split("_")[0]]}
+                fileName={codeViewerNode.file || codeViewerNode.raw}
+                functionName={codeViewerNode.name || codeViewerNode.raw}
+                onClose={() => setCodeViewerNode(null)}
+            />
+        )}
+    </>
     );
 }

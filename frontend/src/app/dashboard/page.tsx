@@ -1570,6 +1570,7 @@ export default function DashboardPage() {
                                                         result={result}
                                                         index={idx}
                                                         forceExpanded={expandAll}
+                                                        repoIds={multiRepoIds.length > 0 ? multiRepoIds : (analysisResult.repo_id ? [analysisResult.repo_id] : [])}
                                                     />
                                                 ))}
 

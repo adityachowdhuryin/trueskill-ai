@@ -67,6 +67,7 @@ class FunctionNode:
     repo_id: str
     parent_class: Optional[str] = None  # For methods inside classes
     calls: list[str] = field(default_factory=list)  # Function names this function calls
+    source_code: str = ""  # Raw source text of the function body (capped at 10KB)
 
 
 @dataclass
@@ -429,6 +430,8 @@ def _parse_python_file(
                 args = _extract_function_args(node, source_code)
                 complexity = _calculate_cyclomatic_complexity(node, source_code)
                 calls = _extract_function_calls(node, source_code)
+                # Capture raw source text for code drill-down (capped at 10KB)
+                source_text = source_code[node.start_byte:node.end_byte].decode(errors="replace")[:10_000]
                 
                 functions.append(FunctionNode(
                     name=func_name,
@@ -439,7 +442,8 @@ def _parse_python_file(
                     file_path=relative_path,
                     repo_id=repo_id,
                     parent_class=parent_class,
-                    calls=calls
+                    calls=calls,
+                    source_code=source_text,
                 ))
                 return  # Don't recurse into function body for nested functions (for simplicity)
         
@@ -536,6 +540,8 @@ def _parse_js_ts_file(
                 args = _extract_function_args(node, source_code)
                 complexity = _calculate_cyclomatic_complexity(node, source_code)
                 calls = _extract_function_calls(node, source_code)
+                # Capture raw source text for code drill-down (capped at 10KB)
+                source_text = source_code[node.start_byte:node.end_byte].decode(errors="replace")[:10_000]
 
                 functions.append(FunctionNode(
                     name=func_name,
@@ -546,7 +552,8 @@ def _parse_js_ts_file(
                     file_path=relative_path,
                     repo_id=repo_id,
                     parent_class=parent_class,
-                    calls=calls
+                    calls=calls,
+                    source_code=source_text,
                 ))
                 return
 
@@ -645,6 +652,8 @@ def _parse_generic_file(
             
             raw_text = source_code[node.start_byte:node.end_byte].decode(errors="ignore")
             complexity = 1 + sum(raw_text.count(kw) for kw in (" if ", " for ", " while ", " catch ", " match ", " else if "))
+            # Capture source text for code drill-down (capped at 10KB)
+            source_text = raw_text[:10_000]
             
             functions.append(FunctionNode(
                 name=func_name,
@@ -655,7 +664,8 @@ def _parse_generic_file(
                 file_path=relative_path,
                 repo_id=repo_id,
                 parent_class=parent_class,
-                calls=[]
+                calls=[],
+                source_code=source_text,
             ))
             return 
 
@@ -854,6 +864,7 @@ def insert_into_neo4j(graph_data: GraphData) -> dict[str, Any]:
             "file_path": fn.file_path,
             "parent_class": fn.parent_class,
             "repo_id": repo_id,
+            "source_code": fn.source_code,
         })
 
     for batch in _batch_list(func_rows):
@@ -867,7 +878,8 @@ def insert_into_neo4j(graph_data: GraphData) -> dict[str, Any]:
                 fn.line_start = row.line_start,
                 fn.line_end = row.line_end,
                 fn.file_path = row.file_path,
-                fn.parent_class = row.parent_class
+                fn.parent_class = row.parent_class,
+                fn.source_code = row.source_code
         """, {"rows": batch})
         stats["functions"] += len(batch)
 
