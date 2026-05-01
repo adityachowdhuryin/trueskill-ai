@@ -136,6 +136,70 @@ async def ingest_repository(request: IngestRequest, req: Request):
 
 
 # =============================================================================
+# Evidence Code Drill-Down Endpoint
+# =============================================================================
+
+@router.get("/node-code/{repo_id}/{node_id:path}")
+async def get_node_code(repo_id: str, node_id: str):
+    """
+    GET /api/node-code/{repo_id}/{node_id}
+
+    Return source_code and metadata for a Function node given its func_id.
+    node_id format matches evidence_node_ids: "file/path.py:FunctionName"
+    or "file/path.py:ClassName.method_name"
+
+    Returns 404 with a re-ingest hint if source_code was not stored
+    (repos ingested before this feature was added).
+    """
+    try:
+        results = neo4j_driver.execute_query(
+            """
+            MATCH (fn:Function {func_id: $func_id, repo_id: $repo_id})
+            RETURN fn.source_code   AS source_code,
+                   fn.name          AS name,
+                   fn.file_path     AS file_path,
+                   fn.line_start    AS line_start,
+                   fn.line_end      AS line_end,
+                   fn.complexity_score AS complexity_score,
+                   fn.args          AS args,
+                   fn.parent_class  AS parent_class
+            LIMIT 1
+            """,
+            {"func_id": node_id, "repo_id": repo_id},
+        )
+
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail="node_not_found"
+            )
+
+        row = results[0]
+
+        if not row.get("source_code"):
+            raise HTTPException(
+                status_code=404,
+                detail="no_source_code"
+            )
+
+        return {
+            "source_code":      row["source_code"],
+            "name":             row.get("name", ""),
+            "file_path":        row.get("file_path", ""),
+            "line_start":       row.get("line_start"),
+            "line_end":         row.get("line_end"),
+            "complexity_score": row.get("complexity_score"),
+            "args":             row.get("args") or [],
+            "parent_class":     row.get("parent_class"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch node code: {str(e)}")
+
+
+# =============================================================================
 # Extract Profile Endpoint
 # =============================================================================
 
