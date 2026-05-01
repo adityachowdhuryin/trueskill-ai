@@ -41,7 +41,8 @@ trueskill-ai/
 │           ├── GraphVisualizer.tsx  # 3D force-graph with smart sampling banner
 │           ├── GraphFullscreenModal.tsx
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
-│           ├── SkillCard.tsx        # Per-claim card: score bar, parsed evidence, interview prep
+│           ├── SkillCard.tsx        # Per-claim card: score bar, parsed evidence, interview prep, code drill-down
+│           ├── CodeViewer.tsx       # [NEW] Source code modal with inline syntax highlighting
 │           ├── SkillRadar.tsx       # Radar chart with LLM-generated benchmarks
 │           ├── ContributionHeatmap.tsx # GitHub-style commit heatmap
 │           ├── VerifiedBadge.tsx    # Shareable public profile badge
@@ -138,6 +139,11 @@ npm run dev
 | `POST` | `/api/benchmarks/generate` | LLM-generates role benchmark scores for a given skill topic list |
 | `POST` | `/api/interview-questions` | Generates personalised interview questions for a verified skill |
 
+### Evidence Code Drill-Down
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch raw source code for a Function node by its `func_id` — returns `source_code`, `name`, `file_path`, `line_start/end`, `complexity_score`, `args` |
+
 ### Career & ATS Tools
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -226,9 +232,20 @@ The dashboard Skills tab is a premium credential report panel:
 - **Filter toolbar:** Instant search by skill name, status dropdown, Expand All / Collapse All, live results count
 - **Animated score bar:** Fills 0→score on mount, color-coded green/amber/red
 - **Parsed evidence nodes:** `path/file.py:function_name` rendered as `📄 file.py → function_name` with file-type badges (PY/TS/JS)
+- **Evidence Code Drill-Down:** Hover any evidence row → `👁 View` button → opens `CodeViewer` modal with the actual function source code, syntax highlighted with line numbers
 - **Sectioned card layout:** AI Reasoning / Complexity Analysis / Code Evidence / Interview Prep
 - **AI Interview Prep:** 5 personalised questions per skill with per-question collapsible hints and Copy All button
 - **Unverified skills:** Friendly actionable message instead of raw error text
+
+### Evidence Code Drill-Down (`CodeViewer.tsx`)
+When the user clicks **👁 View** on an evidence row, the `CodeViewer` modal opens:
+- Calls `GET /api/node-code/{repoId}/{nodeId}` — the `nodeId` is the existing `func_id` format (`file.py:function_name`)
+- **Source code** is stored in Neo4j at ingest time (tree-sitter captures raw bytes, capped 10KB/fn)
+- **Inline syntax tokenizer** (zero npm deps): keywords violet · strings emerald · numbers amber · class names sky · comments slate italic — covers Python + JS/TS/Go/Java/Rust
+- **Line numbers** in gutter aligned to the function's actual position in the file (`line_start` offset)
+- **Metadata bar:** file path breadcrumb + `Lines X–Y` + `CC N` complexity badge + `(args...)` list
+- **Copy Code** button, **ESC** / backdrop to close
+- **Graceful degradation:** repos ingested before this feature show a "Re-ingest to enable" message; future ingestions work automatically
 
 ### Shareable Verified Profile
 After running an analysis:
