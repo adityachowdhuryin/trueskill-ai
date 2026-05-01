@@ -1977,6 +1977,7 @@ export default function DashboardPage() {
                     onNodeClick={handleNodeClick}
                     isLoading={isLoadingGraph}
                     graphMeta={graphMeta}
+                    repoIds={multiRepoIds.length > 0 ? multiRepoIds : (analysisResult?.repo_id ? [analysisResult.repo_id] : [])}
                 />
             )}
         </div>
