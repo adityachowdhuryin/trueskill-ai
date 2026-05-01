@@ -87,6 +87,22 @@ class VerificationResult(BaseModel):
     complexity_analysis: str
 ```
 
+**Function node (Neo4j + in-memory):**
+```python
+class FunctionNode:
+    name: str
+    args: list[str]
+    complexity_score: int
+    line_start: int
+    line_end: int
+    file_path: str
+    repo_id: str
+    parent_class: str | None
+    calls: list[str]
+    source_code: str  # raw function body captured at parse time (capped 10KB)
+                      # stored on Neo4j Function node for Code Drill-Down
+```
+
 **Graph evidence:**
 ```python
 class GraphEvidence(BaseModel):
@@ -213,6 +229,17 @@ POST   /api/benchmarks/generate        { role_description, skill_topics[] } → 
 POST   /api/interview-questions        { topic, claim_text, difficulty, num_questions } → { questions[] }
 ```
 
+### Evidence Code Drill-Down
+```
+GET    /api/node-code/{repo_id}/{node_id}  → { source_code, name, file_path,
+                                               line_start, line_end,
+                                               complexity_score, args, parent_class }
+       # node_id format matches evidence_node_ids: "path/file.py:function_name"
+       # 404 detail=no_source_code → repo needs re-ingestion
+       # 404 detail=node_not_found → node absent from graph
+       # Supports forward-slashes via FastAPI :path parameter type
+```
+
 ### Career & ATS Tools
 ```
 POST   /api/coach                      { verified_skills, job_description }
@@ -267,7 +294,8 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 ### Key Frontend Components
 | Component | Description |
 |---|---|
-| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, Interview Prep with collapsible hints + Copy All |
+| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, hover **👁 View Code** button on evidence rows, Interview Prep with collapsible hints + Copy All |
+| `CodeViewer.tsx` | **[NEW]** Code drill-down modal: inline syntax highlighter (zero npm deps), line numbers, metadata bar (Lines X–Y, CC badge, args), Copy Code, loading skeleton, graceful re-ingest / not-found states, ESC to close |
 | `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand via `POST /api/benchmarks/generate` so traces always align |
 | `ContributionHeatmap.tsx` | GitHub-style commit heatmap |
 | `SkillTimeline.tsx` | Language timeline chart |
