@@ -280,9 +280,10 @@ export default function GraphVisualizer({
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [showLegend, setShowLegend] = useState(true);
     const [showSearchBar, setShowSearchBar] = useState(false);
-    const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
     const [codeViewerNode, setCodeViewerNode] = useState<GraphNode | null>(null);
     const bloomAdded = useRef(false);
+    const hoveredNodeIdRef = useRef<string | null>(null);  // ref, not state — avoids re-renders
+    const nodeObjectsRef = useRef<Record<string, THREE.Group>>({}); // store Three.js groups for direct mutation
     const autoRotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const userInteracted = useRef(false);
 
@@ -334,7 +335,7 @@ export default function GraphVisualizer({
         return NODE_COLORS[node.type] ?? "#64748b";
     }, [colorMode]);
 
-    // Filter logic
+    // Filter logic — hover focus is handled via direct Three.js mutation, NOT here
     const query = searchQuery.toLowerCase().trim();
     const graphData = useMemo(() => {
         const filteredNodes = nodes
@@ -344,13 +345,8 @@ export default function GraphVisualizer({
                 const baseSize = n.type === "File" ? 10 : n.type === "Class" ? 7 : 4;
                 const sizeByDegree = Math.max(baseSize, Math.min(baseSize + degree * 0.4, 20));
                 const color = getNodeColor(n);
-                // Dim if search active and name doesn't match
-                const searchDimmed = query.length > 0 && !n.name.toLowerCase().includes(query);
-                // Dim if a different node is hovered and this node isn't its neighbor
-                const focusDimmed = hoveredNodeId !== null
-                    && n.id !== hoveredNodeId
-                    && !neighborSet[hoveredNodeId]?.has(n.id);
-                const dimmed = searchDimmed || focusDimmed;
+                // Only dim based on search — hover dimming is done via direct Three.js mutation
+                const dimmed = query.length > 0 && !n.name.toLowerCase().includes(query);
                 return { ...n, color, val: sizeByDegree, __degree: degree, __dimmed: dimmed };
             });
 
@@ -359,22 +355,13 @@ export default function GraphVisualizer({
             const src = typeof l.source === "object" ? (l.source as GraphNodeInternal).id : (l.source as string);
             const tgt = typeof l.target === "object" ? (l.target as GraphNodeInternal).id : (l.target as string);
             return nodeIds.has(src) && nodeIds.has(tgt);
-        }).map(l => {
-            const src = typeof l.source === "object" ? (l.source as GraphNodeInternal).id ?? "" : (l.source as string);
-            const tgt = typeof l.target === "object" ? (l.target as GraphNodeInternal).id ?? "" : (l.target as string);
-            // Dim link if neither endpoint is the hovered node or its neighbors
-            const linkDimmed = hoveredNodeId !== null
-                && src !== hoveredNodeId && tgt !== hoveredNodeId
-                && !neighborSet[hoveredNodeId]?.has(src)
-                && !neighborSet[hoveredNodeId]?.has(tgt);
-            return { ...l, ...getLinkConfig(l.type), __linkDimmed: linkDimmed };
-        });
+        }).map(l => ({ ...l, ...getLinkConfig(l.type) }));
 
         return { nodes: filteredNodes, links: filteredLinks };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [nodes, links, hiddenTypes, colorMode, query, degreeMap, neighborSet, hoveredNodeId]);
+    }, [nodes, links, hiddenTypes, colorMode, query, degreeMap]);
 
-    // Custom Three.js node object — glowing sphere (glow provided by bloom post-process)
+    // Custom Three.js node object — stores group ref for direct hover-mutation
     const nodeThreeObject = useCallback((rawNode: object) => {
         const n = rawNode as GraphNodeInternal & { __dimmed?: boolean; val?: number };
         const color = n.color ?? getNodeColor(n);
@@ -393,8 +380,12 @@ export default function GraphVisualizer({
         });
         const sphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), mat);
         group.add(sphere);
+
+        // Store reference so hover handler can mutate opacity directly (no re-render needed)
+        if (n.id != null) nodeObjectsRef.current[String(n.id)] = group;
+
         return group;
-    }, [colorMode, getNodeColor, hoveredNodeId]);  // hoveredNodeId triggers rebuild for dimming
+    }, [colorMode, getNodeColor]);  // NO hoveredNodeId — hover handled via direct mutation
 
     // Auto-rotate camera on load
     useEffect(() => {
@@ -421,12 +412,29 @@ export default function GraphVisualizer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [graphData.nodes.length > 0]);
 
-    // Hover cursor + neighborhood focus
+    // Hover cursor + neighborhood focus (via direct Three.js mutation — no React re-renders)
     const handleNodeHover = useCallback((node: object | null) => {
         document.body.style.cursor = node ? "pointer" : "default";
         const n = node as GraphNodeInternal | null;
-        setHoveredNodeId(n?.id ?? null);
-    }, []);
+        const hovId = n?.id ? String(n.id) : null;
+        hoveredNodeIdRef.current = hovId;
+
+        const objects = nodeObjectsRef.current;
+        const neighbors = hovId ? (neighborSet[hovId] ?? new Set<string>()) : new Set<string>();
+
+        Object.entries(objects).forEach(([nid, group]) => {
+            const isDimmed = hovId !== null && nid !== hovId && !neighbors.has(nid);
+            group.children.forEach(child => {
+                const mesh = child as THREE.Mesh;
+                if (mesh.material) {
+                    const mat = mesh.material as THREE.MeshLambertMaterial;
+                    mat.opacity = isDimmed ? 0.06 : 1;
+                    mat.emissiveIntensity = isDimmed ? 0.0 : 0.7;
+                    mat.needsUpdate = true;
+                }
+            });
+        });
+    }, [neighborSet]);
 
     // Node click → zoom + info panel
     const handleNodeClick = useCallback((rawNode: object) => {
@@ -749,19 +757,13 @@ export default function GraphVisualizer({
                 nodeThreeObjectExtend={false}
                 nodeLabel={handleNodeLabel}
                 nodeOpacity={1}
-                linkColor={(link: object) => {
-                    const l = link as { color: string; __linkDimmed?: boolean };
-                    return l.__linkDimmed ? "#020617" : l.color;
-                }}
+                linkColor={(link: object) => (link as { color: string }).color}
                 linkWidth={(link: object) => (link as { width: number }).width ?? 1}
                 linkOpacity={0.65}
                 linkDirectionalArrowLength={4}
                 linkDirectionalArrowRelPos={1}
                 linkDirectionalArrowColor={(link: object) => (link as { color: string }).color}
-                linkDirectionalParticles={(link: object) => {
-                    const l = link as { particles: number; __linkDimmed?: boolean };
-                    return l.__linkDimmed ? 0 : (l.particles ?? 0);
-                }}
+                linkDirectionalParticles={(link: object) => (link as { particles: number }).particles ?? 0}
                 linkDirectionalParticleSpeed={0.005}
                 linkDirectionalParticleWidth={(link: object) => (link as { particleWidth: number }).particleWidth ?? 1}
                 linkDirectionalParticleColor={(link: object) => (link as { color: string }).color}
