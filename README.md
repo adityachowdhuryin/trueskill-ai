@@ -38,7 +38,7 @@ trueskill-ai/
 │       │   ├── resume-toolkit/      # 4-step AI Resume Toolkit
 │       │   └── profile/[id]/        # Public shareable verified profile page
 │       └── components/
-│           ├── GraphVisualizer.tsx  # 3D force-graph with smart sampling banner
+│           ├── GraphVisualizer.tsx  # 3D force-graph: bloom, fog, hover-focus, drill-down, reset, export
 │           ├── GraphFullscreenModal.tsx
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
 │           ├── SkillCard.tsx        # Per-claim card: score bar, parsed evidence, interview prep, code drill-down
@@ -204,13 +204,25 @@ Results stream back to the frontend via **Server-Sent Events (SSE)**.
 - Extracts `File`, `Class`, `Function`, `Import` nodes + relationships into Neo4j AuraDB
 - Computes **cyclomatic complexity** for every function
 
-### 3D Knowledge Graph (Smart Sampling)
+### 3D Knowledge Graph
 The `/api/graph/{repo_id}` endpoint supports large repositories without capping at 1000 nodes:
 - **Default limit**: 5,000 nodes (configurable up to 25,000 via `?limit=N`)
 - **Sampling priority**: Files → Classes → Functions (top complexity first) → Imports
 - **Multi-repo**: Pass comma-separated IDs (`/api/graph/repo1,repo2`) for a combined view
 - **Server-side edge filtering**: Only edges between sampled nodes are returned — prevents rendering crashes
 - **UI banner**: Graph shows a "Showing X of Y nodes (sampled by complexity)" indicator when sampling is active
+
+#### 3D Graph Visual & UX Improvements
+| Feature | Description |
+|---------|-------------|
+| **Bloom Post-Processing** | `UnrealBloomPass` added to `postProcessingComposer()` — cinematic neon glow on all nodes and link particles |
+| **Neighborhood Focus Mode** | Hover any node → non-adjacent nodes dim to 6% opacity via direct Three.js material mutation (zero React re-renders) |
+| **Code Drill-Down** | Click a `Function` node → NodeInfoPanel shows "👁 View Source Code" button → opens `CodeViewer` modal |
+| **Physics Tweaks** | d3-force charge strength set to -180 (vs default -30) for better node spacing |
+| **Reset Camera** | "Reset" button → `fgRef.zoomToFit(600)` snaps back to overview |
+| **Atmospheric Fog** | `THREE.FogExp2` makes distant nodes fade into the dark background for real 3D depth |
+| **Screenshot Export** | "Export" button → `renderer().domElement.toDataURL('image/png')` → downloads `knowledge-graph.png` |
+| **Toolbar** | Legend toggle, Type / Complexity / Repo colour modes, Search, Reset, Export — all in a glassmorphic top bar |
 
 ### Stylometric Forensics
 The `forensics.py` module detects AI-generated or copy-pasted code via:
