@@ -237,6 +237,9 @@ export default function DashboardPage() {
     const [graphLinks, setGraphLinks] = useState<GraphLink[]>([]);
     const [isLoadingGraph, setIsLoadingGraph] = useState(false);
     const [graphMeta, setGraphMeta] = useState<Record<string, unknown> | null>(null);
+    // Feature 1: evidence highlighting
+    const [graphHighlightIds, setGraphHighlightIds] = useState<string[]>([]);
+    const [funcNameToNodeId, setFuncNameToNodeId] = useState<Record<string, string>>({});
 
     // Coach state
     const [jobDescription, setJobDescription] = useState("");
@@ -860,6 +863,18 @@ export default function DashboardPage() {
     const handleNodeClick = useCallback((node: GraphNode) => {
         console.log("Node clicked:", node);
     }, []);
+
+    // Feature 1: resolve evidence IDs → graph node IDs, then switch to graph tab
+    const handleShowInGraph = useCallback((evidenceNodeIds: string[]) => {
+        const nodeIds = evidenceNodeIds.flatMap(eid => {
+            // evidence format: "path/file.py:function_name" — extract function name
+            const funcName = eid.split(":").pop()?.trim() ?? "";
+            const nid = funcNameToNodeId[funcName];
+            return nid ? [nid] : [];
+        });
+        setGraphHighlightIds(nodeIds);
+        setResultTab("graph");  // switch to graph tab
+    }, [funcNameToNodeId]);
 
     // Handle ATS score generation
     const handleGetATSScore = useCallback(async () => {
@@ -1571,6 +1586,7 @@ export default function DashboardPage() {
                                                         index={idx}
                                                         forceExpanded={expandAll}
                                                         repoIds={multiRepoIds.length > 0 ? multiRepoIds : (analysisResult.repo_id ? [analysisResult.repo_id] : [])}
+                                                        onShowInGraph={handleShowInGraph}
                                                     />
                                                 ))}
 
@@ -1659,6 +1675,8 @@ export default function DashboardPage() {
                                             links={graphLinks}
                                             onNodeClick={handleNodeClick}
                                             graphMeta={graphMeta}
+                                            highlightedNodeIds={graphHighlightIds}
+                                            onHighlightReady={(map) => setFuncNameToNodeId(map)}
                                         />
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center bg-slate-900 rounded-b-2xl text-slate-400 min-h-[400px]">

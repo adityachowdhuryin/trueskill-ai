@@ -26,6 +26,7 @@ export interface SkillCardProps {
     index?: number;
     forceExpanded?: boolean;
     repoIds?: string[];  // repo IDs to try for code drill-down
+    onShowInGraph?: (evidenceNodeIds: string[]) => void;  // Feature 1: jump to graph
 }
 
 // ─── Status config ────────────────────────────────────────────────────────────
@@ -151,9 +152,11 @@ function fileExtIcon(ext: string) {
 function EvidenceRow({
     node,
     onViewCode,
+    onShowInGraph,
 }: {
     node: ParsedNode;
     onViewCode: () => void;
+    onShowInGraph?: () => void;
 }) {
     const [copied, setCopied] = useState(false);
 
@@ -183,6 +186,16 @@ function EvidenceRow({
                     <span className="text-xs font-mono text-slate-700 truncate">{node.name}</span>
                 )}
             </div>
+            {/* Show in Graph button — Feature 1 */}
+            {onShowInGraph && (
+                <button
+                    onClick={(e) => { e.stopPropagation(); onShowInGraph(); }}
+                    title="Highlight in 3D Graph"
+                    className="opacity-0 group-hover/row:opacity-100 transition-opacity flex items-center gap-1 px-2 py-1 rounded-md bg-amber-50 border border-amber-200 text-amber-600 hover:bg-amber-100 text-[10px] font-semibold"
+                >
+                    📍 Show
+                </button>
+            )}
             {/* View Code button */}
             <button
                 onClick={(e) => { e.stopPropagation(); onViewCode(); }}
@@ -287,7 +300,7 @@ function Section({ icon, title, badge, children }: {
 }
 
 // ─── Main Card ────────────────────────────────────────────────────────────────
-export default function SkillCard({ result, index = 0, forceExpanded, repoIds = [] }: SkillCardProps) {
+export default function SkillCard({ result, index = 0, forceExpanded, repoIds = [], onShowInGraph }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [showInterview, setShowInterview] = useState(false);
     const [interviewLoading, setInterviewLoading] = useState(false);
@@ -462,6 +475,9 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                             key={idx}
                                             node={node}
                                             onViewCode={() => setCodeViewerNode(node)}
+                                            onShowInGraph={onShowInGraph
+                                                ? () => onShowInGraph(result.evidence_node_ids)
+                                                : undefined}
                                         />
                                     ))}
                                     {result.evidence_node_ids.length > 12 && (
