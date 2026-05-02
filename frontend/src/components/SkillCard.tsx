@@ -476,7 +476,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                             node={node}
                                             onViewCode={() => setCodeViewerNode(node)}
                                             onShowInGraph={onShowInGraph
-                                                ? () => onShowInGraph(result.evidence_node_ids)
+                                                ? () => onShowInGraph([node.raw])
                                                 : undefined}
                                         />
                                     ))}

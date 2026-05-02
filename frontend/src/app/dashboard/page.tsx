@@ -240,6 +240,25 @@ export default function DashboardPage() {
     // Feature 1: evidence highlighting
     const [graphHighlightIds, setGraphHighlightIds] = useState<string[]>([]);
     const [funcNameToNodeId, setFuncNameToNodeId] = useState<Record<string, string>>({});
+
+    // Feature 1: build name→nodeId map eagerly from graphNodes data (no 3D mount needed)
+    // This runs as soon as graph data loads, so "Show in Graph" works even before visiting the tab
+    useEffect(() => {
+        if (graphNodes.length === 0) return;
+        const map: Record<string, string> = {};
+        graphNodes.forEach(n => {
+            const nid = String(n.id);
+            if (n.name) map[n.name] = nid;
+            // Also index by file stem and full file path for file-level evidence
+            if (n.file_path) {
+                map[n.file_path] = nid;
+                const stem = n.file_path.split("/").pop()?.split(".")[0];
+                if (stem) map[stem] = nid;
+            }
+        });
+        setFuncNameToNodeId(map);
+    }, [graphNodes]);
+
     // Feature A: AI graph summary — lifted here to persist across tab switches
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [graphSummary, setGraphSummary] = useState<any>(null);
@@ -870,13 +889,27 @@ export default function DashboardPage() {
     // Feature 1: resolve evidence IDs → graph node IDs, then switch to graph tab
     const handleShowInGraph = useCallback((evidenceNodeIds: string[]) => {
         const nodeIds = evidenceNodeIds.flatMap(eid => {
-            // evidence format: "path/file.py:function_name" — extract function name
-            const funcName = eid.split(":").pop()?.trim() ?? "";
-            const nid = funcNameToNodeId[funcName];
-            return nid ? [nid] : [];
+            // Try 1: extract function name after last colon (format: "path/file.py:func_name")
+            const funcName = eid.includes(":") ? eid.split(":").pop()?.trim() ?? "" : eid;
+            const nid1 = funcNameToNodeId[funcName];
+            if (nid1) return [nid1];
+
+            // Try 2: use the full raw evidence ID directly (some backends emit plain node IDs)
+            const nid2 = funcNameToNodeId[eid];
+            if (nid2) return [nid2];
+
+            // Try 3: use filename stem (for file-level evidence: "src/api.py" → "api")
+            const stem = eid.split("/").pop()?.split(".")[0] ?? "";
+            const nid3 = stem ? funcNameToNodeId[stem] : undefined;
+            if (nid3) return [nid3];
+
+            return [];
         });
         setGraphHighlightIds(nodeIds);
-        setResultTab("graph");  // switch to graph tab
+        if (nodeIds.length > 0) {
+            setResultTab("graph");  // switch to graph tab only if we found matching nodes
+        }
+        // If nodeIds is empty the caller's button will show no feedback — acceptable
     }, [funcNameToNodeId]);
 
     // Handle ATS score generation
@@ -1427,7 +1460,11 @@ export default function DashboardPage() {
                                 <button
                                     key={tab.id}
                                     id={`tab-${tab.id}`}
-                                    onClick={() => setResultTab(tab.id)}
+                                    onClick={() => {
+                                        setResultTab(tab.id);
+                                        // Clear graph highlights when navigating away manually
+                                        if (tab.id !== "graph") setGraphHighlightIds([]);
+                                    }}
                                     className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all duration-200 ${
                                         resultTab === tab.id
                                             ? "border-indigo-500 text-indigo-600 bg-white"

@@ -1,4 +1,4 @@
-# PROJECT SPECIFICATION: TrueSkill AI (MSc Data science Thesis)
+# PROJECT SPECIFICATION: TrueSkill AI (MSc Data Science Thesis)
 
 ## 1. Project Overview
 **Title:** TrueSkill AI: Automated Competency Verification System  
@@ -13,7 +13,7 @@
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | Next.js 14 (App Router), TypeScript, Tailwind CSS |
+| **Frontend** | Next.js 14 (App Router), TypeScript, Vanilla CSS |
 | **3D Graph** | react-force-graph-3d, Three.js |
 | **Charts** | Recharts |
 | **Backend** | Python 3.11+, FastAPI, Pydantic v2 |
@@ -39,8 +39,10 @@
 | **Report Generator** | `report.py` | Self-contained HTML verification report |
 | **Storage** | `storage.py` | SQLite CRUD for saving & comparing analyses |
 | **Database** | `db.py` | Neo4j AuraDB driver + `query_graph()` helper; supports `NEO4J_USERNAME` / `NEO4J_DATABASE` |
-| **LLM Client** | `llm.py` | Shared Gemini 2.5 Flash client + JSON parser |
-| **API** | `api.py` | 18+ FastAPI endpoints with rate limiting |
+| **Graph Explain** | `graph_explain.py` | 8-section AI architectural summary via Groq Llama 3.3 70B (tech stack, modules, hotspot, suggestions) |
+| **Function Explain** | `function_explain.py` | Per-function AI explanation: purpose, complexity verdict, refactor suggestions |
+| **LLM Client** | `llm.py` | Shared Groq Llama 3.3 70B client + JSON parser |
+| **API** | `api.py` | 25+ FastAPI endpoints with rate limiting |
 
 ---
 
@@ -52,7 +54,7 @@
 ```
 (:File   { name, path, language, repo_id })
 (:Class  { name, line_start, line_end, file_path, repo_id, bases[] })
-(:Function { name, args[], complexity_score, line_start, line_end, file_path, repo_id, parent_class, calls[] })
+(:Function { name, args[], complexity_score, line_start, line_end, file_path, repo_id, parent_class, calls[], source_code })
 (:Import { module_name, file_path, repo_id })
 ```
 
@@ -130,6 +132,41 @@ class ATSReport(BaseModel):
     improvements: list[str]
 ```
 
+**Graph Explain request (sent to `/api/graph/explain`):**
+```python
+class GraphExplainRequest(BaseModel):
+    repo_id: str
+    node_count: int
+    edge_count: int
+    type_counts: dict[str, int]
+    top_complex: list[dict]       # top 10 by complexity_score
+    top_hubs: list[dict]          # top 10 by degree
+    orphan_count: int
+    file_list: list[str]          # up to 20 file names (for tech stack inference)
+    edge_type_counts: dict[str, int]
+    avg_complexity: float
+    class_list: list[str]         # up to 10 class names
+    import_list: list[str]        # up to 15 import names
+    repo_names: list[str]
+```
+
+**Graph Summary response (8-section structured JSON):**
+```python
+{
+    "summary": str,               # 3-4 sentence overview
+    "architecture_style": str,    # e.g. "Modular Monolith"
+    "tech_stack": list[str],      # inferred technologies
+    "modules": [                  # logical module breakdown
+        { "name": str, "role": str, "key_files": list[str] }
+    ],
+    "key_observations": list[str],     # 5 specific bullets
+    "hotspot_analysis": str,           # highest-risk maintenance area
+    "improvement_suggestions": list[str],  # 3 actionable recommendations
+    "complexity_verdict": str,         # e.g. "High"
+    "complexity_reasoning": str,
+}
+```
+
 **SQLite analyses table:**
 ```sql
 CREATE TABLE analyses (
@@ -157,7 +194,7 @@ Runs as a LangGraph `StateGraph` with streaming SSE output:
 START → Parser Node → Auditor Node → Grader Node → END
 ```
 
-1. **Parser (Node A):** Resume text → `List[ResumeClaim]` via Gemini 2.5 Flash
+1. **Parser (Node A):** Resume text → `List[ResumeClaim]` via Groq Llama 3.3 70B
 2. **Auditor (Node B):** Per claim → topic-synonym expansion → Cypher query → `GraphEvidence`
 3. **Grader (Node C):** Evidence + LLM analysis → `VerificationResult` (0–100 score)
 
@@ -169,15 +206,13 @@ START → Parser Node → Auditor Node → Grader Node → END
 
 **Topic synonym expansion** (`TOPIC_SYNONYMS` map) covers 15+ tech domains for broader graph matching.
 
-**`claim_id` uniqueness:** Each claim is assigned an ID prefixed with the first 6 characters of `repo_id` (e.g. `abc123_0`). This prevents collisions when results from multiple repo analysis runs are merged by topic — duplicate `claim_0` IDs from separate runs no longer cause React key warnings or incorrect evidence attribution.
-
-**`_generate_summary()` consistency:** Both the empty-result path and the normal path return identical keys (`verified`, `partially_verified`, `unverified`, `total_claims`, `average_score`) matching the frontend `AnalysisResponse` TypeScript type.
+**`claim_id` uniqueness:** Each claim is assigned an ID prefixed with the first 6 characters of `repo_id` (e.g. `abc123_0`). This prevents collisions when results from multiple repo analysis runs are merged by topic.
 
 ### Workflow 2: The ATS Pipeline
 Standalone async call (no graph dependency):
 
 1. **Input:** PDF resume + job description text
-2. **LLM analysis:** Gemini extracts keywords, scores sections (Summary, Experience, Skills, Education)
+2. **LLM analysis:** Extracts keywords, scores sections (Summary, Experience, Skills, Education)
 3. **Output:** `ATSReport` + downloadable HTML report
 
 ### Workflow 3: AI Resume Toolkit (4-Step)
@@ -185,13 +220,27 @@ Multi-step sequential workflow available at `/resume-toolkit`:
 
 1. **Job Search** — PDF → LLM infers role + location → Jooble API → ranked job list
 2. **ATS Optimization** — PDF + JD → keyword gap analysis → LLM rewrites Skills/Summary
-3. **Hiring Manager Lookup** — Company name + title → Apollo.io `/people/search` (paid plan) → `/people/match` (free tier) → email pattern guess
+3. **Hiring Manager Lookup** — Company name + title → Apollo.io `/people/search` (paid) → `/people/match` (free tier) → email pattern guess
 4. **Email Drafting** — PDF + job posting + hiring manager → LLM-personalized cold email
 
 ### Workflow 4: Skill Coaching
 1. **Input:** `VerifiedSkills[]` + job description text
 2. **Logic:** Identify gaps (score < 50) + missing JD keywords
 3. **Output:** `BridgeProject` with title, tech stack, and step-by-step build instructions
+
+### Workflow 5: AI Graph Summary
+Triggered by the ✨ **Explain** button in the 3D Graph toolbar:
+
+1. **Client computes** structural metrics: file list, edge type counts, avg complexity, class/import lists, top hub nodes, top complex nodes
+2. **POST `/api/graph/explain`** sends enriched context to Groq Llama 3.3 70B
+3. **Structured 8-section JSON** returned and rendered as a collapsible glassmorphic panel
+
+### Workflow 6: Function Explain
+Triggered by clicking ✨ **Explain** in the NodeInfoPanel for any `Function` node:
+
+1. **Client sends** function name, source code, complexity score, file path
+2. **POST `/api/function/explain`** → Groq Llama 3.3 70B
+3. Returns: purpose summary, complexity verdict, potential bugs, refactor suggestions
 
 ---
 
@@ -211,6 +260,12 @@ GET    /api/graph/{repo_id}?limit=5000                          → GraphRespons
          # meta field: { total_nodes, returned_nodes, was_sampled, repo_ids[] }
 GET    /api/skill-timeline/{repo_id}                           → timeline by language
 GET    /api/forensics/{repo_id}                                → authorship + stylometry
+```
+
+### AI Graph Intelligence
+```
+POST   /api/graph/explain              { GraphExplainRequest }  → GraphSummaryData (8-section JSON)
+POST   /api/function/explain           { name, source_code, complexity_score, file_path } → FunctionExplanation
 ```
 
 ### Saved Analyses
@@ -265,11 +320,12 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 |---|---|---|
 | **Cyclomatic Complexity** | ✅ Implemented | `ingest.py` — full AST traversal counts decision points (if/for/while/except/and/or/ternary). Grader scores against claimed difficulty level. |
 | **Stylometry** | ✅ Implemented | `forensics.py` — Shannon entropy of snake_case/camelCase/PascalCase distribution, git history bulk-commit detection, authenticity score 0–100. |
-| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` (file:function references); `SkillCard` 👁 View button opens `CodeViewer` modal with source code; `GraphVisualizer` NodeInfoPanel also exposes Code Drill-Down for Function nodes. |
+| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids`; SkillCard shows 👁 View Code + 📍 Show in Graph per evidence row; GraphVisualizer NodeInfoPanel exposes Code Drill-Down + Function Explain for Function nodes; AI Graph Summary explains overall architecture. |
 | **Multi-language support** | ✅ Implemented | tree-sitter parsers for Python, JavaScript, TypeScript, Go, Java, Rust. |
 | **Streaming results** | ✅ Implemented | `/api/analyze` returns SSE with live per-node progress then final JSON. |
 | **Candidate comparison** | ✅ Implemented | SQLite persistence + `/compare` frontend page. |
 | **ATS evaluation** | ✅ Implemented | `ats.py` — weighted keyword/content/format scoring + downloadable report. |
+| **AI Architectural Insights** | ✅ Implemented | `graph_explain.py` — 8-section structured JSON via Groq; collapsible panel in 3D graph view. |
 
 ---
 
@@ -286,20 +342,21 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 ### Dashboard Tabs
 | Tab | Description |
 |---|---|
-| **Skills** | Sorted skill cards (Verified → Partial → Unverified). Filter toolbar: search by name, filter by status, Expand All / Collapse All. Each card shows animated score bar, parsed code evidence (file → function), AI reasoning, complexity analysis, and AI Interview Prep questions. |
+| **Skills** | Sorted skill cards (Verified → Partial → Unverified). Filter toolbar: search by name, filter by status, Expand All / Collapse All. Each card shows animated score bar, parsed code evidence (file → function), 📍 Show in Graph button per row, AI reasoning, complexity analysis, and AI Interview Prep questions. |
 | **Radar** | Skill radar chart comparing verified scores vs LLM-generated role benchmarks (via `POST /api/benchmarks/generate`). Shows gap analysis cards and summary pills. |
 | **Activity** | Contribution heatmap + language skill timeline. |
-| **Graph** | Interactive 3D force-graph of the Neo4j knowledge graph. |
+| **Graph** | Interactive 3D force-graph of the Neo4j knowledge graph with AI Summary, Evidence Highlighting, Path Finder, and Analytics Panel. |
 
 ### Key Frontend Components
 | Component | Description |
 |---|---|
-| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, hover **👁 View Code** button on evidence rows, Interview Prep with collapsible hints + Copy All |
-| `CodeViewer.tsx` | **[NEW]** Code drill-down modal: inline syntax highlighter (zero npm deps), line numbers, metadata bar (Lines X–Y, CC badge, args), Copy Code, loading skeleton, graceful re-ingest / not-found states, ESC to close |
-| `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand via `POST /api/benchmarks/generate` so traces always align |
+| `GraphVisualizer.tsx` | 3D force-graph (**react-force-graph-3d** + Three.js): Bloom post-processing, Neighborhood Focus Mode, **AI Graph Summary** (8-section collapsible panel), **Evidence Node Highlighting** (amber highlight for Show-in-Graph), **Function Explain** (per-node AI explanation), **Path Finder** (start→end dependency path), **Analytics Panel**, Code Drill-Down, Type/Complexity/Repo colour modes, search + type filters, first-load dimension fix |
+| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, hover **📍 Show in Graph** per evidence row, hover **👁 View Code** button, Interview Prep with collapsible hints + Copy All |
+| `CodeViewer.tsx` | Code drill-down modal: inline syntax highlighter (zero npm deps), line numbers, metadata bar (Lines X–Y, CC badge, args), Copy Code, loading skeleton, graceful re-ingest / not-found states, ESC to close |
+| `ErrorBoundary.tsx` | React error boundary wrapping graph and heavy async components; shows friendly fallback UI on crash |
+| `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand so traces always align |
 | `ContributionHeatmap.tsx` | GitHub-style commit heatmap |
 | `SkillTimeline.tsx` | Language timeline chart |
-| `GraphVisualizer.tsx` | 3D force-graph (**react-force-graph-3d** + Three.js): **Bloom** post-processing via `UnrealBloomPass`, **Neighborhood Focus Mode** (hover dims non-adjacent nodes via direct Three.js material mutation — zero re-renders), **Code Drill-Down** (Function nodes show “👁 View Source” button in NodeInfoPanel), **d3-force physics** tuning (charge −180), **atmospheric fog** (`FogExp2`), **Reset Camera** (`zoomToFit`), **Screenshot export** (`renderer().domElement.toDataURL`), Type / Complexity / Repo colour modes, search + type filters |
 | `VerifiedBadge.tsx` | Shareable public profile badge |
 | `ATSScorePanel.tsx` | ATS evaluation results panel |
 

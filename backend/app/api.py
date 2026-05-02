@@ -768,6 +768,13 @@ class GraphExplainRequest(BaseModel):
     top_complex: list          # [{name, complexity_score, type}]
     top_hubs: list             # [{name, degree, type}]
     orphan_count: int = 0
+    # Richer context (all optional for backwards compat)
+    file_list: list = []           # top 20 file names (helps infer tech stack & modules)
+    edge_type_counts: dict = {}    # {"calls": 120, "imports": 40} — reveals coupling style
+    avg_complexity: float = 0.0    # mean cyclomatic complexity across all functions
+    class_list: list = []          # top 10 class names (OOP vs functional signal)
+    import_list: list = []         # top 15 import names (third-party lib detection)
+    repo_names: list = []          # friendly repo names for multi-repo views
 
 
 @router.post("/graph/explain")
