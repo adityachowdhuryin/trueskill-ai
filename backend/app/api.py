@@ -696,6 +696,57 @@ async def get_graph_data(
         raise HTTPException(status_code=500, detail=f"Graph query failed: {str(e)}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Feature 3: Path Finder — shortest dependency path between two nodes
+# ─────────────────────────────────────────────────────────────────────────────
+class PathRequest(BaseModel):
+    start_id: str   # Neo4j elementId of start node
+    end_id: str     # Neo4j elementId of end node
+    repo_id: str    # informational scope
+
+
+@router.post("/graph/path")
+async def find_graph_path(req: PathRequest):
+    """
+    POST /api/graph/path
+    Shortest directed path between two nodes, depth capped at 10 hops.
+    Returns ordered path_nodes list and edge_types between consecutive nodes.
+    Returns found=False if no path exists within depth limit.
+    """
+    query = """
+    MATCH (start), (end)
+    WHERE elementId(start) = $start_id AND elementId(end) = $end_id
+    MATCH path = shortestPath((start)-[*..10]->(end))
+    RETURN
+        [n IN nodes(path) | {
+            id: elementId(n),
+            name: coalesce(n.name, n.module_name, 'unknown'),
+            type: labels(n)[0],
+            file_path: coalesce(n.file_path, n.path, ''),
+            complexity_score: n.complexity_score,
+            repo_id: n.repo_id
+        }] AS path_nodes,
+        [r IN relationships(path) | type(r)] AS edge_types
+    LIMIT 1
+    """
+    try:
+        results = query_graph(query, {
+            "start_id": req.start_id,
+            "end_id": req.end_id,
+        })
+        if not results:
+            return {"found": False, "path_nodes": [], "edge_types": [], "length": 0}
+        row = results[0]
+        return {
+            "found": True,
+            "path_nodes": row["path_nodes"],
+            "edge_types": row["edge_types"],
+            "length": len(row["path_nodes"]) - 1,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Path query failed: {str(e)}")
+
+
 @router.get("/health/db")
 async def database_health():
     """Check Neo4j database connectivity"""

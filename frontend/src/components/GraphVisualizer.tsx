@@ -3,7 +3,7 @@
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import * as THREE from "three";
-import { Search, X, Filter, Layers, Eye, RotateCcw, Camera } from "lucide-react";
+import { Search, X, Filter, Layers, Eye, RotateCcw, Camera, BarChart2, GitBranch, Zap } from "lucide-react";
 import CodeViewer from "./CodeViewer";
 
 // Dynamically import ForceGraph3D to avoid SSR issues
@@ -44,8 +44,10 @@ interface GraphVisualizerProps {
     onNodeClick?: (node: GraphNode) => void;
     isFullscreen?: boolean;
     showSearch?: boolean;
-    graphMeta?: Record<string, unknown> | null;  // sampling metadata from backend
-    repoIds?: string[];  // for Code Drill-Down from the graph panel
+    graphMeta?: Record<string, unknown> | null;
+    repoIds?: string[];
+    highlightedNodeIds?: string[];              // Feature 1: evidence highlighting
+    onHighlightReady?: (map: Record<string, string>) => void;  // Feature 1: name→nodeId map
 }
 
 // Vibrant, neon-accented color palette for node types
@@ -257,8 +259,166 @@ function NodeInfoPanel({ node, links, onClose, onViewCode }: NodeInfoPanelProps)
         </div>
     );
 }
+// ─── Graph Analytics Panel ───────────────────────────────────────────────────────────
+type AnalyticsTab = "hotspots" | "hubs" | "orphans";
 
-// ─── Main GraphVisualizer ──────────────────────────────────────────────────────
+interface GraphAnalyticsPanelProps {
+    nodes: Array<GraphNode & { __degree?: number }>;
+    degreeMap: Record<string, number>;
+    onFlyTo: (node: GraphNode) => void;
+}
+
+function GraphAnalyticsPanel({ nodes, degreeMap, onFlyTo }: GraphAnalyticsPanelProps) {
+    const [tab, setTab] = useState<AnalyticsTab>("hotspots");
+
+    const topComplexity = useMemo(() =>
+        [...nodes]
+            .filter(n => n.type === "Function" && n.complexity_score != null)
+            .sort((a, b) => (b.complexity_score ?? 0) - (a.complexity_score ?? 0))
+            .slice(0, 10),
+    [nodes]);
+
+    const topDegree = useMemo(() =>
+        [...nodes]
+            .sort((a, b) => (degreeMap[b.id] ?? 0) - (degreeMap[a.id] ?? 0))
+            .slice(0, 10),
+    [nodes, degreeMap]);
+
+    // Orphans: degree 0, exclude Import nodes (terminal by design)
+    const orphans = useMemo(() =>
+        nodes.filter(n => n.type !== "Import" && (degreeMap[n.id] ?? 0) === 0),
+    [nodes, degreeMap]);
+
+    const TABS: [AnalyticsTab, string, string][] = [
+        ["hotspots", "🔥", "Hotspots"],
+        ["hubs",     "🔗", "Hubs"],
+        ["orphans",  "🔴", `Orphans${orphans.length > 0 ? ` (${orphans.length})` : ""}`],
+    ];
+
+    return (
+        <div
+            className="absolute top-11 left-3 z-10 rounded-xl text-xs"
+            style={{
+                background: "rgba(15,23,42,0.93)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                backdropFilter: "blur(16px)",
+                width: 230,
+                maxHeight: 380,
+                display: "flex",
+                flexDirection: "column",
+            }}
+        >
+            {/* Tab header */}
+            <div className="flex border-b border-white/10 flex-shrink-0">
+                {TABS.map(([t, emoji, label]) => (
+                    <button
+                        key={t}
+                        onClick={() => setTab(t)}
+                        className="flex-1 py-2 text-[9px] font-semibold transition-colors"
+                        style={{
+                            color: tab === t ? "#c7d2fe" : "#475569",
+                            borderBottom: tab === t ? "2px solid #6366f1" : "2px solid transparent",
+                        }}
+                    >
+                        {emoji} {label}
+                    </button>
+                ))}
+            </div>
+
+            {/* Content */}
+            <div className="overflow-y-auto p-2" style={{ maxHeight: 320 }}>
+                {tab === "hotspots" && (
+                    <>
+                        <p className="text-[9px] text-slate-600 mb-2 px-1">Top functions by cyclomatic complexity</p>
+                        {topComplexity.length === 0 && (
+                            <p className="text-[10px] text-slate-500 px-1">No complexity data available</p>
+                        )}
+                        {topComplexity.map((n, i) => (
+                            <button
+                                key={n.id}
+                                onClick={() => onFlyTo(n)}
+                                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg mb-0.5 text-left transition-colors"
+                                style={{ background: "transparent" }}
+                                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                            >
+                                <span className="text-[9px] text-slate-600 w-4 text-right shrink-0">{i + 1}</span>
+                                <span className="flex-1 text-[10px] text-slate-300 truncate">{n.name}</span>
+                                <span
+                                    className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0"
+                                    style={{
+                                        background: `${getComplexityColor(n.complexity_score)}22`,
+                                        color: getComplexityColor(n.complexity_score),
+                                    }}
+                                >
+                                    {n.complexity_score}
+                                </span>
+                            </button>
+                        ))}
+                    </>
+                )}
+
+                {tab === "hubs" && (
+                    <>
+                        <p className="text-[9px] text-slate-600 mb-2 px-1">Most connected nodes by edge count</p>
+                        {topDegree.map((n, i) => (
+                            <button
+                                key={n.id}
+                                onClick={() => onFlyTo(n)}
+                                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg mb-0.5 text-left transition-colors"
+                                style={{ background: "transparent" }}
+                                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                            >
+                                <span className="text-[9px] text-slate-600 w-4 text-right shrink-0">{i + 1}</span>
+                                <span
+                                    className="text-[8px] font-bold px-1 py-0.5 rounded shrink-0"
+                                    style={{ background: `${NODE_COLORS[n.type]}22`, color: NODE_COLORS[n.type] }}
+                                >
+                                    {n.type[0]}
+                                </span>
+                                <span className="flex-1 text-[10px] text-slate-300 truncate">{n.name}</span>
+                                <span className="text-[9px] font-bold text-indigo-400 shrink-0">
+                                    {degreeMap[n.id] ?? 0}
+                                </span>
+                            </button>
+                        ))}
+                    </>
+                )}
+
+                {tab === "orphans" && (
+                    <>
+                        <p className="text-[9px] text-slate-600 mb-2 px-1">
+                            Disconnected nodes — {orphans.length === 0 ? "none found ✓" : `${orphans.length} found`}
+                        </p>
+                        {orphans.length === 0 && (
+                            <p className="text-[10px] text-emerald-500 px-1">Graph is well-connected!</p>
+                        )}
+                        {orphans.slice(0, 8).map(n => (
+                            <button
+                                key={n.id}
+                                onClick={() => onFlyTo(n)}
+                                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg mb-0.5 text-left transition-colors"
+                                style={{ background: "transparent" }}
+                                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                            >
+                                <span>{n.type === "Function" ? "🔴" : "🟡"}</span>
+                                <span className="flex-1 text-[10px] text-slate-300 truncate">{n.name}</span>
+                                <span className="text-[9px] text-slate-600">{n.type}</span>
+                            </button>
+                        ))}
+                        {orphans.length > 8 && (
+                            <p className="text-[9px] text-slate-500 text-center mt-1">+{orphans.length - 8} more</p>
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// ─── Main GraphVisualizer ──────────────────────────────────────────────
 export default function GraphVisualizer({
     nodes,
     links,
@@ -269,6 +429,8 @@ export default function GraphVisualizer({
     showSearch = true,
     graphMeta = null,
     repoIds = [],
+    highlightedNodeIds = [],    // Feature 1: evidence highlight IDs (graph elementIds)
+    onHighlightReady,           // Feature 1: reports name→nodeId map to parent
 }: GraphVisualizerProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fgRef = useRef<any>();
@@ -280,10 +442,21 @@ export default function GraphVisualizer({
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [showLegend, setShowLegend] = useState(true);
     const [showSearchBar, setShowSearchBar] = useState(false);
+    const [analyticsOpen, setAnalyticsOpen] = useState(false);  // Feature 2
     const [codeViewerNode, setCodeViewerNode] = useState<GraphNode | null>(null);
+    // Feature 3: path finder state machine
+    const [pathMode, setPathMode] = useState<"off" | "selectStart" | "selectEnd" | "loading" | "showing">("off");
+    const [pathStartNode, setPathStartNode] = useState<GraphNode | null>(null);
+    const [pathEndNode, setPathEndNode] = useState<GraphNode | null>(null);
+    const [pathNodeIds, setPathNodeIds] = useState<string[]>([]);
+    const [pathEdgeTypes, setPathEdgeTypes] = useState<string[]>([]);
+    const [pathNodes, setPathNodes] = useState<GraphNode[]>([]);
+    const [pathExpanded, setPathExpanded] = useState(false);
     const bloomAdded = useRef(false);
-    const hoveredNodeIdRef = useRef<string | null>(null);  // ref, not state — avoids re-renders
-    const nodeObjectsRef = useRef<Record<string, THREE.Group>>({}); // store Three.js groups for direct mutation
+    const hoveredNodeIdRef = useRef<string | null>(null);
+    const nodeObjectsRef = useRef<Record<string, THREE.Group>>({});
+    const nameToNodeIdRef = useRef<Record<string, string>>({});  // Feature 1: name→nodeId map
+    const highlightedNodeIdsRef = useRef<Set<string>>(new Set()); // Feature 1
     const autoRotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const userInteracted = useRef(false);
 
@@ -381,11 +554,14 @@ export default function GraphVisualizer({
         const sphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), mat);
         group.add(sphere);
 
-        // Store reference so hover handler can mutate opacity directly (no re-render needed)
-        if (n.id != null) nodeObjectsRef.current[String(n.id)] = group;
-
+        if (n.id != null) {
+            const nid = String(n.id);
+            nodeObjectsRef.current[nid] = group;
+            // Feature 1: populate name→nodeId lookup for evidence highlighting
+            if (n.name) nameToNodeIdRef.current[n.name] = nid;
+        }
         return group;
-    }, [colorMode, getNodeColor]);  // NO hoveredNodeId — hover handled via direct mutation
+    }, [colorMode, getNodeColor]);  // NO hover/path in deps — handled via direct mutation
 
     // Auto-rotate camera on load
     useEffect(() => {
@@ -436,23 +612,42 @@ export default function GraphVisualizer({
         });
     }, [neighborSet]);
 
-    // Node click → zoom + info panel
+    // Node click — intercept for path finder, otherwise zoom + info panel
+    const flyToNode = useCallback((node: GraphNode) => {
+        const n = node as GraphNodeInternal;
+        setSelectedNode(node);
+        userInteracted.current = true;
+        if (fgRef.current && n.x !== undefined && n.y !== undefined && n.z !== undefined) {
+            const dist = 80;
+            const mag = Math.hypot(n.x, n.y, n.z) || 1;
+            const ratio = 1 + dist / mag;
+            fgRef.current.cameraPosition(
+                { x: n.x * ratio, y: n.y * ratio, z: n.z * ratio },
+                n, 1200
+            );
+        }
+    }, []);
+
     const handleNodeClick = useCallback((rawNode: object) => {
         userInteracted.current = true;
         const node = rawNode as GraphNodeInternal;
-        setSelectedNode(node as GraphNode);
-        if (onNodeClick) onNodeClick(node as GraphNode);
-        if (fgRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
-            const dist = 80;
-            const mag = Math.hypot(node.x, node.y, node.z) || 1;
-            const ratio = 1 + dist / mag;
-            fgRef.current.cameraPosition(
-                { x: node.x * ratio, y: node.y * ratio, z: node.z * ratio },
-                node,
-                1200
-            );
+
+        // Feature 3: intercept clicks when path finder is active
+        if (pathMode === "selectStart") {
+            setPathStartNode(node as GraphNode);
+            setPathMode("selectEnd");
+            return;
         }
-    }, [onNodeClick]);
+        if (pathMode === "selectEnd") {
+            setPathEndNode(node as GraphNode);
+            setPathMode("loading");
+            return;
+        }
+
+        // Normal click
+        flyToNode(node as GraphNode);
+        if (onNodeClick) onNodeClick(node as GraphNode);
+    }, [pathMode, flyToNode, onNodeClick]);
 
     // Post-physics setup: Bloom, Scene Fog, and Physics tweaks (runs once after simulation settles)
     const handleEngineStop = useCallback(() => {
@@ -490,8 +685,57 @@ export default function GraphVisualizer({
                     fg.d3ReheatSimulation();
                 }
             } catch { /* ignore */ }
+
+            // ── 4. Feature 1: report name→nodeId map to parent after first settle ──
+            if (onHighlightReady) {
+                onHighlightReady({ ...nameToNodeIdRef.current });
+            }
         }
-    }, []);
+    }, [onHighlightReady]);
+
+    // Feature 1: apply/clear evidence highlight when highlightedNodeIds changes
+    useEffect(() => {
+        highlightedNodeIdsRef.current = new Set(highlightedNodeIds);
+        const objects = nodeObjectsRef.current;
+        const hasHighlight = highlightedNodeIds.length > 0;
+
+        Object.entries(objects).forEach(([nid, group]) => {
+            const isHighlighted = highlightedNodeIdsRef.current.has(nid);
+            group.children.forEach(child => {
+                const mesh = child as THREE.Mesh;
+                if (mesh.material) {
+                    const mat = mesh.material as THREE.MeshLambertMaterial;
+                    if (isHighlighted) {
+                        mat.color.set(new THREE.Color("#fbbf24"));   // amber
+                        mat.emissive.set(new THREE.Color("#f59e0b"));
+                        mat.emissiveIntensity = 1.2;
+                        mat.opacity = 1;
+                    } else if (hasHighlight) {
+                        mat.opacity = 0.08;  // dim non-highlighted
+                        mat.emissiveIntensity = 0;
+                    } else {
+                        // Clear highlight — restore defaults
+                        mat.opacity = 1;
+                        mat.emissiveIntensity = 0.7;
+                    }
+                    mat.needsUpdate = true;
+                }
+            });
+        });
+
+        // Zoom to fit highlighted nodes if any
+        if (hasHighlight && fgRef.current) {
+            const highlightSet = highlightedNodeIdsRef.current;
+            try {
+                fgRef.current.zoomToFit(
+                    800,
+                    80,
+                    (node: object) => highlightSet.has(String((node as GraphNodeInternal).id ?? ""))
+                );
+            } catch { /* ignore if graph not ready */ }
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [highlightedNodeIds]);
 
     const handleNodeLabel = useCallback((rawNode: object): string => {
         const n = rawNode as GraphNode;
@@ -518,7 +762,99 @@ export default function GraphVisualizer({
         });
     };
 
+    // Feature 3: clear all path highlighting, restore materials
+    const clearPath = useCallback(() => {
+        setPathMode("off");
+        setPathStartNode(null);
+        setPathEndNode(null);
+        setPathNodeIds([]);
+        setPathEdgeTypes([]);
+        setPathNodes([]);
+        setPathExpanded(false);
+        // Restore all material opacities to default
+        Object.values(nodeObjectsRef.current).forEach(group => {
+            group.children.forEach(child => {
+                const mesh = child as THREE.Mesh;
+                if (mesh.material) {
+                    const mat = mesh.material as THREE.MeshLambertMaterial;
+                    mat.opacity = 1;
+                    mat.emissiveIntensity = 0.7;
+                    mat.needsUpdate = true;
+                }
+            });
+        });
+    }, []);
+
+    // Feature 3: fetch shortest path from backend when both nodes selected
+    useEffect(() => {
+        if (pathMode !== "loading" || !pathStartNode || !pathEndNode) return;
+        const repoId = pathStartNode.repo_id || repoIds[0] || "";
+        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+        fetch(`${apiBase}/api/graph/path`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                start_id: pathStartNode.id,
+                end_id: pathEndNode.id,
+                repo_id: repoId,
+            }),
+        })
+        .then(r => r.json())
+        .then((data: { found: boolean; path_nodes: GraphNode[]; edge_types: string[] }) => {
+            if (!data.found || !data.path_nodes?.length) {
+                setPathMode("off");
+                setPathStartNode(null);
+                setPathEndNode(null);
+                alert("No direct path found within 10 steps. These nodes may not be directly connected.");
+                return;
+            }
+            const ids = data.path_nodes.map((n: GraphNode) => String(n.id));
+            const pathSet = new Set(ids);
+            setPathNodeIds(ids);
+            setPathEdgeTypes(data.edge_types);
+            setPathNodes(data.path_nodes);
+            setPathMode("showing");
+
+            // Apply path highlighting via direct Three.js mutation
+            Object.entries(nodeObjectsRef.current).forEach(([nid, group]) => {
+                const isOnPath = pathSet.has(nid);
+                group.children.forEach(child => {
+                    const mesh = child as THREE.Mesh;
+                    if (mesh.material) {
+                        const mat = mesh.material as THREE.MeshLambertMaterial;
+                        if (isOnPath) {
+                            mat.color.set(new THREE.Color("#fbbf24"));  // amber
+                            mat.emissive.set(new THREE.Color("#f59e0b"));
+                            mat.emissiveIntensity = 1.4;
+                            mat.opacity = 1;
+                        } else {
+                            mat.opacity = 0.05;
+                            mat.emissiveIntensity = 0;
+                        }
+                        mat.needsUpdate = true;
+                    }
+                });
+            });
+
+            // Zoom to path bounding box
+            if (fgRef.current) {
+                try {
+                    fgRef.current.zoomToFit(800, 80,
+                        (node: object) => pathSet.has(String((node as GraphNodeInternal).id ?? "")));
+                } catch { /* ignore */ }
+            }
+        })
+        .catch(() => {
+            setPathMode("off");
+            setPathStartNode(null);
+            setPathEndNode(null);
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pathMode]);
+
     const activeNodeTypes = (Object.keys(NODE_COLORS) as NodeType[]);
+
 
     return (
         <div
@@ -620,10 +956,74 @@ export default function GraphVisualizer({
                     <Camera size={12} />
                     Export
                 </button>
+
+                {/* Analytics toggle — Feature 2 */}
+                <button
+                    onClick={() => { setAnalyticsOpen(v => !v); if (showLegend) setShowLegend(false); }}
+                    title="Graph analytics"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                    style={{
+                        background: analyticsOpen ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
+                        border: analyticsOpen ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                        color: analyticsOpen ? "#a5b4fc" : "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <BarChart2 size={12} />
+                    Analytics
+                </button>
+
+                {/* Path Finder toggle — Feature 3 */}
+                <button
+                    onClick={() => {
+                        if (pathMode === "off") { setPathMode("selectStart"); setSelectedNode(null); }
+                        else clearPath();
+                    }}
+                    title="Find shortest path between two nodes"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                    style={{
+                        background: pathMode !== "off" ? "rgba(251,191,36,0.2)" : "rgba(30,41,59,0.85)",
+                        border: pathMode !== "off" ? "1px solid rgba(251,191,36,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                        color: pathMode !== "off" ? "#fbbf24" : "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <GitBranch size={12} />
+                    {pathMode === "off" ? "Path" : pathMode === "selectStart" ? "Pick Start…" : pathMode === "selectEnd" ? "Pick End…" : pathMode === "loading" ? "Finding…" : "Clear Path"}
+                </button>
             </div>
 
-            {/* ─── Legend panel ────────────────────────────────────────────── */}
+            {/* Analytics Panel — Feature 2 */}
+            {analyticsOpen && !showLegend && (
+                <GraphAnalyticsPanel
+                    nodes={graphData.nodes}
+                    degreeMap={degreeMap}
+                    onFlyTo={flyToNode}
+                />
+            )}
+
+            {/* Path Finder status overlay — Feature 3 */}
+            {(pathMode === "selectStart" || pathMode === "selectEnd" || pathMode === "loading") && (
+                <div
+                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 px-6 py-4 rounded-xl text-sm font-semibold pointer-events-none"
+                    style={{
+                        background: "rgba(15,23,42,0.93)",
+                        border: "1px solid rgba(251,191,36,0.4)",
+                        backdropFilter: "blur(16px)",
+                        color: "#fbbf24",
+                        boxShadow: "0 0 40px rgba(251,191,36,0.12)",
+                        textAlign: "center",
+                    }}
+                >
+                    {pathMode === "selectStart" && <><GitBranch size={16} style={{ display: "inline", marginRight: 8 }} />Click a <strong>start</strong> node</>}
+                    {pathMode === "selectEnd" && <><Zap size={16} style={{ display: "inline", marginRight: 8 }} />Now click an <strong>end</strong> node<br /><span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>From: {pathStartNode?.name}</span></>}
+                    {pathMode === "loading" && <>⏳ Finding shortest path…</>}
+                </div>
+            )}
+
+            {/* Legend panel */}
             {showLegend && (
+
                 <div
                     className="absolute top-11 left-3 z-10 p-3 rounded-xl text-xs space-y-2"
                     style={{ background: "rgba(15,23,42,0.88)", border: "1px solid rgba(255,255,255,0.08)", backdropFilter: "blur(16px)", minWidth: 140 }}
@@ -697,7 +1097,6 @@ export default function GraphVisualizer({
                 </div>
             )}
 
-            {/* ─── Search bar ──────────────────────────────────────────────── */}
             {showSearchBar && (
                 <div
                     className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2"
@@ -819,8 +1218,64 @@ export default function GraphVisualizer({
                 <span className="w-px h-3 bg-white/10" />
                 <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.links.length}</span> edges</span>
             </div>
+            {/* Path breadcrumb bar — Feature 3 */}
+            {pathMode === "showing" && pathNodes.length > 0 && (
+                <div
+                    className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 px-4 py-3 rounded-2xl flex items-center gap-1.5 flex-wrap justify-center"
+                    style={{
+                        background: "rgba(15,23,42,0.95)",
+                        border: "1px solid rgba(251,191,36,0.35)",
+                        backdropFilter: "blur(16px)",
+                        maxWidth: "90%",
+                        boxShadow: "0 0 30px rgba(251,191,36,0.1)",
+                    }}
+                >
+                    <span className="text-[9px] text-amber-500 font-bold uppercase tracking-widest mr-1">Path</span>
+                    {(() => {
+                        const COLLAPSE_THRESHOLD = 7;
+                        const show = pathNodes.length <= COLLAPSE_THRESHOLD || pathExpanded
+                            ? pathNodes
+                            : [...pathNodes.slice(0, 2), null, ...pathNodes.slice(-2)];
+                        return show.map((n, i) => n === null ? (
+                            <button
+                                key="ellipsis"
+                                onClick={() => setPathExpanded(true)}
+                                className="text-[10px] px-2 py-0.5 rounded-full"
+                                style={{ background: "rgba(251,191,36,0.1)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.2)" }}
+                            >
+                                +{pathNodes.length - 4} more
+                            </button>
+                        ) : (
+                            <span key={n.id} className="flex items-center gap-1">
+                                <button
+                                    onClick={() => flyToNode(n)}
+                                    className="text-[10px] font-semibold px-2.5 py-1 rounded-full transition-all"
+                                    style={{ background: "rgba(251,191,36,0.15)", color: "#fef3c7", border: "1px solid rgba(251,191,36,0.35)" }}
+                                    onMouseEnter={e => (e.currentTarget.style.background = "rgba(251,191,36,0.3)")}
+                                    onMouseLeave={e => (e.currentTarget.style.background = "rgba(251,191,36,0.15)")}
+                                >
+                                    {n.name}
+                                </button>
+                                {i < show.length - 1 && show[i + 1] !== null && (
+                                    <span className="text-[9px] text-slate-600">
+                                        {pathEdgeTypes[i] ?? "→"}
+                                    </span>
+                                )}
+                                {show[i + 1] === null && <span className="text-[9px] text-slate-600">→</span>}
+                            </span>
+                        ));
+                    })()}
+                    <button
+                        onClick={clearPath}
+                        className="ml-2 text-[9px] px-2 py-0.5 rounded-full text-slate-500 hover:text-slate-300 transition-colors"
+                        style={{ border: "1px solid rgba(255,255,255,0.06)" }}
+                    >
+                        ✕ Clear
+                    </button>
+                </div>
+            )}
 
-            {/* ─── Code Drill-Down Modal ────────────────────────────────────── */}
+
             {codeViewerNode && (
                 <CodeViewer
                     nodeId={codeViewerNode.file_path
