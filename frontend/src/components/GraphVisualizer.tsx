@@ -39,7 +39,11 @@ export interface GraphLink {
 interface GraphSummaryData {
     summary: string;
     architecture_style: string;
+    tech_stack?: string[];
+    modules?: Array<{ name: string; role: string; key_files: string[] }>;
     key_observations: string[];
+    hotspot_analysis?: string;
+    improvement_suggestions?: string[];
     complexity_verdict: string;
     complexity_reasoning: string;
 }
@@ -541,92 +545,123 @@ interface GraphSummaryPanelProps {
     onRegenerate: () => void;
 }
 
+function CollapsibleSection({ title, icon, children, defaultOpen = false }: {
+    title: string; icon: React.ReactNode; children: React.ReactNode; defaultOpen?: boolean;
+}) {
+    const [open, setOpen] = useState(defaultOpen);
+    return (
+        <div className="mb-3">
+            <button onClick={() => setOpen(v => !v)}
+                className="w-full flex items-center justify-between py-1.5 text-left"
+                style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">{icon}{title}</span>
+                <span className="text-slate-600" style={{ fontSize: 9 }}>{open ? "▲" : "▼"}</span>
+            </button>
+            {open && <div className="mt-2">{children}</div>}
+        </div>
+    );
+}
+
 function GraphSummaryPanel({ data, loading, onRegenerate }: GraphSummaryPanelProps) {
     const archColor = ARCH_COLORS[data.architecture_style] ?? "#64748b";
     const verdictColor = VERDICT_COLORS[data.complexity_verdict] ?? "#94a3b8";
-
     return (
-        <div
-            className="absolute top-11 left-3 z-20 p-4 rounded-2xl text-xs"
-            style={{
-                background: "rgba(10,15,30,0.96)",
-                border: "1px solid rgba(139,92,246,0.3)",
-                backdropFilter: "blur(18px)",
-                boxShadow: "0 0 40px rgba(139,92,246,0.08)",
-                width: 310,
-                maxHeight: "calc(100vh - 120px)",
-                overflowY: "auto",
-            }}
-        >
-            {/* Header */}
-            <div className="flex items-center justify-between mb-3">
+        <div className="absolute top-11 left-3 z-20 rounded-2xl text-xs"
+            style={{ background: "rgba(10,15,30,0.97)", border: "1px solid rgba(139,92,246,0.3)",
+                backdropFilter: "blur(20px)", boxShadow: "0 0 50px rgba(139,92,246,0.1), 0 4px 24px rgba(0,0,0,0.5)",
+                width: 360, maxHeight: "calc(100vh - 130px)", overflowY: "auto" }}>
+            <div className="flex items-center justify-between px-4 pt-4 pb-3" style={{ borderBottom: "1px solid rgba(139,92,246,0.15)" }}>
                 <div className="flex items-center gap-2">
                     <Sparkles size={13} className="text-violet-400" />
                     <span className="text-[11px] font-bold text-violet-300 uppercase tracking-widest">AI Summary</span>
                 </div>
-                <button
-                    onClick={onRegenerate}
-                    disabled={loading}
-                    title="Regenerate explanation"
+                <button onClick={onRegenerate} disabled={loading} title="Regenerate"
                     className="p-1 rounded-lg text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
-                    style={{ border: "1px solid rgba(255,255,255,0.06)" }}
-                >
+                    style={{ border: "1px solid rgba(255,255,255,0.07)" }}>
                     <RefreshCw size={10} className={loading ? "animate-spin" : ""} />
                 </button>
             </div>
-
-            {/* Architecture style badge */}
-            <div className="flex items-center gap-2 mb-3">
-                <span
-                    className="text-[10px] font-bold px-2.5 py-1 rounded-full"
-                    style={{
-                        background: `${archColor}20`,
-                        border: `1px solid ${archColor}50`,
-                        color: archColor,
-                    }}
-                >
-                    {data.architecture_style}
-                </span>
-                <span
-                    className="text-[10px] font-semibold px-2 py-1 rounded-full"
-                    style={{
-                        background: `${verdictColor}15`,
-                        border: `1px solid ${verdictColor}40`,
-                        color: verdictColor,
-                    }}
-                >
-                    {data.complexity_verdict} Complexity
-                </span>
-            </div>
-
-            {/* Summary */}
-            <p className="text-slate-300 leading-relaxed mb-3" style={{ fontSize: 11 }}>
-                {data.summary}
-            </p>
-
-            {/* Divider */}
-            <div className="border-t border-white/5 mb-3" />
-
-            {/* Key observations */}
-            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-2">Key Observations</p>
-            <ul className="space-y-1.5">
-                {data.key_observations.map((obs, i) => (
-                    <li key={i} className="flex gap-2 items-start">
-                        <span className="text-violet-500 flex-shrink-0 mt-0.5">▸</span>
-                        <span className="text-slate-400 leading-relaxed" style={{ fontSize: 10 }}>{obs}</span>
-                    </li>
-                ))}
-            </ul>
-
-            {/* Complexity reasoning */}
-            {data.complexity_reasoning && (
-                <>
-                    <div className="border-t border-white/5 mt-3 mb-2" />
-                    <p className="text-slate-500 italic leading-relaxed" style={{ fontSize: 10 }}>
+            <div className="px-4 py-3 space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] font-bold px-2.5 py-1 rounded-full"
+                        style={{ background: `${archColor}22`, border: `1px solid ${archColor}55`, color: archColor }}>
+                        {data.architecture_style}
+                    </span>
+                    <span className="text-[10px] font-semibold px-2.5 py-1 rounded-full"
+                        style={{ background: `${verdictColor}18`, border: `1px solid ${verdictColor}44`, color: verdictColor }}>
+                        {data.complexity_verdict} Complexity
+                    </span>
+                </div>
+                {data.tech_stack && data.tech_stack.length > 0 && (
+                    <div>
+                        <p className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-1.5">Tech Stack</p>
+                        <div className="flex flex-wrap gap-1.5">
+                            {data.tech_stack.map((tech, i) => (
+                                <span key={i} className="text-[10px] font-medium px-2 py-0.5 rounded-md"
+                                    style={{ background: "rgba(99,102,241,0.12)", border: "1px solid rgba(99,102,241,0.25)", color: "#a5b4fc" }}>{tech}</span>
+                            ))}
+                        </div>
+                    </div>
+                )}
+                <div>
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-1.5">Overview</p>
+                    <p className="text-slate-300 leading-relaxed" style={{ fontSize: 11 }}>{data.summary}</p>
+                </div>
+                <CollapsibleSection title="Key Observations" icon={<Eye size={9} />} defaultOpen={true}>
+                    <ul className="space-y-2">
+                        {(data.key_observations ?? []).map((obs, i) => (
+                            <li key={i} className="flex gap-2 items-start">
+                                <span className="text-violet-500 flex-shrink-0 mt-0.5" style={{ fontSize: 9 }}>▸</span>
+                                <span className="text-slate-400 leading-relaxed" style={{ fontSize: 10 }}>{obs}</span>
+                            </li>
+                        ))}
+                    </ul>
+                </CollapsibleSection>
+                {data.hotspot_analysis && (
+                    <div className="rounded-xl p-3" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
+                        <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: "#fb923c" }}>⚠ Hotspot Risk</p>
+                        <p className="leading-relaxed" style={{ fontSize: 10, color: "#fed7aa" }}>{data.hotspot_analysis}</p>
+                    </div>
+                )}
+                {data.modules && data.modules.length > 0 && (
+                    <CollapsibleSection title={`Module Breakdown (${data.modules.length})`} icon={<Layers size={9} />} defaultOpen={false}>
+                        <div className="space-y-2">
+                            {data.modules.map((mod, i) => (
+                                <div key={i} className="rounded-lg p-2.5" style={{ background: "rgba(30,41,59,0.7)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                                    <p className="font-bold text-slate-200 mb-0.5" style={{ fontSize: 10 }}>{mod.name}</p>
+                                    <p className="text-slate-400 leading-relaxed mb-1" style={{ fontSize: 9 }}>{mod.role}</p>
+                                    {mod.key_files && mod.key_files.length > 0 && (
+                                        <div className="flex flex-wrap gap-1">
+                                            {mod.key_files.map((f, j) => (
+                                                <span key={j} className="px-1.5 py-0.5 rounded text-[8px] font-mono"
+                                                    style={{ background: "rgba(99,102,241,0.1)", color: "#818cf8" }}>{f}</span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </CollapsibleSection>
+                )}
+                {data.improvement_suggestions && data.improvement_suggestions.length > 0 && (
+                    <CollapsibleSection title="Improvement Suggestions" icon={<Zap size={9} />} defaultOpen={false}>
+                        <ol className="space-y-2">
+                            {data.improvement_suggestions.map((s, i) => (
+                                <li key={i} className="flex gap-2 items-start">
+                                    <span className="flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold"
+                                        style={{ background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.3)", color: "#fbbf24" }}>{i + 1}</span>
+                                    <span className="text-slate-400 leading-relaxed" style={{ fontSize: 10 }}>{s}</span>
+                                </li>
+                            ))}
+                        </ol>
+                    </CollapsibleSection>
+                )}
+                {data.complexity_reasoning && (
+                    <p className="text-slate-500 italic leading-relaxed" style={{ fontSize: 10, borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: 8 }}>
                         {data.complexity_reasoning}
                     </p>
-                </>
-            )}
+                )}
+            </div>
         </div>
     );
 }
@@ -977,6 +1012,7 @@ function GraphToolbar({
             {/* AI Explain toggle */}
             <button
                 onClick={() => {
+                    if (showLegend) setShowLegend(false);
                     if (!graphSummary && !summaryLoading) { fetchGraphSummary(); }
                     else { setSummaryOpen(v => !v); }
                 }}
@@ -1099,6 +1135,8 @@ export default function GraphVisualizer({
     const [analyticsOpen, setAnalyticsOpen] = useState(false);  // Feature 2
     const [summaryOpen, setSummaryOpen] = useState(false);       // Feature A
     const [summaryLoading, setSummaryLoading] = useState(false); // Feature A
+    const [localGraphSummary, setLocalGraphSummary] = useState<GraphSummaryData | null>(graphSummary ?? null);
+    const summaryFetchingRef = useRef<boolean>(false);
     const [codeViewerNode, setCodeViewerNode] = useState<GraphNode | null>(null);
     // Feature 3: path finder state machine
     const [pathMode, setPathMode] = useState<"off" | "selectStart" | "selectEnd" | "loading" | "showing">("off");
@@ -1116,20 +1154,24 @@ export default function GraphVisualizer({
     const autoRotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const userInteracted = useRef(false);
 
-    // Auto-measure container
+    // Auto-measure container — deferred so we never read 0x0 before tab layout commits
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
-        const updateSize = () =>
-            setDimensions({ width: container.clientWidth, height: container.clientHeight });
-        updateSize();
+        const updateSize = () => {
+            const w = container.clientWidth  || container.offsetWidth  || (container.parentElement?.clientWidth  ?? 0);
+            const h = container.clientHeight || container.offsetHeight || (container.parentElement?.clientHeight ?? 0);
+            // Always set width if available; fallback height to 600 so graph always renders
+            setDimensions({ width: w > 0 ? w : 800, height: h > 0 ? h : 600 });
+        };
+        const rafId = requestAnimationFrame(() => { updateSize(); setTimeout(updateSize, 100); });
         const ro = new ResizeObserver(updateSize);
         ro.observe(container);
-        return () => ro.disconnect();
+        return () => { cancelAnimationFrame(rafId); ro.disconnect(); };
     }, []);
 
-    const graphWidth  = propWidth  || dimensions.width  || undefined;
-    const graphHeight = propHeight || dimensions.height || undefined;
+    const graphWidth  = propWidth  || (dimensions.width  > 0 ? dimensions.width  : undefined);
+    const graphHeight = propHeight || (dimensions.height > 0 ? dimensions.height : 600);  // 600 fallback prevents 0-height canvas
 
     // Compute degree map for node sizing
     const degreeMap = useMemo(() => {
@@ -1193,11 +1235,15 @@ export default function GraphVisualizer({
     // Custom Three.js node object — stores group ref for direct hover-mutation
     const nodeThreeObject = useCallback((rawNode: object) => {
         const n = rawNode as GraphNodeInternal & { __dimmed?: boolean; val?: number };
-        const color = n.color ?? getNodeColor(n);
-        const emissive = colorMode === "type" ? (NODE_EMISSIVE[n.type] ?? "#64748b") : color;
+        const nid = n.id != null ? String(n.id) : "";
+        // Feature 1: render highlighted nodes amber at birth (covers fresh mount after tab switch)
+        const isHighlighted = nid ? highlightedNodeIdsRef.current.has(nid) : false;
+        const hasHighlight = highlightedNodeIdsRef.current.size > 0;
+        const color = isHighlighted ? "#fbbf24" : (n.color ?? getNodeColor(n));
+        const emissive = isHighlighted ? "#f59e0b" : (colorMode === "type" ? (NODE_EMISSIVE[n.type] ?? "#64748b") : color);
+        const emissiveIntensity = isHighlighted ? 1.2 : (n.__dimmed ? 0.0 : 0.7);
         const radius = (n.val ?? 4) * 0.45;
-        const opacity = n.__dimmed ? 0.06 : 1;
-        const emissiveIntensity = n.__dimmed ? 0.0 : 0.7;
+        const opacity = isHighlighted ? 1 : (n.__dimmed ? 0.06 : (hasHighlight ? 0.08 : 1));
 
         const group = new THREE.Group();
         const mat = new THREE.MeshLambertMaterial({
@@ -1210,14 +1256,13 @@ export default function GraphVisualizer({
         const sphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), mat);
         group.add(sphere);
 
-        if (n.id != null) {
-            const nid = String(n.id);
+        if (nid) {
             nodeObjectsRef.current[nid] = group;
             // Feature 1: populate name→nodeId lookup for evidence highlighting
             if (n.name) nameToNodeIdRef.current[n.name] = nid;
         }
         return group;
-    }, [colorMode, getNodeColor]);  // NO hover/path in deps — handled via direct mutation
+    }, [colorMode, getNodeColor]);  // highlightedNodeIdsRef is a ref — no dep needed
 
     // Auto-rotate camera on load
     useEffect(() => {
@@ -1419,35 +1464,45 @@ export default function GraphVisualizer({
     };
 
     // Feature A: fetch AI graph summary
+    // Sync incoming graphSummary prop -> local mirror (for tab-switch persistence)
+    useEffect(() => { if (graphSummary) setLocalGraphSummary(graphSummary); }, [graphSummary]);
+
     const fetchGraphSummary = useCallback(async () => {
-        if (summaryLoading || graphData.nodes.length === 0) return;
+        if (summaryFetchingRef.current || graphData.nodes.length === 0) return;
+        summaryFetchingRef.current = true;
         setSummaryLoading(true);
         setSummaryOpen(true);
 
-        // Build stats from client-side data (no extra API call needed)
         const typeCounts: Record<string, number> = {};
-        graphData.nodes.forEach(n => {
-            typeCounts[n.type] = (typeCounts[n.type] ?? 0) + 1;
-        });
+        graphData.nodes.forEach(n => { typeCounts[n.type] = (typeCounts[n.type] ?? 0) + 1; });
 
         const topComplex = [...graphData.nodes]
             .filter(n => n.complexity_score != null)
             .sort((a, b) => (b.complexity_score ?? 0) - (a.complexity_score ?? 0))
-            .slice(0, 5)
-            .map(n => ({ name: n.name, complexity_score: n.complexity_score, type: n.type }));
+            .slice(0, 10)
+            .map(n => ({ name: n.name, complexity_score: n.complexity_score, type: n.type, file_path: n.file_path }));
 
         const topHubs = Object.entries(degreeMap)
             .sort((a, b) => b[1] - a[1])
-            .slice(0, 5)
+            .slice(0, 10)
             .map(([nid, degree]) => {
                 const node = graphData.nodes.find(n => String(n.id) === nid);
-                return { name: node?.name ?? nid, degree, type: node?.type ?? "unknown" };
+                return { name: node?.name ?? nid, degree, type: node?.type ?? "unknown", file_path: node?.file_path };
             });
 
         const orphanCount = graphData.nodes.filter(n =>
             (degreeMap[String(n.id)] ?? 0) === 0 &&
             ["File", "Class", "Function"].includes(n.type)
         ).length;
+
+        const fileList = Array.from(new Set(graphData.nodes.filter(n => n.type === "File").map(n => n.name))).slice(0, 20);
+        const edgeTypeCounts: Record<string, number> = {};
+        graphData.links.forEach((l: GraphLink) => { edgeTypeCounts[l.type] = (edgeTypeCounts[l.type] ?? 0) + 1; });
+        const complexNodes = graphData.nodes.filter(n => n.complexity_score != null);
+        const avgComplexity = complexNodes.length ? complexNodes.reduce((s, n) => s + (n.complexity_score ?? 0), 0) / complexNodes.length : 0;
+        const classList = graphData.nodes.filter(n => n.type === "Class").map(n => n.name).slice(0, 10);
+        const importList = graphData.nodes.filter(n => n.type === "Import").map(n => n.name).slice(0, 15);
+        const repoNames = Array.from(new Set(graphData.nodes.map(n => n.repo_id).filter((id): id is string => Boolean(id))));
 
         const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
         try {
@@ -1462,17 +1517,26 @@ export default function GraphVisualizer({
                     top_complex: topComplex,
                     top_hubs: topHubs,
                     orphan_count: orphanCount,
+                    file_list: fileList,
+                    edge_type_counts: edgeTypeCounts,
+                    avg_complexity: Math.round(avgComplexity * 10) / 10,
+                    class_list: classList,
+                    import_list: importList,
+                    repo_names: repoNames,
                 }),
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            setLocalGraphSummary(data);
             onGraphSummaryChange?.(data);
-        } catch {
-            // Keep panel open, show nothing — user can retry
+        } catch (err) {
+            console.error("[GraphExplain] error:", err);
         } finally {
             setSummaryLoading(false);
+            summaryFetchingRef.current = false;
         }
-    }, [graphData, degreeMap, repoIds, summaryLoading, onGraphSummaryChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [graphData, degreeMap, repoIds, onGraphSummaryChange]);
 
 
     // Feature 3: clear all path highlighting, restore materials
@@ -1572,12 +1636,12 @@ export default function GraphVisualizer({
     // (deep chained && + nested ternary causes `unknown` poisoning on later siblings)
     const summaryPanel: JSX.Element | null = (() => {
         if (!summaryOpen || showLegend || analyticsOpen) return null;
-        if (graphSummary) {
+        if (localGraphSummary) {
             return (
                 <GraphSummaryPanel
-                    data={graphSummary}
+                    data={localGraphSummary}
                     loading={summaryLoading}
-                    onRegenerate={() => { onGraphSummaryChange?.(null); fetchGraphSummary(); }}
+                    onRegenerate={() => { setLocalGraphSummary(null); onGraphSummaryChange?.(null); fetchGraphSummary(); }}
                 />
             );
         }
@@ -1630,7 +1694,7 @@ export default function GraphVisualizer({
                 setPathMode={setPathMode}
                 setSelectedNode={setSelectedNode}
                 clearPath={clearPath}
-                graphSummary={graphSummary}
+                graphSummary={localGraphSummary}
                 summaryLoading={summaryLoading}
                 summaryOpen={summaryOpen}
                 setSummaryOpen={setSummaryOpen}
@@ -1681,34 +1745,34 @@ export default function GraphVisualizer({
             )}
 
             <GraphContentArea
-                showSearchBar={showSearchBar}
-                activeNodeTypes={activeNodeTypes}
-                hiddenTypes={hiddenTypes}
-                toggleType={toggleType}
-                graphData={graphData}
-                graphWidth={graphWidth}
-                graphHeight={graphHeight}
-                fgRef={fgRef}
-                nodeThreeObject={nodeThreeObject}
-                handleNodeLabel={handleNodeLabel}
-                handleNodeHover={handleNodeHover}
-                handleNodeClick={handleNodeClick}
-                handleEngineStop={handleEngineStop}
-                selectedNode={selectedNode}
-                links={links}
-                setSelectedNode={setSelectedNode}
-                setCodeViewerNode={setCodeViewerNode}
-                graphMeta={graphMeta}
-                pathMode={pathMode}
-                pathNodes={pathNodes}
-                pathEdgeTypes={pathEdgeTypes}
-                pathExpanded={pathExpanded}
-                setPathExpanded={setPathExpanded}
-                flyToNode={flyToNode}
-                clearPath={clearPath}
-                codeViewerNode={codeViewerNode}
-                repoIds={repoIds}
-            />
+                    showSearchBar={showSearchBar}
+                    activeNodeTypes={activeNodeTypes}
+                    hiddenTypes={hiddenTypes}
+                    toggleType={toggleType}
+                    graphData={graphData}
+                    graphWidth={graphWidth}
+                    graphHeight={graphHeight}
+                    fgRef={fgRef}
+                    nodeThreeObject={nodeThreeObject}
+                    handleNodeLabel={handleNodeLabel}
+                    handleNodeHover={handleNodeHover}
+                    handleNodeClick={handleNodeClick}
+                    handleEngineStop={handleEngineStop}
+                    selectedNode={selectedNode}
+                    links={links}
+                    setSelectedNode={setSelectedNode}
+                    setCodeViewerNode={setCodeViewerNode}
+                    graphMeta={graphMeta}
+                    pathMode={pathMode}
+                    pathNodes={pathNodes}
+                    pathEdgeTypes={pathEdgeTypes}
+                    pathExpanded={pathExpanded}
+                    setPathExpanded={setPathExpanded}
+                    flyToNode={flyToNode}
+                    clearPath={clearPath}
+                    codeViewerNode={codeViewerNode}
+                    repoIds={repoIds}
+                />
         </div>
     );
 }

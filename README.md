@@ -8,10 +8,11 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 
 ## Project Structure
 
+```
 trueskill-ai/
 ├── backend/                         # FastAPI Python backend
 │   ├── app/
-│   │   ├── api.py                   # All API routes (20+ endpoints)
+│   │   ├── api.py                   # All API routes (25+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
 │   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
@@ -24,6 +25,8 @@ trueskill-ai/
 │   │   ├── report.py                # HTML verification report generator
 │   │   ├── storage.py               # SQLite persistence (analyses + share tokens)
 │   │   ├── db.py                    # Neo4j AuraDB driver & query helpers
+│   │   ├── graph_explain.py         # AI architectural summary (8-section structured JSON via Groq)
+│   │   ├── function_explain.py      # Per-function AI explanation with complexity & suggestion
 │   │   └── llm.py                   # Shared LLM client (Groq Llama 3.3 70B)
 │   ├── main.py                      # FastAPI entry point
 │   ├── requirements.txt
@@ -38,11 +41,12 @@ trueskill-ai/
 │       │   ├── resume-toolkit/      # 4-step AI Resume Toolkit
 │       │   └── profile/[id]/        # Public shareable verified profile page
 │       └── components/
-│           ├── GraphVisualizer.tsx  # 3D force-graph: bloom, fog, hover-focus, drill-down, reset, export
+│           ├── GraphVisualizer.tsx  # 3D force-graph: bloom, fog, hover-focus, path finder, AI summary, evidence highlighting
 │           ├── GraphFullscreenModal.tsx
+│           ├── ErrorBoundary.tsx    # React error boundary for graph & heavy components
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
-│           ├── SkillCard.tsx        # Per-claim card: score bar, parsed evidence, interview prep, code drill-down
-│           ├── CodeViewer.tsx       # [NEW] Source code modal with inline syntax highlighting
+│           ├── SkillCard.tsx        # Per-claim card: score bar, evidence, "Show in Graph", interview prep, code drill-down
+│           ├── CodeViewer.tsx       # Source code modal with inline syntax highlighting
 │           ├── SkillRadar.tsx       # Radar chart with LLM-generated benchmarks
 │           ├── ContributionHeatmap.tsx # GitHub-style commit heatmap
 │           ├── VerifiedBadge.tsx    # Shareable public profile badge
@@ -123,6 +127,12 @@ npm run dev
 | `GET`  | `/api/skill-timeline/{repo_id}` | File timeline grouped by language |
 | `GET`  | `/api/forensics/{repo_id}` | Authorship & stylometry data |
 
+### AI Graph Intelligence
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/graph/explain` | 8-section AI architectural summary: tech stack, modules, hotspot risk, improvement suggestions (Groq Llama 3.3 70B) |
+| `POST` | `/api/function/explain` | Per-function AI explanation with complexity verdict, purpose, and refactor suggestions |
+
 ### Saved Analyses & Sharing
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -142,7 +152,7 @@ npm run dev
 ### Evidence Code Drill-Down
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch raw source code for a Function node by its `func_id` — returns `source_code`, `name`, `file_path`, `line_start/end`, `complexity_score`, `args` |
+| `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch raw source code for a Function node — returns `source_code`, `name`, `file_path`, `line_start/end`, `complexity_score`, `args` |
 
 ### Career & ATS Tools
 | Method | Endpoint | Description |
@@ -157,7 +167,7 @@ npm run dev
 |--------|----------|-------------|
 | `POST` | `/api/resume-toolkit/find-jobs` | Infer role from resume, search Jooble |
 | `POST` | `/api/resume-toolkit/optimize-keywords` | ATS keyword rewriting via LLM |
-| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io lookup (paid) → people/match (free) → pattern fallback |
+| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io lookup → people/match (free) → pattern fallback |
 | `POST` | `/api/resume-toolkit/draft-email` | Draft personalized outreach email |
 
 ### Health
@@ -172,7 +182,7 @@ npm run dev
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | Next.js 14 (App Router), TypeScript, Tailwind CSS |
+| **Frontend** | Next.js 14 (App Router), TypeScript, Vanilla CSS |
 | **3D Graph** | react-force-graph-3d, Three.js |
 | **Charts** | Recharts |
 | **Backend** | Python 3.11+, FastAPI, Pydantic v2 |
@@ -190,13 +200,11 @@ npm run dev
 
 ### Verification Pipeline
 The core LangGraph workflow runs three sequential agents:
-1. **Parser** — Extracts structured technical claims from resume PDF using Gemini
+1. **Parser** — Extracts structured technical claims from resume PDF
 2. **Auditor** — Queries the Neo4j knowledge graph using topic-synonym expansion
 3. **Grader** — Scores each claim 0–100 using evidence count, cyclomatic complexity alignment, and LLM reasoning
 
 Results stream back to the frontend via **Server-Sent Events (SSE)**.
-
-> **LLM note:** All AI calls go through **Groq (Llama 3.3 70B)** via `langchain_groq`, chosen for its speed and generous free tier. The `GOOGLE_API_KEY` in `.env.example` is legacy — only `GROQ_API_KEY` is required.
 
 ### Ingestion Engine
 - Shallow-clones GitHub repos (depth=1, LFS-safe)
@@ -205,24 +213,39 @@ Results stream back to the frontend via **Server-Sent Events (SSE)**.
 - Computes **cyclomatic complexity** for every function
 
 ### 3D Knowledge Graph
-The `/api/graph/{repo_id}` endpoint supports large repositories without capping at 1000 nodes:
+
+The `/api/graph/{repo_id}` endpoint supports large repositories:
 - **Default limit**: 5,000 nodes (configurable up to 25,000 via `?limit=N`)
 - **Sampling priority**: Files → Classes → Functions (top complexity first) → Imports
-- **Multi-repo**: Pass comma-separated IDs (`/api/graph/repo1,repo2`) for a combined view
-- **Server-side edge filtering**: Only edges between sampled nodes are returned — prevents rendering crashes
-- **UI banner**: Graph shows a "Showing X of Y nodes (sampled by complexity)" indicator when sampling is active
+- **Multi-repo**: Pass comma-separated IDs for a combined view
+- **Server-side edge filtering**: Only edges between sampled nodes are returned
 
-#### 3D Graph Visual & UX Improvements
+#### 3D Graph Visual & UX Features
 | Feature | Description |
 |---------|-------------|
-| **Bloom Post-Processing** | `UnrealBloomPass` added to `postProcessingComposer()` — cinematic neon glow on all nodes and link particles |
-| **Neighborhood Focus Mode** | Hover any node → non-adjacent nodes dim to 6% opacity via direct Three.js material mutation (zero React re-renders) |
-| **Code Drill-Down** | Click a `Function` node → NodeInfoPanel shows "👁 View Source Code" button → opens `CodeViewer` modal |
-| **Physics Tweaks** | d3-force charge strength set to -180 (vs default -30) for better node spacing |
-| **Reset Camera** | "Reset" button → `fgRef.zoomToFit(600)` snaps back to overview |
-| **Atmospheric Fog** | `THREE.FogExp2` makes distant nodes fade into the dark background for real 3D depth |
-| **Screenshot Export** | "Export" button → `renderer().domElement.toDataURL('image/png')` → downloads `knowledge-graph.png` |
-| **Toolbar** | Legend toggle, Type / Complexity / Repo colour modes, Search, Reset, Export — all in a glassmorphic top bar |
+| **Bloom Post-Processing** | `UnrealBloomPass` — cinematic neon glow on all nodes and link particles |
+| **Neighborhood Focus Mode** | Hover any node → non-adjacent nodes dim to 6% opacity via direct Three.js material mutation |
+| **AI Graph Summary** | ✨ **Explain** button → 8-section AI architectural analysis: tech stack inference, module breakdown, hotspot risk callout, improvement suggestions (collapsible UI) |
+| **Evidence Node Highlighting** | 📍 **Show in Graph** on any evidence row in SkillCard → tab switches to 3D Graph with that node highlighted amber; all others dimmed |
+| **Function Explain** | Click any `Function` node → NodeInfoPanel → **✨ Explain** button → AI explanation of purpose, complexity verdict, refactor suggestions |
+| **Path Finder** | Select start/end nodes to find the shortest dependency path between them |
+| **Analytics Panel** | Top hub nodes, isolated nodes, node type breakdown |
+| **Code Drill-Down** | Click a `Function` node → "👁 View Source Code" → opens `CodeViewer` modal |
+| **Physics Tweaks** | d3-force charge strength set to -180 for better node spacing |
+| **Reset Camera** | `fgRef.zoomToFit(600)` snaps back to overview |
+| **Atmospheric Fog** | `THREE.FogExp2` makes distant nodes fade into the dark background |
+| **Screenshot Export** | Saves `knowledge-graph.png` from the WebGL canvas |
+| **First-load Fix** | Dimension measurement deferred via `requestAnimationFrame` so ForceGraph3D always initializes at correct container size |
+
+### AI Graph Summary (`graph_explain.py`)
+The ✨ **Explain** button sends rich structural context to Groq Llama 3.3 70B and receives a structured 8-section JSON response rendered as a collapsible panel:
+- **Tech Stack** — inferred from file names, imports, and node types (indigo pills)
+- **Overview** — 3–4 sentence architectural summary
+- **Key Observations** — 5 specific bullets naming actual files/functions (expandable)
+- **⚠ Hotspot Risk** — orange callout identifying highest-risk maintenance areas
+- **Module Breakdown** — logical subsystem grouping with key file tags (collapsed by default)
+- **Improvement Suggestions** — 3 numbered actionable refactoring recommendations (collapsed by default)
+- **Complexity Verdict** — architecture style badge + complexity rating
 
 ### Stylometric Forensics
 The `forensics.py` module detects AI-generated or copy-pasted code via:
@@ -241,23 +264,12 @@ A self-contained page (`/resume-toolkit`) that guides users through:
 ### Skills Verification Section
 The dashboard Skills tab is a premium credential report panel:
 - **Sorted display:** Verified → Partially Verified → Unverified, then score descending
-- **Filter toolbar:** Instant search by skill name, status dropdown, Expand All / Collapse All, live results count
+- **Filter toolbar:** Instant search by skill name, status dropdown, Expand All / Collapse All
 - **Animated score bar:** Fills 0→score on mount, color-coded green/amber/red
-- **Parsed evidence nodes:** `path/file.py:function_name` rendered as `📄 file.py → function_name` with file-type badges (PY/TS/JS)
-- **Evidence Code Drill-Down:** Hover any evidence row → `👁 View` button → opens `CodeViewer` modal with the actual function source code, syntax highlighted with line numbers
-- **Sectioned card layout:** AI Reasoning / Complexity Analysis / Code Evidence / Interview Prep
-- **AI Interview Prep:** 5 personalised questions per skill with per-question collapsible hints and Copy All button
-- **Unverified skills:** Friendly actionable message instead of raw error text
-
-### Evidence Code Drill-Down (`CodeViewer.tsx`)
-When the user clicks **👁 View** on an evidence row, the `CodeViewer` modal opens:
-- Calls `GET /api/node-code/{repoId}/{nodeId}` — the `nodeId` is the existing `func_id` format (`file.py:function_name`)
-- **Source code** is stored in Neo4j at ingest time (tree-sitter captures raw bytes, capped 10KB/fn)
-- **Inline syntax tokenizer** (zero npm deps): keywords violet · strings emerald · numbers amber · class names sky · comments slate italic — covers Python + JS/TS/Go/Java/Rust
-- **Line numbers** in gutter aligned to the function's actual position in the file (`line_start` offset)
-- **Metadata bar:** file path breadcrumb + `Lines X–Y` + `CC N` complexity badge + `(args...)` list
-- **Copy Code** button, **ESC** / backdrop to close
-- **Graceful degradation:** repos ingested before this feature show a "Re-ingest to enable" message; future ingestions work automatically
+- **Parsed evidence nodes:** `path/file.py:function_name` rendered as file-type badges (PY/TS/JS)
+- **📍 Show in Graph:** Hover any evidence row → click to jump to 3D Graph with that node highlighted
+- **Evidence Code Drill-Down:** Hover any evidence row → `👁 View` → opens `CodeViewer` modal
+- **AI Interview Prep:** 5 personalised questions per skill with collapsible hints and Copy All button
 
 ### Shareable Verified Profile
 After running an analysis:
@@ -271,7 +283,6 @@ The Radar tab compares verified skill scores against LLM-generated role benchmar
 - Sends the candidate's **exact verified topic names** to `POST /api/benchmarks/generate`
 - LLM returns a score for each topic for the selected role (e.g. "ML Engineer")
 - Both traces use the same topic list → no alignment zeros possible
-- Shows gap analysis cards (Areas to Improve / Above Benchmark) and summary pills
 
 ### Candidate Comparison
 The `/compare` page loads two or more saved analyses side-by-side for HR-style screening.
