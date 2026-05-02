@@ -240,6 +240,9 @@ export default function DashboardPage() {
     // Feature 1: evidence highlighting
     const [graphHighlightIds, setGraphHighlightIds] = useState<string[]>([]);
     const [funcNameToNodeId, setFuncNameToNodeId] = useState<Record<string, string>>({});
+    // Feature A: AI graph summary — lifted here to persist across tab switches
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [graphSummary, setGraphSummary] = useState<any>(null);
 
     // Coach state
     const [jobDescription, setJobDescription] = useState("");
@@ -1677,6 +1680,8 @@ export default function DashboardPage() {
                                             graphMeta={graphMeta}
                                             highlightedNodeIds={graphHighlightIds}
                                             onHighlightReady={(map) => setFuncNameToNodeId(map)}
+                                            graphSummary={graphSummary}
+                                            onGraphSummaryChange={setGraphSummary}
                                         />
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center bg-slate-900 rounded-b-2xl text-slate-400 min-h-[400px]">

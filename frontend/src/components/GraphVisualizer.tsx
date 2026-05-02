@@ -3,7 +3,7 @@
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import * as THREE from "three";
-import { Search, X, Filter, Layers, Eye, RotateCcw, Camera, BarChart2, GitBranch, Zap } from "lucide-react";
+import { Search, X, Filter, Layers, Eye, RotateCcw, Camera, BarChart2, GitBranch, Zap, Sparkles, RefreshCw } from "lucide-react";
 import CodeViewer from "./CodeViewer";
 
 // Dynamically import ForceGraph3D to avoid SSR issues
@@ -36,6 +36,14 @@ export interface GraphLink {
     type: string;
 }
 
+interface GraphSummaryData {
+    summary: string;
+    architecture_style: string;
+    key_observations: string[];
+    complexity_verdict: string;
+    complexity_reasoning: string;
+}
+
 interface GraphVisualizerProps {
     nodes: GraphNode[];
     links: GraphLink[];
@@ -48,6 +56,9 @@ interface GraphVisualizerProps {
     repoIds?: string[];
     highlightedNodeIds?: string[];              // Feature 1: evidence highlighting
     onHighlightReady?: (map: Record<string, string>) => void;  // Feature 1: name→nodeId map
+    // Feature A: graph summary persisted in parent (survives tab switches)
+    graphSummary?: GraphSummaryData | null;
+    onGraphSummaryChange?: (summary: GraphSummaryData | null) => void;
 }
 
 // Vibrant, neon-accented color palette for node types
@@ -418,7 +429,124 @@ function GraphAnalyticsPanel({ nodes, degreeMap, onFlyTo }: GraphAnalyticsPanelP
     );
 }
 
+// ─── Graph Summary Panel (Feature A) ──────────────────────────────────────────
+const ARCH_COLORS: Record<string, string> = {
+    "Monolithic": "#f472b6",
+    "Pipeline": "#34d399",
+    "MVC": "#818cf8",
+    "Library": "#38bdf8",
+    "Service": "#fb923c",
+    "Data Processing": "#a78bfa",
+    "ML/AI": "#fbbf24",
+    "API Server": "#60a5fa",
+    "CLI Tool": "#94a3b8",
+    "Mixed": "#64748b",
+};
+const VERDICT_COLORS: Record<string, string> = {
+    "Low": "#34d399",
+    "Medium": "#fbbf24",
+    "High": "#fb923c",
+    "Very High": "#f87171",
+};
+
+interface GraphSummaryPanelProps {
+    data: GraphSummaryData;
+    loading: boolean;
+    onRegenerate: () => void;
+}
+
+function GraphSummaryPanel({ data, loading, onRegenerate }: GraphSummaryPanelProps) {
+    const archColor = ARCH_COLORS[data.architecture_style] ?? "#64748b";
+    const verdictColor = VERDICT_COLORS[data.complexity_verdict] ?? "#94a3b8";
+
+    return (
+        <div
+            className="absolute top-11 left-3 z-20 p-4 rounded-2xl text-xs"
+            style={{
+                background: "rgba(10,15,30,0.96)",
+                border: "1px solid rgba(139,92,246,0.3)",
+                backdropFilter: "blur(18px)",
+                boxShadow: "0 0 40px rgba(139,92,246,0.08)",
+                width: 310,
+                maxHeight: "calc(100vh - 120px)",
+                overflowY: "auto",
+            }}
+        >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                    <Sparkles size={13} className="text-violet-400" />
+                    <span className="text-[11px] font-bold text-violet-300 uppercase tracking-widest">AI Summary</span>
+                </div>
+                <button
+                    onClick={onRegenerate}
+                    disabled={loading}
+                    title="Regenerate explanation"
+                    className="p-1 rounded-lg text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+                    style={{ border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                    <RefreshCw size={10} className={loading ? "animate-spin" : ""} />
+                </button>
+            </div>
+
+            {/* Architecture style badge */}
+            <div className="flex items-center gap-2 mb-3">
+                <span
+                    className="text-[10px] font-bold px-2.5 py-1 rounded-full"
+                    style={{
+                        background: `${archColor}20`,
+                        border: `1px solid ${archColor}50`,
+                        color: archColor,
+                    }}
+                >
+                    {data.architecture_style}
+                </span>
+                <span
+                    className="text-[10px] font-semibold px-2 py-1 rounded-full"
+                    style={{
+                        background: `${verdictColor}15`,
+                        border: `1px solid ${verdictColor}40`,
+                        color: verdictColor,
+                    }}
+                >
+                    {data.complexity_verdict} Complexity
+                </span>
+            </div>
+
+            {/* Summary */}
+            <p className="text-slate-300 leading-relaxed mb-3" style={{ fontSize: 11 }}>
+                {data.summary}
+            </p>
+
+            {/* Divider */}
+            <div className="border-t border-white/5 mb-3" />
+
+            {/* Key observations */}
+            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-2">Key Observations</p>
+            <ul className="space-y-1.5">
+                {data.key_observations.map((obs, i) => (
+                    <li key={i} className="flex gap-2 items-start">
+                        <span className="text-violet-500 flex-shrink-0 mt-0.5">▸</span>
+                        <span className="text-slate-400 leading-relaxed" style={{ fontSize: 10 }}>{obs}</span>
+                    </li>
+                ))}
+            </ul>
+
+            {/* Complexity reasoning */}
+            {data.complexity_reasoning && (
+                <>
+                    <div className="border-t border-white/5 mt-3 mb-2" />
+                    <p className="text-slate-500 italic leading-relaxed" style={{ fontSize: 10 }}>
+                        {data.complexity_reasoning}
+                    </p>
+                </>
+            )}
+        </div>
+    );
+}
+
 // ─── Main GraphVisualizer ──────────────────────────────────────────────
+
 export default function GraphVisualizer({
     nodes,
     links,
@@ -431,6 +559,8 @@ export default function GraphVisualizer({
     repoIds = [],
     highlightedNodeIds = [],    // Feature 1: evidence highlight IDs (graph elementIds)
     onHighlightReady,           // Feature 1: reports name→nodeId map to parent
+    graphSummary = null,        // Feature A: lifted to parent for tab-switch persistence
+    onGraphSummaryChange,       // Feature A: notify parent of new summary
 }: GraphVisualizerProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fgRef = useRef<any>();
@@ -443,6 +573,8 @@ export default function GraphVisualizer({
     const [showLegend, setShowLegend] = useState(true);
     const [showSearchBar, setShowSearchBar] = useState(false);
     const [analyticsOpen, setAnalyticsOpen] = useState(false);  // Feature 2
+    const [summaryOpen, setSummaryOpen] = useState(false);       // Feature A
+    const [summaryLoading, setSummaryLoading] = useState(false); // Feature A
     const [codeViewerNode, setCodeViewerNode] = useState<GraphNode | null>(null);
     // Feature 3: path finder state machine
     const [pathMode, setPathMode] = useState<"off" | "selectStart" | "selectEnd" | "loading" | "showing">("off");
@@ -762,6 +894,63 @@ export default function GraphVisualizer({
         });
     };
 
+    // Feature A: fetch AI graph summary
+    const fetchGraphSummary = useCallback(async () => {
+        if (summaryLoading || graphData.nodes.length === 0) return;
+        setSummaryLoading(true);
+        setSummaryOpen(true);
+
+        // Build stats from client-side data (no extra API call needed)
+        const typeCounts: Record<string, number> = {};
+        graphData.nodes.forEach(n => {
+            typeCounts[n.type] = (typeCounts[n.type] ?? 0) + 1;
+        });
+
+        const topComplex = [...graphData.nodes]
+            .filter(n => n.complexity_score != null)
+            .sort((a, b) => (b.complexity_score ?? 0) - (a.complexity_score ?? 0))
+            .slice(0, 5)
+            .map(n => ({ name: n.name, complexity_score: n.complexity_score, type: n.type }));
+
+        const topHubs = Object.entries(degreeMap)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([nid, degree]) => {
+                const node = graphData.nodes.find(n => String(n.id) === nid);
+                return { name: node?.name ?? nid, degree, type: node?.type ?? "unknown" };
+            });
+
+        const orphanCount = graphData.nodes.filter(n =>
+            (degreeMap[String(n.id)] ?? 0) === 0 &&
+            ["File", "Class", "Function"].includes(n.type)
+        ).length;
+
+        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+        try {
+            const res = await fetch(`${apiBase}/api/graph/explain`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    repo_id: repoIds[0] ?? "unknown",
+                    node_count: graphData.nodes.length,
+                    edge_count: graphData.links.length,
+                    type_counts: typeCounts,
+                    top_complex: topComplex,
+                    top_hubs: topHubs,
+                    orphan_count: orphanCount,
+                }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            onGraphSummaryChange?.(data);
+        } catch {
+            // Keep panel open, show nothing — user can retry
+        } finally {
+            setSummaryLoading(false);
+        }
+    }, [graphData, degreeMap, repoIds, summaryLoading, onGraphSummaryChange]);
+
+
     // Feature 3: clear all path highlighting, restore materials
     const clearPath = useCallback(() => {
         setPathMode("off");
@@ -991,6 +1180,26 @@ export default function GraphVisualizer({
                     <GitBranch size={12} />
                     {pathMode === "off" ? "Path" : pathMode === "selectStart" ? "Pick Start…" : pathMode === "selectEnd" ? "Pick End…" : pathMode === "loading" ? "Finding…" : "Clear Path"}
                 </button>
+
+                {/* AI Explain toggle — Feature A */}
+                <button
+                    onClick={() => {
+                        if (!graphSummary && !summaryLoading) { fetchGraphSummary(); }
+                        else { setSummaryOpen(v => !v); }
+                    }}
+                    disabled={summaryLoading}
+                    title="AI architectural summary of this codebase"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all disabled:opacity-70"
+                    style={{
+                        background: summaryOpen ? "rgba(139,92,246,0.25)" : "rgba(30,41,59,0.85)",
+                        border: summaryOpen ? "1px solid rgba(139,92,246,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                        color: summaryOpen ? "#c4b5fd" : "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <Sparkles size={12} />
+                    {summaryLoading ? "Generating…" : "Explain"}
+                </button>
             </div>
 
             {/* Analytics Panel — Feature 2 */}
@@ -1000,6 +1209,36 @@ export default function GraphVisualizer({
                     degreeMap={degreeMap}
                     onFlyTo={flyToNode}
                 />
+            )}
+
+            {/* AI Summary Panel — Feature A */}
+            {summaryOpen && !showLegend && !analyticsOpen && (
+                graphSummary ? (
+                    <GraphSummaryPanel
+                        data={graphSummary}
+                        loading={summaryLoading}
+                        onRegenerate={() => { onGraphSummaryChange?.(null); fetchGraphSummary(); }}
+                    />
+                ) : summaryLoading ? (
+                    // Loading skeleton
+                    <div
+                        className="absolute top-11 left-3 z-20 p-4 rounded-2xl"
+                        style={{
+                            background: "rgba(10,15,30,0.96)",
+                            border: "1px solid rgba(139,92,246,0.25)",
+                            backdropFilter: "blur(18px)",
+                            width: 310,
+                        }}
+                    >
+                        <div className="flex items-center gap-2 mb-4">
+                            <Sparkles size={13} className="text-violet-400 animate-pulse" />
+                            <span className="text-[11px] font-bold text-violet-300 uppercase tracking-widest">Analyzing codebase…</span>
+                        </div>
+                        {[80, 60, 90, 45, 70].map((w, i) => (
+                            <div key={i} className="h-2.5 rounded-full mb-3 animate-pulse" style={{ width: `${w}%`, background: "rgba(139,92,246,0.2)" }} />
+                        ))}
+                    </div>
+                ) : null
             )}
 
             {/* Path Finder status overlay — Feature 3 */}
