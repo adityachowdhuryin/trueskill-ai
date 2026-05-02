@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useState, useEffect, useMemo } from "react";
+import React, { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import * as THREE from "three";
 import { Search, X, Filter, Layers, Eye, RotateCcw, Camera, BarChart2, GitBranch, Zap, Sparkles, RefreshCw } from "lucide-react";
@@ -270,7 +270,93 @@ function NodeInfoPanel({ node, links, onClose, onViewCode }: NodeInfoPanelProps)
         </div>
     );
 }
+// ─── Legend Panel ────────────────────────────────────────────────────────────
+// Extracted as a sub-component to give TypeScript a fresh type inference scope,
+// avoiding TS2322 inference budget exhaustion in the large GraphVisualizer return.
+interface LegendPanelProps {
+    colorMode: ColorMode;
+    activeNodeTypes: NodeType[];
+    hiddenTypes: Set<NodeType>;
+    toggleType: (t: NodeType) => void;
+    nodes: GraphNode[];
+}
+
+function LegendPanel({ colorMode, activeNodeTypes, hiddenTypes, toggleType, nodes }: LegendPanelProps) {
+    return (
+        <div
+            className="absolute top-11 left-3 z-10 p-3 rounded-xl text-xs space-y-2"
+            style={{ background: "rgba(15,23,42,0.88)", border: "1px solid rgba(255,255,255,0.08)", backdropFilter: "blur(16px)", minWidth: 140 }}
+        >
+            {colorMode === "type" ? (
+                <>
+                    <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1">Node Types</p>
+                    {activeNodeTypes.map(type => (
+                        <button
+                            key={type}
+                            onClick={() => toggleType(type)}
+                            className="flex items-center gap-2 w-full text-left group"
+                        >
+                            <span
+                                className="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-transform group-hover:scale-125"
+                                style={{
+                                    backgroundColor: NODE_COLORS[type],
+                                    opacity: hiddenTypes.has(type) ? 0.2 : 1,
+                                    boxShadow: hiddenTypes.has(type) ? "none" : `0 0 6px ${NODE_COLORS[type]}`,
+                                }}
+                            />
+                            <span
+                                className="transition-colors"
+                                style={{ color: hiddenTypes.has(type) ? "#475569" : "#cbd5e1" }}
+                            >
+                                {type}
+                            </span>
+                            {hiddenTypes.has(type) && (
+                                <span className="ml-auto text-[8px] text-slate-600 uppercase">hidden</span>
+                            )}
+                        </button>
+                    ))}
+                    <p className="text-[9px] text-slate-600 mt-1">Click to toggle</p>
+                </>
+            ) : colorMode === "repo" ? (
+                <>
+                    <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-2">Repositories</p>
+                    {uniqueRepos(nodes).map(rid => {
+                        const short = rid.split("/").pop() ?? rid;
+                        const c = repoColor(rid);
+                        return (
+                            <div key={rid} className="flex items-center gap-2 mb-1.5">
+                                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c, boxShadow: `0 0 6px ${c}` }} />
+                                <span className="text-[10px] text-slate-300 truncate" title={rid}>{short}</span>
+                            </div>
+                        );
+                    })}
+                    {uniqueRepos(nodes).length === 0 && <p className="text-[9px] text-slate-600">No repo info on nodes</p>}
+                </>
+            ) : (
+                <>
+                    <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1">Complexity</p>
+                    <div className="w-full h-2.5 rounded-full" style={{ background: "linear-gradient(to right, #4ade80, #facc15, #f97316, #ef4444)" }} />
+                    <div className="flex justify-between text-[9px] text-slate-500">
+                        <span>Low (1)</span>
+                        <span>High (15)</span>
+                    </div>
+                </>
+            )}
+            <div className="pt-2 border-t border-white/5">
+                <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1.5">Relationships</p>
+                {Object.entries(LINK_CONFIG).map(([type, cfg]) => (
+                    <div key={type} className="flex items-center gap-2 mb-1">
+                        <span className="w-5 h-0.5 rounded-full" style={{ backgroundColor: cfg.color }} />
+                        <span className="text-[9px] text-slate-500">{type}</span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 // ─── Graph Analytics Panel ───────────────────────────────────────────────────────────
+
 type AnalyticsTab = "hotspots" | "hubs" | "orphans";
 
 interface GraphAnalyticsPanelProps {
@@ -542,6 +628,444 @@ function GraphSummaryPanel({ data, loading, onRegenerate }: GraphSummaryPanelPro
                 </>
             )}
         </div>
+    );
+}
+
+// ─── Graph Content Area ───────────────────────────────────────────────────────
+// Holds graph canvas, type chips, node info, sampling indicator, stats, path breadcrumb, code viewer.
+// Extracted to keep GraphVisualizer return under TypeScript 5.9 JSX inference budget.
+interface GraphContentAreaProps {
+    showSearchBar: boolean;
+    activeNodeTypes: NodeType[];
+    hiddenTypes: Set<NodeType>;
+    toggleType: (t: NodeType) => void;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graphData: any;
+    graphWidth: number | undefined;
+    graphHeight: number | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fgRef: React.RefObject<any>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    nodeThreeObject: (node: any) => THREE.Object3D;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handleNodeLabel: (node: any) => string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handleNodeHover: (node: any) => void;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handleNodeClick: (node: any) => void;
+    handleEngineStop: () => void;
+    selectedNode: GraphNode | null;
+    links: GraphLink[];
+    setSelectedNode: React.Dispatch<React.SetStateAction<GraphNode | null>>;
+    setCodeViewerNode: React.Dispatch<React.SetStateAction<GraphNode | null>>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graphMeta: any;
+    pathMode: "off" | "selectStart" | "selectEnd" | "loading" | "showing";
+    pathNodes: GraphNode[];
+    pathEdgeTypes: string[];
+    pathExpanded: boolean;
+    setPathExpanded: React.Dispatch<React.SetStateAction<boolean>>;
+    flyToNode: (node: GraphNode) => void;
+    clearPath: () => void;
+    codeViewerNode: GraphNode | null;
+    repoIds: string[];
+}
+
+function GraphContentArea({
+    showSearchBar, activeNodeTypes, hiddenTypes, toggleType,
+    graphData, graphWidth, graphHeight, fgRef,
+    nodeThreeObject, handleNodeLabel, handleNodeHover, handleNodeClick, handleEngineStop,
+    selectedNode, links, setSelectedNode, setCodeViewerNode,
+    graphMeta, pathMode, pathNodes, pathEdgeTypes, pathExpanded, setPathExpanded,
+    flyToNode, clearPath, codeViewerNode, repoIds,
+}: GraphContentAreaProps) {
+    return (
+        <>
+            {/* Type filter chips (shown when search active) */}
+            {showSearchBar && (
+                <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5">
+                    <Filter size={10} className="text-slate-600" />
+                    {activeNodeTypes.map(type => (
+                        <button
+                            key={type}
+                            onClick={() => toggleType(type)}
+                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all"
+                            style={{
+                                background: hiddenTypes.has(type) ? "rgba(30,41,59,0.8)" : `${NODE_COLORS[type]}22`,
+                                border: `1px solid ${hiddenTypes.has(type) ? "rgba(255,255,255,0.06)" : `${NODE_COLORS[type]}66`}`,
+                                color: hiddenTypes.has(type) ? "#475569" : NODE_COLORS[type],
+                            }}
+                        >
+                            {type}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* ─── 3D Graph Canvas ─────────────────────────────────────────── */}
+            <ForceGraph3D
+                ref={fgRef}
+                graphData={graphData}
+                width={graphWidth}
+                height={graphHeight}
+                backgroundColor="#020617"
+                nodeThreeObject={nodeThreeObject}
+                nodeThreeObjectExtend={false}
+                nodeLabel={handleNodeLabel}
+                nodeOpacity={1}
+                linkColor={(link: object) => (link as { color: string }).color}
+                linkWidth={(link: object) => (link as { width: number }).width ?? 1}
+                linkOpacity={0.65}
+                linkDirectionalArrowLength={4}
+                linkDirectionalArrowRelPos={1}
+                linkDirectionalArrowColor={(link: object) => (link as { color: string }).color}
+                linkDirectionalParticles={(link: object) => (link as { particles: number }).particles ?? 0}
+                linkDirectionalParticleSpeed={0.005}
+                linkDirectionalParticleWidth={(link: object) => (link as { particleWidth: number }).particleWidth ?? 1}
+                linkDirectionalParticleColor={(link: object) => (link as { color: string }).color}
+                onNodeHover={handleNodeHover}
+                onNodeClick={handleNodeClick}
+                onEngineStop={handleEngineStop}
+                enableNodeDrag={true}
+                enableNavigationControls={true}
+                showNavInfo={false}
+            />
+
+            {/* ─── Node Info Sidebar ─────────────────────────────────────────── */}
+            <NodeInfoPanel
+                node={selectedNode}
+                links={links}
+                onClose={() => setSelectedNode(null)}
+                onViewCode={(n) => setCodeViewerNode(n)}
+            />
+
+            {/* Sampling indicator banner */}
+            {graphMeta?.was_sampled && (
+                <div
+                    className="absolute top-3 right-4 z-10 text-[11px] px-3 py-1.5 rounded-lg flex items-center gap-2"
+                    style={{ background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.3)", backdropFilter: "blur(8px)" }}
+                    title={`Repository has ${graphMeta.total_nodes as number} nodes total. Top ${graphMeta.returned_nodes as number} shown, prioritised by complexity score.`}
+                >
+                    <span style={{ color: "#fb923c" }}>⚡</span>
+                    <span style={{ color: "#fed7aa" }}>
+                        Showing{" "}
+                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.returned_nodes as number}</span>
+                        {" "}of{" "}
+                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.total_nodes as number}</span>
+                        {" "}nodes
+                        <span className="opacity-60 ml-1">(sampled by complexity)</span>
+                    </span>
+                </div>
+            )}
+
+            {/* Bottom hint */}
+            <div
+                className="absolute bottom-3 right-4 z-10 text-[11px] text-slate-500 px-3 py-1.5 rounded-lg"
+                style={{ background: "rgba(15,23,42,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.05)" }}
+            >
+                🖱 Drag · Scroll · Click node
+            </div>
+
+            {/* Stats badge */}
+            <div
+                className="absolute bottom-3 left-3 z-10 flex items-center gap-3 text-[11px] px-3 py-1.5 rounded-lg"
+                style={{ background: "rgba(15,23,42,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.05)" }}
+            >
+                <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.nodes.length}</span> nodes</span>
+                <span className="w-px h-3 bg-white/10" />
+                <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.links.length}</span> edges</span>
+            </div>
+
+            {/* Path breadcrumb bar */}
+            {pathMode === "showing" && pathNodes.length > 0 && (
+                <div
+                    className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 px-4 py-3 rounded-2xl flex items-center gap-1.5 flex-wrap justify-center"
+                    style={{ background: "rgba(15,23,42,0.95)", border: "1px solid rgba(251,191,36,0.35)", backdropFilter: "blur(16px)", maxWidth: "90%", boxShadow: "0 0 30px rgba(251,191,36,0.1)" }}
+                >
+                    <span className="text-[9px] text-amber-500 font-bold uppercase tracking-widest mr-1">Path</span>
+                    {(() => {
+                        const COLLAPSE_THRESHOLD = 7;
+                        const show = pathNodes.length <= COLLAPSE_THRESHOLD || pathExpanded
+                            ? pathNodes
+                            : [...pathNodes.slice(0, 2), null, ...pathNodes.slice(-2)];
+                        return show.map((n, i) => n === null ? (
+                            <button key="ellipsis" onClick={() => setPathExpanded(true)} className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: "rgba(251,191,36,0.1)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.2)" }}>
+                                +{pathNodes.length - 4} more
+                            </button>
+                        ) : (
+                            <span key={n.id} className="flex items-center gap-1">
+                                <button onClick={() => flyToNode(n)} className="text-[10px] font-semibold px-2.5 py-1 rounded-full transition-all" style={{ background: "rgba(251,191,36,0.15)", color: "#fef3c7", border: "1px solid rgba(251,191,36,0.35)" }} onMouseEnter={e => (e.currentTarget.style.background = "rgba(251,191,36,0.3)")} onMouseLeave={e => (e.currentTarget.style.background = "rgba(251,191,36,0.15)")}>
+                                    {n.name}
+                                </button>
+                                {i < show.length - 1 && show[i + 1] !== null && <span className="text-[9px] text-slate-600">{pathEdgeTypes[i] ?? "→"}</span>}
+                                {show[i + 1] === null && <span className="text-[9px] text-slate-600">→</span>}
+                            </span>
+                        ));
+                    })()}
+                    <button onClick={clearPath} className="ml-2 text-[9px] px-2 py-0.5 rounded-full text-slate-500 hover:text-slate-300 transition-colors" style={{ border: "1px solid rgba(255,255,255,0.06)" }}>✕ Clear</button>
+                </div>
+            )}
+
+            {/* Code Viewer modal */}
+            {codeViewerNode && (
+                <CodeViewer
+                    nodeId={codeViewerNode.file_path
+                        ? `${codeViewerNode.file_path}:${codeViewerNode.name}`
+                        : String(codeViewerNode.id ?? codeViewerNode.name)}
+                    repoIds={repoIds.length > 0 ? repoIds : (codeViewerNode.repo_id ? [codeViewerNode.repo_id] : [])}
+                    fileName={codeViewerNode.file_path?.split("/").pop() ?? codeViewerNode.name}
+                    functionName={codeViewerNode.name}
+                    onClose={() => setCodeViewerNode(null)}
+                />
+            )}
+        </>
+    );
+}
+
+// ─── Graph Toolbar ────────────────────────────────────────────────────────────
+
+// Extracted sub-component to stay within TypeScript 5.9 JSX inference budget.
+interface GraphToolbarProps {
+    showLegend: boolean;
+    setShowLegend: React.Dispatch<React.SetStateAction<boolean>>;
+    colorMode: ColorMode;
+    setColorMode: React.Dispatch<React.SetStateAction<ColorMode>>;
+    showSearch: boolean;
+    showSearchBar: boolean;
+    setShowSearchBar: React.Dispatch<React.SetStateAction<boolean>>;
+    setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fgRef: React.RefObject<any>;
+    userInteracted: React.MutableRefObject<boolean>;
+    analyticsOpen: boolean;
+    setAnalyticsOpen: React.Dispatch<React.SetStateAction<boolean>>;
+    pathMode: "off" | "selectStart" | "selectEnd" | "loading" | "showing";
+    setPathMode: React.Dispatch<React.SetStateAction<"off" | "selectStart" | "selectEnd" | "loading" | "showing">>;
+    setSelectedNode: React.Dispatch<React.SetStateAction<GraphNode | null>>;
+    clearPath: () => void;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graphSummary: any;
+    summaryLoading: boolean;
+    summaryOpen: boolean;
+    setSummaryOpen: React.Dispatch<React.SetStateAction<boolean>>;
+    fetchGraphSummary: () => void;
+}
+
+function GraphToolbar({
+    showLegend, setShowLegend,
+    colorMode, setColorMode,
+    showSearch, showSearchBar, setShowSearchBar, setSearchQuery,
+    fgRef, userInteracted,
+    analyticsOpen, setAnalyticsOpen,
+    pathMode, setPathMode, setSelectedNode, clearPath,
+    graphSummary, summaryLoading, summaryOpen, setSummaryOpen, fetchGraphSummary,
+}: GraphToolbarProps) {
+    return (
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 flex-wrap">
+            {/* Legend toggle */}
+            <button
+                onClick={() => setShowLegend(v => !v)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                style={{
+                    background: showLegend ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
+                    border: showLegend ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                    color: showLegend ? "#a5b4fc" : "#94a3b8",
+                    backdropFilter: "blur(12px)",
+                }}
+            >
+                <Layers size={12} />
+                Legend
+            </button>
+
+            {/* Color mode pills */}
+            <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.1)", background: "rgba(15,23,42,0.8)", backdropFilter: "blur(12px)" }}>
+                {(["type", "complexity", "repo"] as ColorMode[]).map(mode => (
+                    <button
+                        key={mode}
+                        onClick={() => setColorMode(mode)}
+                        className="px-2.5 py-1.5 text-[11px] font-semibold capitalize transition-all"
+                        style={{
+                            background: colorMode === mode ? "rgba(99,102,241,0.4)" : "transparent",
+                            color: colorMode === mode ? "#c7d2fe" : "#64748b",
+                        }}
+                    >
+                        {mode === "type" ? "Type" : mode === "complexity" ? "Complexity" : "Repo"}
+                    </button>
+                ))}
+            </div>
+
+            {/* Search toggle */}
+            {showSearch && (
+                <button
+                    onClick={() => { setShowSearchBar(v => !v); if (showSearchBar) setSearchQuery(""); }}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                    style={{
+                        background: showSearchBar ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
+                        border: showSearchBar ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                        color: showSearchBar ? "#a5b4fc" : "#94a3b8",
+                        backdropFilter: "blur(12px)",
+                    }}
+                >
+                    <Search size={12} />
+                    Search
+                </button>
+            )}
+
+            {/* Reset Camera */}
+            <button
+                onClick={() => { userInteracted.current = false; fgRef.current?.zoomToFit(600, 80); }}
+                title="Reset camera to overview"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                style={{ background: "rgba(30,41,59,0.85)", border: "1px solid rgba(255,255,255,0.08)", color: "#94a3b8", backdropFilter: "blur(12px)" }}
+            >
+                <RotateCcw size={12} />
+                Reset
+            </button>
+
+            {/* Export PNG */}
+            <button
+                onClick={() => {
+                    const renderer = fgRef.current?.renderer();
+                    if (!renderer) return;
+                    const url = renderer.domElement.toDataURL("image/png");
+                    const a = document.createElement("a");
+                    a.href = url; a.download = "knowledge-graph.png"; a.click();
+                }}
+                title="Download graph as PNG"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                style={{ background: "rgba(30,41,59,0.85)", border: "1px solid rgba(255,255,255,0.08)", color: "#94a3b8", backdropFilter: "blur(12px)" }}
+            >
+                <Camera size={12} />
+                Export
+            </button>
+
+            {/* Analytics toggle */}
+            <button
+                onClick={() => { setAnalyticsOpen(v => !v); if (showLegend) setShowLegend(false); }}
+                title="Graph analytics"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                style={{
+                    background: analyticsOpen ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
+                    border: analyticsOpen ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                    color: analyticsOpen ? "#a5b4fc" : "#94a3b8",
+                    backdropFilter: "blur(12px)",
+                }}
+            >
+                <BarChart2 size={12} />
+                Analytics
+            </button>
+
+            {/* Path Finder toggle */}
+            <button
+                onClick={() => {
+                    if (pathMode === "off") { setPathMode("selectStart"); setSelectedNode(null); }
+                    else clearPath();
+                }}
+                title="Find shortest path between two nodes"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
+                style={{
+                    background: pathMode !== "off" ? "rgba(251,191,36,0.2)" : "rgba(30,41,59,0.85)",
+                    border: pathMode !== "off" ? "1px solid rgba(251,191,36,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                    color: pathMode !== "off" ? "#fbbf24" : "#94a3b8",
+                    backdropFilter: "blur(12px)",
+                }}
+            >
+                <GitBranch size={12} />
+                {pathMode === "off" ? "Path" : pathMode === "selectStart" ? "Pick Start…" : pathMode === "selectEnd" ? "Pick End…" : pathMode === "loading" ? "Finding…" : "Clear Path"}
+            </button>
+
+            {/* AI Explain toggle */}
+            <button
+                onClick={() => {
+                    if (!graphSummary && !summaryLoading) { fetchGraphSummary(); }
+                    else { setSummaryOpen(v => !v); }
+                }}
+                disabled={summaryLoading}
+                title="AI architectural summary of this codebase"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all disabled:opacity-70"
+                style={{
+                    background: summaryOpen ? "rgba(139,92,246,0.25)" : "rgba(30,41,59,0.85)",
+                    border: summaryOpen ? "1px solid rgba(139,92,246,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                    color: summaryOpen ? "#c4b5fd" : "#94a3b8",
+                    backdropFilter: "blur(12px)",
+                }}
+            >
+                <Sparkles size={12} />
+                {summaryLoading ? "Generating…" : "Explain"}
+            </button>
+        </div>
+    );
+}
+
+// ─── Graph Overlay Panels ────────────────────────────────────────────────────
+
+// Extracted to give TypeScript a fresh inference scope (TS2322 budget exhaustion fix).
+interface GraphOverlayPanelsProps {
+    analyticsOpen: boolean;
+    showLegend: boolean;
+    summaryPanel: JSX.Element | null;
+    pathMode: "off" | "selectStart" | "selectEnd" | "loading" | "showing";
+    pathStartNode: GraphNode | null;
+    colorMode: ColorMode;
+    activeNodeTypes: NodeType[];
+    hiddenTypes: Set<NodeType>;
+    toggleType: (t: NodeType) => void;
+    nodes: GraphNode[];
+    graphData: { nodes: GraphNode[]; links: GraphLink[] };
+    degreeMap: Record<string, number>;
+    flyToNode: (node: GraphNode) => void;
+}
+
+function GraphOverlayPanels({
+    analyticsOpen, showLegend, summaryPanel,
+    pathMode, pathStartNode,
+    colorMode, activeNodeTypes, hiddenTypes, toggleType, nodes,
+    graphData, degreeMap, flyToNode,
+}: GraphOverlayPanelsProps) {
+    return (
+        <>
+            {/* Analytics Panel */}
+            {analyticsOpen && !showLegend && (
+                <GraphAnalyticsPanel
+                    nodes={graphData.nodes}
+                    degreeMap={degreeMap}
+                    onFlyTo={flyToNode}
+                />
+            )}
+
+            {/* AI Summary Panel */}
+            {summaryPanel}
+
+            {/* Path Finder status overlay */}
+            {(pathMode === "selectStart" || pathMode === "selectEnd" || pathMode === "loading") && (
+                <div
+                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 px-6 py-4 rounded-xl text-sm font-semibold pointer-events-none"
+                    style={{
+                        background: "rgba(15,23,42,0.93)",
+                        border: "1px solid rgba(251,191,36,0.4)",
+                        backdropFilter: "blur(16px)",
+                        color: "#fbbf24",
+                        boxShadow: "0 0 40px rgba(251,191,36,0.12)",
+                        textAlign: "center",
+                    }}
+                >
+                    {pathMode === "selectStart" && <><GitBranch size={16} style={{ display: "inline", marginRight: 8 }} />Click a <strong>start</strong> node</>}
+                    {pathMode === "selectEnd" && <><Zap size={16} style={{ display: "inline", marginRight: 8 }} />Now click an <strong>end</strong> node<br /><span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>From: {pathStartNode?.name}</span></>}
+                    {pathMode === "loading" && <>⏳ Finding shortest path…</>}
+                </div>
+            )}
+
+            {/* Legend panel */}
+            {showLegend && (
+                <LegendPanel
+                    colorMode={colorMode}
+                    activeNodeTypes={activeNodeTypes}
+                    hiddenTypes={hiddenTypes}
+                    toggleType={toggleType}
+                    nodes={nodes}
+                />
+            )}
+        </>
     );
 }
 
@@ -1044,6 +1568,43 @@ export default function GraphVisualizer({
 
     const activeNodeTypes = (Object.keys(NODE_COLORS) as NodeType[]);
 
+    // Extracted to avoid TypeScript TS2322 inference collapse in JSX
+    // (deep chained && + nested ternary causes `unknown` poisoning on later siblings)
+    const summaryPanel: JSX.Element | null = (() => {
+        if (!summaryOpen || showLegend || analyticsOpen) return null;
+        if (graphSummary) {
+            return (
+                <GraphSummaryPanel
+                    data={graphSummary}
+                    loading={summaryLoading}
+                    onRegenerate={() => { onGraphSummaryChange?.(null); fetchGraphSummary(); }}
+                />
+            );
+        }
+        if (summaryLoading) {
+            return (
+                <div
+                    className="absolute top-11 left-3 z-20 p-4 rounded-2xl"
+                    style={{
+                        background: "rgba(10,15,30,0.96)",
+                        border: "1px solid rgba(139,92,246,0.25)",
+                        backdropFilter: "blur(18px)",
+                        width: 310,
+                    }}
+                >
+                    <div className="flex items-center gap-2 mb-4">
+                        <Sparkles size={13} className="text-violet-400 animate-pulse" />
+                        <span className="text-[11px] font-bold text-violet-300 uppercase tracking-widest">Analyzing codebase…</span>
+                    </div>
+                    {[80, 60, 90, 45, 70].map((w, i) => (
+                        <div key={i} className="h-2.5 rounded-full mb-3 animate-pulse" style={{ width: `${w}%`, background: "rgba(139,92,246,0.2)" }} />
+                    ))}
+                </div>
+            );
+        }
+        return null;
+    })();
+
 
     return (
         <div
@@ -1052,289 +1613,45 @@ export default function GraphVisualizer({
             style={{ background: "radial-gradient(ellipse at center, #0f172a 0%, #020617 100%)" }}
             onPointerDown={() => { userInteracted.current = true; }}
         >
-            {/* ─── Top toolbar ─────────────────────────────────────────────── */}
-            <div className="absolute top-3 left-3 z-10 flex items-center gap-2 flex-wrap">
-                {/* Legend toggle */}
-                <button
-                    onClick={() => setShowLegend(v => !v)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                    style={{
-                        background: showLegend ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
-                        border: showLegend ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                        color: showLegend ? "#a5b4fc" : "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <Layers size={12} />
-                    Legend
-                </button>
+            <GraphToolbar
+                showLegend={showLegend}
+                setShowLegend={setShowLegend}
+                colorMode={colorMode}
+                setColorMode={setColorMode}
+                showSearch={showSearch}
+                showSearchBar={showSearchBar}
+                setShowSearchBar={setShowSearchBar}
+                setSearchQuery={setSearchQuery}
+                fgRef={fgRef}
+                userInteracted={userInteracted}
+                analyticsOpen={analyticsOpen}
+                setAnalyticsOpen={setAnalyticsOpen}
+                pathMode={pathMode}
+                setPathMode={setPathMode}
+                setSelectedNode={setSelectedNode}
+                clearPath={clearPath}
+                graphSummary={graphSummary}
+                summaryLoading={summaryLoading}
+                summaryOpen={summaryOpen}
+                setSummaryOpen={setSummaryOpen}
+                fetchGraphSummary={fetchGraphSummary}
+            />
 
-                {/* Color mode pills */}
-                <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.1)", background: "rgba(15,23,42,0.8)", backdropFilter: "blur(12px)" }}>
-                    {(["type", "complexity", "repo"] as ColorMode[]).map(mode => (
-                        <button
-                            key={mode}
-                            onClick={() => setColorMode(mode)}
-                            className="px-2.5 py-1.5 text-[11px] font-semibold capitalize transition-all"
-                            style={{
-                                background: colorMode === mode ? "rgba(99,102,241,0.4)" : "transparent",
-                                color: colorMode === mode ? "#c7d2fe" : "#64748b",
-                            }}
-                        >
-                            {mode === "type" ? "Type" : mode === "complexity" ? "Complexity" : "Repo"}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Search toggle */}
-                {showSearch && (
-                    <button
-                        onClick={() => { setShowSearchBar(v => !v); if (showSearchBar) setSearchQuery(""); }}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                        style={{
-                            background: showSearchBar ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
-                            border: showSearchBar ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                            color: showSearchBar ? "#a5b4fc" : "#94a3b8",
-                            backdropFilter: "blur(12px)",
-                        }}
-                    >
-                        <Search size={12} />
-                        Search
-                    </button>
-                )}
-
-                {/* Reset Camera */}
-                <button
-                    onClick={() => {
-                        userInteracted.current = false;
-                        fgRef.current?.zoomToFit(600, 80);
-                    }}
-                    title="Reset camera to overview"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                    style={{
-                        background: "rgba(30,41,59,0.85)",
-                        border: "1px solid rgba(255,255,255,0.08)",
-                        color: "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <RotateCcw size={12} />
-                    Reset
-                </button>
-
-                {/* Export PNG */}
-                <button
-                    onClick={() => {
-                        const renderer = fgRef.current?.renderer();
-                        if (!renderer) return;
-                        const url = renderer.domElement.toDataURL("image/png");
-                        const a = document.createElement("a");
-                        a.href = url;
-                        a.download = "knowledge-graph.png";
-                        a.click();
-                    }}
-                    title="Download graph as PNG"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                    style={{
-                        background: "rgba(30,41,59,0.85)",
-                        border: "1px solid rgba(255,255,255,0.08)",
-                        color: "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <Camera size={12} />
-                    Export
-                </button>
-
-                {/* Analytics toggle — Feature 2 */}
-                <button
-                    onClick={() => { setAnalyticsOpen(v => !v); if (showLegend) setShowLegend(false); }}
-                    title="Graph analytics"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                    style={{
-                        background: analyticsOpen ? "rgba(99,102,241,0.25)" : "rgba(30,41,59,0.85)",
-                        border: analyticsOpen ? "1px solid rgba(99,102,241,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                        color: analyticsOpen ? "#a5b4fc" : "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <BarChart2 size={12} />
-                    Analytics
-                </button>
-
-                {/* Path Finder toggle — Feature 3 */}
-                <button
-                    onClick={() => {
-                        if (pathMode === "off") { setPathMode("selectStart"); setSelectedNode(null); }
-                        else clearPath();
-                    }}
-                    title="Find shortest path between two nodes"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all"
-                    style={{
-                        background: pathMode !== "off" ? "rgba(251,191,36,0.2)" : "rgba(30,41,59,0.85)",
-                        border: pathMode !== "off" ? "1px solid rgba(251,191,36,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                        color: pathMode !== "off" ? "#fbbf24" : "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <GitBranch size={12} />
-                    {pathMode === "off" ? "Path" : pathMode === "selectStart" ? "Pick Start…" : pathMode === "selectEnd" ? "Pick End…" : pathMode === "loading" ? "Finding…" : "Clear Path"}
-                </button>
-
-                {/* AI Explain toggle — Feature A */}
-                <button
-                    onClick={() => {
-                        if (!graphSummary && !summaryLoading) { fetchGraphSummary(); }
-                        else { setSummaryOpen(v => !v); }
-                    }}
-                    disabled={summaryLoading}
-                    title="AI architectural summary of this codebase"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all disabled:opacity-70"
-                    style={{
-                        background: summaryOpen ? "rgba(139,92,246,0.25)" : "rgba(30,41,59,0.85)",
-                        border: summaryOpen ? "1px solid rgba(139,92,246,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                        color: summaryOpen ? "#c4b5fd" : "#94a3b8",
-                        backdropFilter: "blur(12px)",
-                    }}
-                >
-                    <Sparkles size={12} />
-                    {summaryLoading ? "Generating…" : "Explain"}
-                </button>
-            </div>
-
-            {/* Analytics Panel — Feature 2 */}
-            {analyticsOpen && !showLegend && (
-                <GraphAnalyticsPanel
-                    nodes={graphData.nodes}
-                    degreeMap={degreeMap}
-                    onFlyTo={flyToNode}
-                />
-            )}
-
-            {/* AI Summary Panel — Feature A */}
-            {summaryOpen && !showLegend && !analyticsOpen && (
-                graphSummary ? (
-                    <GraphSummaryPanel
-                        data={graphSummary}
-                        loading={summaryLoading}
-                        onRegenerate={() => { onGraphSummaryChange?.(null); fetchGraphSummary(); }}
-                    />
-                ) : summaryLoading ? (
-                    // Loading skeleton
-                    <div
-                        className="absolute top-11 left-3 z-20 p-4 rounded-2xl"
-                        style={{
-                            background: "rgba(10,15,30,0.96)",
-                            border: "1px solid rgba(139,92,246,0.25)",
-                            backdropFilter: "blur(18px)",
-                            width: 310,
-                        }}
-                    >
-                        <div className="flex items-center gap-2 mb-4">
-                            <Sparkles size={13} className="text-violet-400 animate-pulse" />
-                            <span className="text-[11px] font-bold text-violet-300 uppercase tracking-widest">Analyzing codebase…</span>
-                        </div>
-                        {[80, 60, 90, 45, 70].map((w, i) => (
-                            <div key={i} className="h-2.5 rounded-full mb-3 animate-pulse" style={{ width: `${w}%`, background: "rgba(139,92,246,0.2)" }} />
-                        ))}
-                    </div>
-                ) : null
-            )}
-
-            {/* Path Finder status overlay — Feature 3 */}
-            {(pathMode === "selectStart" || pathMode === "selectEnd" || pathMode === "loading") && (
-                <div
-                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 px-6 py-4 rounded-xl text-sm font-semibold pointer-events-none"
-                    style={{
-                        background: "rgba(15,23,42,0.93)",
-                        border: "1px solid rgba(251,191,36,0.4)",
-                        backdropFilter: "blur(16px)",
-                        color: "#fbbf24",
-                        boxShadow: "0 0 40px rgba(251,191,36,0.12)",
-                        textAlign: "center",
-                    }}
-                >
-                    {pathMode === "selectStart" && <><GitBranch size={16} style={{ display: "inline", marginRight: 8 }} />Click a <strong>start</strong> node</>}
-                    {pathMode === "selectEnd" && <><Zap size={16} style={{ display: "inline", marginRight: 8 }} />Now click an <strong>end</strong> node<br /><span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>From: {pathStartNode?.name}</span></>}
-                    {pathMode === "loading" && <>⏳ Finding shortest path…</>}
-                </div>
-            )}
-
-            {/* Legend panel */}
-            {showLegend && (
-
-                <div
-                    className="absolute top-11 left-3 z-10 p-3 rounded-xl text-xs space-y-2"
-                    style={{ background: "rgba(15,23,42,0.88)", border: "1px solid rgba(255,255,255,0.08)", backdropFilter: "blur(16px)", minWidth: 140 }}
-                >
-                    {colorMode === "type" ? (
-                        <>
-                            <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1">Node Types</p>
-                            {activeNodeTypes.map(type => (
-                                <button
-                                    key={type}
-                                    onClick={() => toggleType(type)}
-                                    className="flex items-center gap-2 w-full text-left group"
-                                >
-                                    <span
-                                        className="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-transform group-hover:scale-125"
-                                        style={{
-                                            backgroundColor: NODE_COLORS[type],
-                                            opacity: hiddenTypes.has(type) ? 0.2 : 1,
-                                            boxShadow: hiddenTypes.has(type) ? "none" : `0 0 6px ${NODE_COLORS[type]}`,
-                                        }}
-                                    />
-                                    <span
-                                        className="transition-colors"
-                                        style={{ color: hiddenTypes.has(type) ? "#475569" : "#cbd5e1" }}
-                                    >
-                                        {type}
-                                    </span>
-                                    {hiddenTypes.has(type) && (
-                                        <span className="ml-auto text-[8px] text-slate-600 uppercase">hidden</span>
-                                    )}
-                                </button>
-                            ))}
-                            <p className="text-[9px] text-slate-600 mt-1">Click to toggle</p>
-                        </>
-                    ) : colorMode === "repo" ? (
-                        <>
-                            <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-2">Repositories</p>
-                            {uniqueRepos(nodes).map(rid => {
-                                const short = rid.split("/").pop() ?? rid;
-                                const c = repoColor(rid);
-                                return (
-                                    <div key={rid} className="flex items-center gap-2 mb-1.5">
-                                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c, boxShadow: `0 0 6px ${c}` }} />
-                                        <span className="text-[10px] text-slate-300 truncate" title={rid}>{short}</span>
-                                    </div>
-                                );
-                            })}
-                            {uniqueRepos(nodes).length === 0 && <p className="text-[9px] text-slate-600">No repo info on nodes</p>}
-                        </>
-                    ) : (
-                        <>
-                            <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1">Complexity</p>
-                            <div className="w-full h-2.5 rounded-full" style={{ background: "linear-gradient(to right, #4ade80, #facc15, #f97316, #ef4444)" }} />
-                            <div className="flex justify-between text-[9px] text-slate-500">
-                                <span>Low (1)</span>
-                                <span>High (15)</span>
-                            </div>
-                        </>
-                    )}
-
-                    {/* Link legend */}
-                    <div className="pt-2 border-t border-white/5">
-                        <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-widest mb-1.5">Relationships</p>
-                        {Object.entries(LINK_CONFIG).map(([type, cfg]) => (
-                            <div key={type} className="flex items-center gap-2 mb-1">
-                                <span className="w-5 h-0.5 rounded-full" style={{ backgroundColor: cfg.color }} />
-                                <span className="text-[9px] text-slate-500">{type}</span>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
+            <GraphOverlayPanels
+                analyticsOpen={analyticsOpen}
+                showLegend={showLegend}
+                summaryPanel={summaryPanel}
+                pathMode={pathMode}
+                pathStartNode={pathStartNode}
+                colorMode={colorMode}
+                activeNodeTypes={activeNodeTypes}
+                hiddenTypes={hiddenTypes}
+                toggleType={toggleType}
+                nodes={nodes}
+                graphData={graphData}
+                degreeMap={degreeMap}
+                flyToNode={flyToNode}
+            />
 
             {showSearchBar && (
                 <div
@@ -1363,169 +1680,35 @@ export default function GraphVisualizer({
                 </div>
             )}
 
-            {/* Type filter chips (shown when search active) */}
-            {showSearchBar && (
-                <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5">
-                    <Filter size={10} className="text-slate-600" />
-                    {activeNodeTypes.map(type => (
-                        <button
-                            key={type}
-                            onClick={() => toggleType(type)}
-                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all"
-                            style={{
-                                background: hiddenTypes.has(type) ? "rgba(30,41,59,0.8)" : `${NODE_COLORS[type]}22`,
-                                border: `1px solid ${hiddenTypes.has(type) ? "rgba(255,255,255,0.06)" : `${NODE_COLORS[type]}66`}`,
-                                color: hiddenTypes.has(type) ? "#475569" : NODE_COLORS[type],
-                            }}
-                        >
-                            {type}
-                        </button>
-                    ))}
-                </div>
-            )}
-
-            {/* ─── 3D Graph Canvas ─────────────────────────────────────────── */}
-            <ForceGraph3D
-                ref={fgRef}
+            <GraphContentArea
+                showSearchBar={showSearchBar}
+                activeNodeTypes={activeNodeTypes}
+                hiddenTypes={hiddenTypes}
+                toggleType={toggleType}
                 graphData={graphData}
-                width={graphWidth}
-                height={graphHeight}
-                backgroundColor="#020617"
+                graphWidth={graphWidth}
+                graphHeight={graphHeight}
+                fgRef={fgRef}
                 nodeThreeObject={nodeThreeObject}
-                nodeThreeObjectExtend={false}
-                nodeLabel={handleNodeLabel}
-                nodeOpacity={1}
-                linkColor={(link: object) => (link as { color: string }).color}
-                linkWidth={(link: object) => (link as { width: number }).width ?? 1}
-                linkOpacity={0.65}
-                linkDirectionalArrowLength={4}
-                linkDirectionalArrowRelPos={1}
-                linkDirectionalArrowColor={(link: object) => (link as { color: string }).color}
-                linkDirectionalParticles={(link: object) => (link as { particles: number }).particles ?? 0}
-                linkDirectionalParticleSpeed={0.005}
-                linkDirectionalParticleWidth={(link: object) => (link as { particleWidth: number }).particleWidth ?? 1}
-                linkDirectionalParticleColor={(link: object) => (link as { color: string }).color}
-                onNodeHover={handleNodeHover}
-                onNodeClick={handleNodeClick}
-                onEngineStop={handleEngineStop}
-                enableNodeDrag={true}
-                enableNavigationControls={true}
-                showNavInfo={false}
-            />
-
-            {/* ─── Node Info Sidebar ─────────────────────────────────────────── */}
-            <NodeInfoPanel
-                node={selectedNode}
+                handleNodeLabel={handleNodeLabel}
+                handleNodeHover={handleNodeHover}
+                handleNodeClick={handleNodeClick}
+                handleEngineStop={handleEngineStop}
+                selectedNode={selectedNode}
                 links={links}
-                onClose={() => setSelectedNode(null)}
-                onViewCode={(n) => setCodeViewerNode(n)}
+                setSelectedNode={setSelectedNode}
+                setCodeViewerNode={setCodeViewerNode}
+                graphMeta={graphMeta}
+                pathMode={pathMode}
+                pathNodes={pathNodes}
+                pathEdgeTypes={pathEdgeTypes}
+                pathExpanded={pathExpanded}
+                setPathExpanded={setPathExpanded}
+                flyToNode={flyToNode}
+                clearPath={clearPath}
+                codeViewerNode={codeViewerNode}
+                repoIds={repoIds}
             />
-
-            {/* ─── Sampling indicator banner ────────────────────────────── */}
-            {graphMeta?.was_sampled && (
-                <div
-                    className="absolute top-3 right-4 z-10 text-[11px] px-3 py-1.5 rounded-lg flex items-center gap-2"
-                    style={{ background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.3)", backdropFilter: "blur(8px)" }}
-                    title={`Repository has ${graphMeta.total_nodes as number} nodes total. Top ${graphMeta.returned_nodes as number} shown, prioritised by complexity score.`}
-                >
-                    <span style={{ color: "#fb923c" }}>⚡</span>
-                    <span style={{ color: "#fed7aa" }}>
-                        Showing{" "}
-                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.returned_nodes as number}</span>
-                        {" "}of{" "}
-                        <span className="font-bold" style={{ color: "#fb923c" }}>{graphMeta.total_nodes as number}</span>
-                        {" "}nodes
-                        <span className="opacity-60 ml-1">(sampled by complexity)</span>
-                    </span>
-                </div>
-            )}
-
-            {/* ─── Bottom hint ─────────────────────────────────────────────── */}
-            <div
-                className="absolute bottom-3 right-4 z-10 text-[11px] text-slate-500 px-3 py-1.5 rounded-lg"
-                style={{ background: "rgba(15,23,42,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.05)" }}
-            >
-                🖱 Drag · Scroll · Click node
-            </div>
-
-            {/* ─── Stats badge ─────────────────────────────────────────── */}
-            <div
-                className="absolute bottom-3 left-3 z-10 flex items-center gap-3 text-[11px] px-3 py-1.5 rounded-lg"
-                style={{ background: "rgba(15,23,42,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.05)" }}
-            >
-                <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.nodes.length}</span> nodes</span>
-                <span className="w-px h-3 bg-white/10" />
-                <span className="text-slate-400"><span className="font-bold text-slate-200">{graphData.links.length}</span> edges</span>
-            </div>
-            {/* Path breadcrumb bar — Feature 3 */}
-            {pathMode === "showing" && pathNodes.length > 0 && (
-                <div
-                    className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 px-4 py-3 rounded-2xl flex items-center gap-1.5 flex-wrap justify-center"
-                    style={{
-                        background: "rgba(15,23,42,0.95)",
-                        border: "1px solid rgba(251,191,36,0.35)",
-                        backdropFilter: "blur(16px)",
-                        maxWidth: "90%",
-                        boxShadow: "0 0 30px rgba(251,191,36,0.1)",
-                    }}
-                >
-                    <span className="text-[9px] text-amber-500 font-bold uppercase tracking-widest mr-1">Path</span>
-                    {(() => {
-                        const COLLAPSE_THRESHOLD = 7;
-                        const show = pathNodes.length <= COLLAPSE_THRESHOLD || pathExpanded
-                            ? pathNodes
-                            : [...pathNodes.slice(0, 2), null, ...pathNodes.slice(-2)];
-                        return show.map((n, i) => n === null ? (
-                            <button
-                                key="ellipsis"
-                                onClick={() => setPathExpanded(true)}
-                                className="text-[10px] px-2 py-0.5 rounded-full"
-                                style={{ background: "rgba(251,191,36,0.1)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.2)" }}
-                            >
-                                +{pathNodes.length - 4} more
-                            </button>
-                        ) : (
-                            <span key={n.id} className="flex items-center gap-1">
-                                <button
-                                    onClick={() => flyToNode(n)}
-                                    className="text-[10px] font-semibold px-2.5 py-1 rounded-full transition-all"
-                                    style={{ background: "rgba(251,191,36,0.15)", color: "#fef3c7", border: "1px solid rgba(251,191,36,0.35)" }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = "rgba(251,191,36,0.3)")}
-                                    onMouseLeave={e => (e.currentTarget.style.background = "rgba(251,191,36,0.15)")}
-                                >
-                                    {n.name}
-                                </button>
-                                {i < show.length - 1 && show[i + 1] !== null && (
-                                    <span className="text-[9px] text-slate-600">
-                                        {pathEdgeTypes[i] ?? "→"}
-                                    </span>
-                                )}
-                                {show[i + 1] === null && <span className="text-[9px] text-slate-600">→</span>}
-                            </span>
-                        ));
-                    })()}
-                    <button
-                        onClick={clearPath}
-                        className="ml-2 text-[9px] px-2 py-0.5 rounded-full text-slate-500 hover:text-slate-300 transition-colors"
-                        style={{ border: "1px solid rgba(255,255,255,0.06)" }}
-                    >
-                        ✕ Clear
-                    </button>
-                </div>
-            )}
-
-
-            {codeViewerNode && (
-                <CodeViewer
-                    nodeId={codeViewerNode.file_path
-                        ? `${codeViewerNode.file_path}:${codeViewerNode.name}`
-                        : String(codeViewerNode.id ?? codeViewerNode.name)}
-                    repoIds={repoIds.length > 0 ? repoIds : (codeViewerNode.repo_id ? [codeViewerNode.repo_id] : [])}
-                    fileName={codeViewerNode.file_path?.split("/").pop() ?? codeViewerNode.name}
-                    functionName={codeViewerNode.name}
-                    onClose={() => setCodeViewerNode(null)}
-                />
-            )}
         </div>
     );
 }
