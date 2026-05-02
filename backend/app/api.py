@@ -757,6 +757,64 @@ async def database_health():
 
 
 # =============================================================================
+# AI Explanation Endpoints
+# =============================================================================
+
+class GraphExplainRequest(BaseModel):
+    repo_id: str
+    node_count: int
+    edge_count: int
+    type_counts: dict          # {"File": 12, "Class": 8, "Function": 94, "Import": 40}
+    top_complex: list          # [{name, complexity_score, type}]
+    top_hubs: list             # [{name, degree, type}]
+    orphan_count: int = 0
+
+
+@router.post("/graph/explain")
+async def explain_graph(req_body: GraphExplainRequest, req: Request):
+    """
+    POST /api/graph/explain
+    Generates an AI architectural summary of a repo's knowledge graph.
+    Uses only structural statistics (node counts, hub names, complexity scores)
+    — no raw source code is sent to the LLM.
+    """
+    from .graph_explain import generate_graph_explanation
+    check_rate_limit(req.client.host if req.client else "unknown", "graph-explain")
+    try:
+        result = await generate_graph_explanation(req_body.model_dump())
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Graph explanation failed: {str(e)}")
+
+
+class FunctionExplainRequest(BaseModel):
+    source_code: str
+    function_name: str
+    file_path: str
+    args: list = []
+    parent_class: Optional[str] = None
+    complexity_score: Optional[int] = None
+
+
+@router.post("/explain-function")
+async def explain_function(req_body: FunctionExplainRequest, req: Request):
+    """
+    POST /api/explain-function
+    Generates a plain-English explanation of a specific function.
+    Receives and analyzes the function's source code.
+    """
+    from .function_explain import generate_function_explanation
+    check_rate_limit(req.client.host if req.client else "unknown", "explain-function")
+    if not req_body.source_code.strip():
+        raise HTTPException(status_code=400, detail="source_code cannot be empty")
+    try:
+        result = await generate_function_explanation(req_body.model_dump())
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Function explanation failed: {str(e)}")
+
+
+# =============================================================================
 # Coach Module - Gap Analysis & Bridge Projects
 # =============================================================================
 

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
     X, Copy, Check, FileCode, Zap, Hash, ChevronRight,
-    RefreshCw, AlertTriangle, Code2,
+    RefreshCw, AlertTriangle, Code2, Sparkles, MessageSquare,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -16,6 +16,14 @@ interface NodeCodeData {
     complexity_score: number | null;
     args: string[];
     parent_class: string | null;
+}
+
+interface FunctionExplanation {
+    purpose: string;
+    how_it_works: string;
+    complexity_note: string | null;
+    watch_out_for: string | null;
+    interview_angle: string | null;
 }
 
 export interface CodeViewerProps {
@@ -134,6 +142,10 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<"not_found" | "no_source" | "network" | null>(null);
     const [copied, setCopied] = useState(false);
+    // Feature B: AI explanation tab
+    const [activeTab, setActiveTab] = useState<"code" | "explain">("code");
+    const [explanation, setExplanation] = useState<FunctionExplanation | null>(null);
+    const [explainLoading, setExplainLoading] = useState(false);
 
     const fetchCode = useCallback(async () => {
         setLoading(true);
@@ -189,6 +201,39 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
                 setTimeout(() => setCopied(false), 2000);
             });
         }
+    };
+
+    // Feature B: fetch AI explanation (opt-in, cached in state)
+    const fetchExplanation = async () => {
+        if (!data || explainLoading) return;
+        setExplainLoading(true);
+        try {
+            const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+            const res = await fetch(`${apiBase}/api/explain-function`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    source_code: data.source_code,
+                    function_name: data.name,
+                    file_path: data.file_path,
+                    args: data.args,
+                    parent_class: data.parent_class,
+                    complexity_score: data.complexity_score,
+                }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const result: FunctionExplanation = await res.json();
+            setExplanation(result);
+        } catch {
+            // silently fail — user can retry
+        } finally {
+            setExplainLoading(false);
+        }
+    };
+
+    const handleExplainClick = () => {
+        setActiveTab("explain");
+        if (!explanation && !explainLoading) fetchExplanation();
     };
 
     const lang = data ? detectLang(data.file_path) : "other";
@@ -274,7 +319,41 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
                     </div>
                 </div>
 
-                {/* ── Body ── */}
+                {/* Tab bar — only show when code loaded */}
+                {data && !loading && !error && (
+                    <div
+                        className="flex items-center gap-1 px-4 py-1.5 border-b border-white/8 flex-shrink-0"
+                        style={{ background: "rgba(8,12,24,0.6)" }}
+                    >
+                        <button
+                            onClick={() => setActiveTab("code")}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all"
+                            style={{
+                                background: activeTab === "code" ? "rgba(99,102,241,0.2)" : "transparent",
+                                color: activeTab === "code" ? "#a5b4fc" : "#64748b",
+                                border: activeTab === "code" ? "1px solid rgba(99,102,241,0.35)" : "1px solid transparent",
+                            }}
+                        >
+                            <Code2 className="w-3 h-3" />
+                            Code
+                        </button>
+                        <button
+                            onClick={handleExplainClick}
+                            disabled={explainLoading}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all disabled:opacity-60"
+                            style={{
+                                background: activeTab === "explain" ? "rgba(139,92,246,0.2)" : "transparent",
+                                color: activeTab === "explain" ? "#c4b5fd" : "#64748b",
+                                border: activeTab === "explain" ? "1px solid rgba(139,92,246,0.35)" : "1px solid transparent",
+                            }}
+                        >
+                            <Sparkles className="w-3 h-3" />
+                            {explainLoading ? "Generating…" : "Explain"}
+                        </button>
+                    </div>
+                )}
+
+                {/* Body */}
                 <div className="flex-1 overflow-y-auto">
                     {loading ? (
                         <LoadingSkeleton />
@@ -310,20 +389,112 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
                             </button>
                         </div>
                     ) : data ? (
-                        <div className="py-3">
-                            {lines.map((line, i) => (
-                                <SyntaxLine
-                                    key={i}
-                                    line={line}
-                                    lineNum={startLine + i}
-                                    lang={lang}
-                                />
-                            ))}
-                        </div>
+                        activeTab === "code" ? (
+                            <div className="py-3">
+                                {lines.map((line, i) => (
+                                    <SyntaxLine
+                                        key={i}
+                                        line={line}
+                                        lineNum={startLine + i}
+                                        lang={lang}
+                                    />
+                                ))}
+                            </div>
+                        ) : (
+                            // Explain tab
+                            <div className="p-5">
+                                {explainLoading ? (
+                                    // Loading skeleton
+                                    <div className="space-y-4 animate-pulse">
+                                        <div className="h-3 bg-violet-900/40 rounded-full w-3/4" />
+                                        <div className="h-3 bg-violet-900/30 rounded-full w-full" />
+                                        <div className="h-3 bg-violet-900/30 rounded-full w-5/6" />
+                                        <div className="h-3 bg-violet-900/20 rounded-full w-4/5 mt-6" />
+                                        <div className="h-3 bg-violet-900/20 rounded-full w-full" />
+                                        <div className="h-3 bg-violet-900/20 rounded-full w-3/4" />
+                                        <div className="h-3 bg-violet-900/20 rounded-full w-full" />
+                                    </div>
+                                ) : explanation ? (
+                                    <div className="space-y-5">
+                                        {/* Purpose */}
+                                        <section>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="text-[9px] font-bold uppercase tracking-widest text-violet-500">Purpose</span>
+                                            </div>
+                                            <p className="text-slate-200 text-sm leading-relaxed">{explanation.purpose}</p>
+                                        </section>
+
+                                        {/* How it works */}
+                                        <section>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="text-[9px] font-bold uppercase tracking-widest text-indigo-400">How It Works</span>
+                                            </div>
+                                            <p className="text-slate-300 text-sm leading-relaxed">{explanation.how_it_works}</p>
+                                        </section>
+
+                                        {/* Complexity note */}
+                                        {explanation.complexity_note && (
+                                            <section className="rounded-xl p-3" style={{ background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)" }}>
+                                                <div className="flex items-center gap-1.5 mb-1.5">
+                                                    <Zap className="w-3 h-3 text-amber-400" />
+                                                    <span className="text-[9px] font-bold uppercase tracking-widest text-amber-500">Complexity Note</span>
+                                                </div>
+                                                <p className="text-amber-200/80 text-xs leading-relaxed">{explanation.complexity_note}</p>
+                                            </section>
+                                        )}
+
+                                        {/* Watch out for */}
+                                        {explanation.watch_out_for && (
+                                            <section className="rounded-xl p-3" style={{ background: "rgba(248,113,113,0.07)", border: "1px solid rgba(248,113,113,0.2)" }}>
+                                                <div className="flex items-center gap-1.5 mb-1.5">
+                                                    <AlertTriangle className="w-3 h-3 text-red-400" />
+                                                    <span className="text-[9px] font-bold uppercase tracking-widest text-red-400">Watch Out For</span>
+                                                </div>
+                                                <p className="text-red-200/80 text-xs leading-relaxed">{explanation.watch_out_for}</p>
+                                            </section>
+                                        )}
+
+                                        {/* Interview angle */}
+                                        {explanation.interview_angle && (
+                                            <section className="rounded-xl p-3" style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
+                                                <div className="flex items-center gap-1.5 mb-1.5">
+                                                    <Sparkles className="w-3 h-3 text-indigo-400" />
+                                                    <span className="text-[9px] font-bold uppercase tracking-widest text-indigo-400">Interview Signal</span>
+                                                </div>
+                                                <p className="text-indigo-200/80 text-xs leading-relaxed">{explanation.interview_angle}</p>
+                                            </section>
+                                        )}
+
+                                        {/* Regenerate */}
+                                        <div className="flex justify-end pt-1">
+                                            <button
+                                                onClick={() => { setExplanation(null); fetchExplanation(); }}
+                                                className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                                            >
+                                                <RefreshCw className="w-3 h-3" />
+                                                Regenerate
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    // Error / retry state
+                                    <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+                                        <Sparkles className="w-8 h-8 text-slate-600" />
+                                        <p className="text-sm text-slate-400">Could not generate explanation</p>
+                                        <button
+                                            onClick={fetchExplanation}
+                                            className="text-xs text-violet-400 hover:text-violet-300 underline"
+                                        >
+                                            Try again
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )
                     ) : null}
                 </div>
 
-                {/* ── Footer ── */}
+                {/* Footer */}
                 {data && (
                     <div className="flex items-center gap-3 px-4 py-2 border-t border-white/10 flex-shrink-0">
                         <FileCode className="w-3.5 h-3.5 text-slate-600 flex-shrink-0" />
