@@ -8,7 +8,7 @@ import {
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
     Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check, ExternalLink,
-    Search, ChevronsUpDown, Filter
+    Search, ChevronsUpDown, Filter, MessageSquare, Map, TableProperties, FileDown
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
@@ -32,6 +32,11 @@ const GraphFullscreenModal = dynamic(() => import("@/components/GraphFullscreenM
 
 // Dynamically import ATSScorePanel
 const ATSScorePanel = dynamic(() => import("@/components/ATSScorePanel"), { ssr: false });
+
+// Dynamically import Career Coach sub-components
+const SkillsGapHeatmap = dynamic(() => import("@/components/SkillsGapHeatmap"), { ssr: false });
+const LearningRoadmap  = dynamic(() => import("@/components/LearningRoadmap"),  { ssr: false });
+const CoachChat        = dynamic(() => import("@/components/CoachChat"),         { ssr: false });
 
 // ATSReport type (mirrors backend ATSReport Pydantic model)
 interface ATSReport {
@@ -121,6 +126,39 @@ interface BridgeProject {
     analysis: string;
     why_this_gap: string;
     estimated_score_gain: number;
+}
+
+interface HeatmapRow {
+    skill: string;
+    category: string;
+    verified_score: number;
+    ats_found: boolean;
+    gap_severity: "None" | "Minor" | "Moderate" | "Critical";
+    recommendation: string;
+}
+interface SkillsHeatmap {
+    rows: HeatmapRow[];
+    overall_match_pct: number;
+    critical_count: number;
+    moderate_count: number;
+}
+interface RoadmapWeek {
+    week: number;
+    focus_skill: string;
+    tasks: string[];
+    milestone: string;
+    hours_required: number;
+}
+interface Roadmap {
+    weeks: RoadmapWeek[];
+    total_weeks: number;
+    total_hours: number;
+    readiness_date: string;
+}
+interface ChatMessage {
+    role: "user" | "assistant";
+    content: string;
+    timestamp: number;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -272,6 +310,15 @@ export default function DashboardPage() {
     const [showAllSteps, setShowAllSteps] = useState(false);
     const [numProjects, setNumProjects] = useState(3);
     const [coachError, setCoachError] = useState<string | null>(null);
+    // Coach — new feature state
+    const [heatmap, setHeatmap] = useState<SkillsHeatmap | null>(null);
+    const [isGeneratingHeatmap, setIsGeneratingHeatmap] = useState(false);
+    const [roadmap, setRoadmap] = useState<Roadmap | null>(null);
+    const [isGeneratingRoadmap, setIsGeneratingRoadmap] = useState(false);
+    const [hoursPerWeek, setHoursPerWeek] = useState(10);
+    const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+    const [isChatLoading, setIsChatLoading] = useState(false);
+    const [isExportingCoach, setIsExportingCoach] = useState(false);
 
     // ATS Score state
     const [atsReport, setAtsReport] = useState<ATSReport | null>(null);
@@ -509,6 +556,9 @@ export default function DashboardPage() {
             if (d.atsReport)      setAtsReport(d.atsReport);
             if (d.pdfFileName)    setPdfFileName(d.pdfFileName);
             if (d.viewMode)       setViewMode(d.viewMode as ViewMode);
+            if (d.heatmap)        setHeatmap(d.heatmap);
+            if (d.roadmap)        setRoadmap(d.roadmap);
+            if (d.chatMessages?.length) setChatMessages(d.chatMessages);
         } catch { /* silently ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -522,13 +572,14 @@ export default function DashboardPage() {
                 multiRepoIds, analysisResult, bridgeProjects, gapSummary,
                 jobDescription, atsReport,
                 pdfFileName: pdfFile?.name ?? pdfFileName,
-                viewMode,
+                viewMode, heatmap, roadmap, chatMessages,
             }));
         } catch { /* quota exceeded or serialization error — ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [repoUrl, repoId, githubUsername, extractedRepos, selectedRepos,
         multiRepoIds, analysisResult, bridgeProjects, gapSummary,
-        jobDescription, atsReport, pdfFile, pdfFileName, viewMode]);
+        jobDescription, atsReport, pdfFile, pdfFileName, viewMode,
+        heatmap, roadmap, chatMessages]);
 
     // ── Reset all state & session ──────────────────────────────────────────────
     const handleResetAll = useCallback(() => {
@@ -542,6 +593,7 @@ export default function DashboardPage() {
         setError(null); setExtractionError(null); setCoachError(null);
         setAtsError(null); setAgentMessages([]); setAgentStatus(null);
         setIsManualMode(false);
+        setHeatmap(null); setRoadmap(null); setChatMessages([]);
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Multi-repo analyze flow ────────────────────────────────────────────────
@@ -880,6 +932,120 @@ export default function DashboardPage() {
             setIsGeneratingPlan(false);
         }
     };
+
+    // ── Heatmap handler ──────────────────────────────────────────────────────
+    const handleGenerateHeatmap = useCallback(async () => {
+        if (!analysisResult?.verification_results.length || !jobDescription.trim()) return;
+        setIsGeneratingHeatmap(true);
+        try {
+            const verifiedSkills = analysisResult.verification_results.map(r => ({
+                topic: r.topic, score: r.score, status: r.status,
+            }));
+            const response = await fetch(`${API_BASE_URL}/api/coach/heatmap`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    verified_skills: verifiedSkills,
+                    job_description: jobDescription,
+                    ats_keyword_matches: atsReport?.keyword_matches ?? null,
+                }),
+            });
+            if (!response.ok) throw new Error("Heatmap generation failed");
+            const data = await response.json();
+            setHeatmap(data);
+        } catch (err) {
+            console.error("Heatmap error:", err);
+        } finally {
+            setIsGeneratingHeatmap(false);
+        }
+    }, [analysisResult, jobDescription, atsReport]);
+
+    // ── Roadmap handler ──────────────────────────────────────────────────────
+    const handleGenerateRoadmap = useCallback(async () => {
+        if (!bridgeProjects.length) return;
+        setIsGeneratingRoadmap(true);
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/coach/roadmap`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    bridge_projects: bridgeProjects,
+                    gap_summary: gapSummary ?? "",
+                    job_description: jobDescription,
+                    hours_per_week: hoursPerWeek,
+                }),
+            });
+            if (!response.ok) throw new Error("Roadmap generation failed");
+            const data = await response.json();
+            setRoadmap(data);
+        } catch (err) {
+            console.error("Roadmap error:", err);
+        } finally {
+            setIsGeneratingRoadmap(false);
+        }
+    }, [bridgeProjects, gapSummary, jobDescription, hoursPerWeek]);
+
+    // ── Coach Chat handler ───────────────────────────────────────────────────
+    const handleCoachChat = useCallback(async (message: string) => {
+        const userMsg: ChatMessage = { role: "user", content: message, timestamp: Date.now() };
+        setChatMessages(prev => [...prev, userMsg]);
+        setIsChatLoading(true);
+        try {
+            const context = JSON.stringify({
+                bridge_projects: bridgeProjects,
+                gap_summary: gapSummary,
+                job_description: jobDescription,
+                verified_skills: analysisResult?.verification_results?.map(r => ({
+                    topic: r.topic, score: r.score, status: r.status,
+                })) ?? [],
+            });
+            const response = await fetch(`${API_BASE_URL}/api/coach/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message, context }),
+            });
+            if (!response.ok) throw new Error("Chat failed");
+            const data = await response.json();
+            const aiMsg: ChatMessage = { role: "assistant", content: data.reply, timestamp: Date.now() };
+            setChatMessages(prev => [...prev, aiMsg]);
+        } catch (err) {
+            console.error("Coach chat error:", err);
+            const errMsg: ChatMessage = { role: "assistant", content: "Sorry, I couldn't process that. Please try again.", timestamp: Date.now() };
+            setChatMessages(prev => [...prev, errMsg]);
+        } finally {
+            setIsChatLoading(false);
+        }
+    }, [bridgeProjects, gapSummary, jobDescription, analysisResult]);
+
+    // ── Coach Report Export handler ──────────────────────────────────────────
+    const handleExportCoachReport = useCallback(async () => {
+        if (!bridgeProjects.length) return;
+        setIsExportingCoach(true);
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/coach/export`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    candidate_name: githubUsername || "Candidate",
+                    gap_summary: gapSummary ?? "",
+                    bridge_projects: bridgeProjects,
+                    heatmap: heatmap ?? null,
+                    roadmap: roadmap ?? null,
+                }),
+            });
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `coach_report_${(githubUsername || "candidate").replace(/\s+/g, "_")}_${new Date().toISOString().split("T")[0]}.html`;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error("Coach export error:", err);
+        } finally {
+            setIsExportingCoach(false);
+        }
+    }, [bridgeProjects, gapSummary, heatmap, roadmap, githubUsername]);
 
     // Handle graph node click
     const handleNodeClick = useCallback((node: GraphNode) => {
@@ -1863,6 +2029,27 @@ export default function DashboardPage() {
                                         </>
                                     )}
                                 </button>
+
+                                {/* Export Coach Report button */}
+                                {bridgeProjects.length > 0 && (
+                                    <button
+                                        id="export-coach-report-btn"
+                                        onClick={handleExportCoachReport}
+                                        disabled={isExportingCoach}
+                                        className="px-4 py-2.5 text-sm font-medium rounded-lg flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                        style={{
+                                            background: "rgba(124,58,237,0.08)",
+                                            border: "1px solid rgba(124,58,237,0.25)",
+                                            color: "#7c3aed",
+                                        }}
+                                    >
+                                        {isExportingCoach ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" />Exporting...</>
+                                        ) : (
+                                            <><FileDown className="w-4 h-4" />Export Report</>
+                                        )}
+                                    </button>
+                                )}
                             </div>
                         </div>
 
@@ -2013,6 +2200,35 @@ export default function DashboardPage() {
                             )}
                         </div>
                     </div>
+                    </div>
+
+                    {/* ── New Coach Features ──────────────────────────────────────────── */}
+                    <div className="px-8 pb-6 flex flex-col gap-4">
+                        {/* JD Skills Gap Heatmap */}
+                        <SkillsGapHeatmap
+                            heatmap={heatmap}
+                            isLoading={isGeneratingHeatmap}
+                            onGenerate={handleGenerateHeatmap}
+                            atsAvailable={!!atsReport}
+                        />
+
+                        {/* Week-by-Week Learning Roadmap */}
+                        <LearningRoadmap
+                            roadmap={roadmap}
+                            isLoading={isGeneratingRoadmap}
+                            hoursPerWeek={hoursPerWeek}
+                            onHoursChange={setHoursPerWeek}
+                            onGenerate={handleGenerateRoadmap}
+                            bridgeProjectsAvailable={bridgeProjects.length > 0}
+                        />
+
+                        {/* Conversational Coach Chat */}
+                        <CoachChat
+                            messages={chatMessages}
+                            isLoading={isChatLoading}
+                            onSend={handleCoachChat}
+                            disabled={bridgeProjects.length === 0}
+                        />
                     </div>
 
                     {/* ATS Score Panel — shown below the two-column grid when report is ready */}

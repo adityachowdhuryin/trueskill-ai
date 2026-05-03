@@ -9,6 +9,7 @@ Workflow 2 (from project_spec.md):
 """
 
 import os
+import json
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -259,3 +260,429 @@ async def generate_bridge_project(
         why_this_gap=p.why_this_gap,
         estimated_score_gain=p.estimated_score_gain,
     )
+
+
+# =============================================================================
+# Skills Gap Heatmap Models & Generator
+# =============================================================================
+
+class HeatmapRow(BaseModel):
+    skill: str
+    category: str = Field(description="Language | Framework | Tool | Concept | Soft Skill")
+    verified_score: int = Field(ge=0, le=100, description="Score from real code analysis (0=not in profile)")
+    ats_found: bool = Field(description="Whether keyword was found in resume text")
+    gap_severity: str = Field(description="None | Minor | Moderate | Critical")
+    recommendation: str = Field(description="1-line actionable tip to close this gap")
+
+
+class SkillsHeatmapResponse(BaseModel):
+    rows: list[HeatmapRow]
+    overall_match_pct: int
+    critical_count: int
+    moderate_count: int
+
+
+def _gap_severity(verified_score: int) -> str:
+    if verified_score >= 70:
+        return "None"
+    if verified_score >= 40:
+        return "Minor"
+    if verified_score >= 1:
+        return "Moderate"
+    return "Critical"
+
+
+async def generate_skills_heatmap(
+    verified_skills: list[VerifiedSkill],
+    job_description: str,
+    ats_keyword_matches: Optional[list[dict]] = None,
+) -> SkillsHeatmapResponse:
+    """
+    Generate a JD Skills Gap Heatmap.
+
+    Triangulates:
+      - JD requirements (extracted by LLM or taken from existing ATS keyword_matches)
+      - verified_score (from code analysis — 0 if skill not in profile at all)
+      - ats_found (from ATS keyword_matches if available, else inferred from verified_score)
+    """
+    llm = get_llm_model(temperature=0.2)
+
+    skill_map: dict[str, int] = {s.topic.lower(): s.score for s in verified_skills}
+
+    # Build ats_found lookup from pre-existing ATS data if provided
+    ats_lookup: dict[str, bool] = {}
+    if ats_keyword_matches:
+        for km in ats_keyword_matches:
+            kw = km.get("keyword", "").lower()
+            if kw:
+                ats_lookup[kw] = bool(km.get("found", False))
+
+    system_prompt = """You are a technical skills analyst. Extract every explicit skill, tool, technology, framework, and domain concept required by the job description.
+For each requirement provide:
+- skill: exact name (e.g. "Kubernetes", "REST APIs", "Python")
+- category: one of "Language" | "Framework" | "Tool" | "Concept" | "Soft Skill"
+- recommendation: a single concrete sentence on how to demonstrate this skill
+
+Return ONLY valid JSON (no markdown):
+{
+  "requirements": [
+    {"skill": "Kubernetes", "category": "Tool", "recommendation": "Build a 3-service K8s cluster with ConfigMaps and Ingress"},
+    ...
+  ]
+}"""
+
+    skills_context = "\n".join(
+        f"  - {s.topic}: {s.score}% ({s.status})"
+        for s in verified_skills
+    ) or "  (no skills verified)"
+
+    human_prompt = f"""JOB DESCRIPTION:
+---
+{job_description[:4000]}
+---
+
+CANDIDATE VERIFIED SKILLS (from real code analysis):
+{skills_context}
+
+Extract all JD requirements as JSON."""
+
+    response = await llm.ainvoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt),
+    ])
+    data = parse_json_response(response.content)
+    requirements = data.get("requirements", [])
+
+    rows: list[HeatmapRow] = []
+    for req in requirements:
+        skill_name = req.get("skill", "Unknown")
+        skill_lower = skill_name.lower()
+
+        # Find verified score — exact or substring match
+        verified_score = 0
+        for topic, score in skill_map.items():
+            if skill_lower in topic or topic in skill_lower:
+                verified_score = score
+                break
+
+        # ATS found — from pre-existing data or inferred
+        if ats_lookup:
+            ats_found = ats_lookup.get(skill_lower, False)
+            if not ats_found:
+                for kw, found in ats_lookup.items():
+                    if skill_lower in kw or kw in skill_lower:
+                        ats_found = found
+                        break
+        else:
+            ats_found = verified_score >= 40
+
+        rows.append(HeatmapRow(
+            skill=skill_name,
+            category=req.get("category", "Tool"),
+            verified_score=verified_score,
+            ats_found=ats_found,
+            gap_severity=_gap_severity(verified_score),
+            recommendation=req.get("recommendation", ""),
+        ))
+
+    severity_order = {"Critical": 0, "Moderate": 1, "Minor": 2, "None": 3}
+    rows.sort(key=lambda r: severity_order.get(r.gap_severity, 4))
+
+    critical_count = sum(1 for r in rows if r.gap_severity == "Critical")
+    moderate_count = sum(1 for r in rows if r.gap_severity == "Moderate")
+    overall = int(sum(r.verified_score for r in rows) / len(rows)) if rows else 0
+
+    return SkillsHeatmapResponse(
+        rows=rows,
+        overall_match_pct=overall,
+        critical_count=critical_count,
+        moderate_count=moderate_count,
+    )
+
+
+# =============================================================================
+# Learning Roadmap Models & Generator
+# =============================================================================
+
+class RoadmapWeek(BaseModel):
+    week: int
+    focus_skill: str
+    tasks: list[str] = Field(description="3-4 concrete daily tasks")
+    milestone: str = Field(description="What you will have built/learned by end of week")
+    hours_required: int
+
+
+class RoadmapResponse(BaseModel):
+    weeks: list[RoadmapWeek]
+    total_weeks: int
+    total_hours: int
+    readiness_date: str
+
+
+async def generate_roadmap(
+    bridge_projects: list[dict],
+    gap_summary: str,
+    job_description: str,
+    hours_per_week: int = 10,
+) -> RoadmapResponse:
+    """
+    Generate a week-by-week learning roadmap from existing bridge projects.
+    Distributes bridge project work across weeks based on hours_per_week.
+    """
+    hours_per_week = max(1, min(80, hours_per_week))
+    llm = get_llm_model(temperature=0.3)
+    projects_text = json.dumps(bridge_projects, indent=2)
+
+    system_prompt = f"""You are a senior engineering career coach creating a week-by-week study plan.
+The candidate has {hours_per_week} hours per week available.
+
+Given a list of bridge projects (priority-ordered), create a realistic learning roadmap:
+1. Distribute work across weeks — simpler projects take 1 week, complex ones 2-3 weeks.
+2. Each week has a clear focus_skill, 3-4 concrete daily tasks, and a milestone.
+3. Be realistic — do not cram everything into week 1.
+4. Tasks must be specific engineering actions, NOT "learn about X".
+
+Return ONLY valid JSON (no markdown):
+{{
+  "weeks": [
+    {{
+      "week": 1,
+      "focus_skill": "Exact skill name",
+      "tasks": ["Task 1 — concrete action", "Task 2", "Task 3"],
+      "milestone": "One sentence: what you will have built",
+      "hours_required": {hours_per_week}
+    }}
+  ],
+  "total_weeks": <N>,
+  "total_hours": <N * hours_per_week>,
+  "readiness_date": "~N weeks from now"
+}}"""
+
+    human_prompt = f"""GAP SUMMARY: {gap_summary}
+
+BRIDGE PROJECTS (priority-ordered):
+{projects_text[:6000]}
+
+AVAILABLE TIME: {hours_per_week} hours/week
+
+Generate a realistic week-by-week roadmap. Return only valid JSON."""
+
+    response = await llm.ainvoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt),
+    ])
+    data = parse_json_response(response.content)
+    weeks_raw = data.get("weeks", [])
+
+    weeks: list[RoadmapWeek] = []
+    for i, w in enumerate(weeks_raw):
+        weeks.append(RoadmapWeek(
+            week=int(w.get("week", i + 1)),
+            focus_skill=w.get("focus_skill", "General"),
+            tasks=w.get("tasks", []),
+            milestone=w.get("milestone", ""),
+            hours_required=int(w.get("hours_required", hours_per_week)),
+        ))
+
+    total_weeks = int(data.get("total_weeks", len(weeks)))
+    total_hours = int(data.get("total_hours", total_weeks * hours_per_week))
+
+    return RoadmapResponse(
+        weeks=weeks,
+        total_weeks=total_weeks,
+        total_hours=total_hours,
+        readiness_date=data.get("readiness_date", f"~{total_weeks} weeks from now"),
+    )
+
+
+# =============================================================================
+# Conversational Coach Chat
+# =============================================================================
+
+async def coach_chat(message: str, context: str) -> str:
+    """
+    Answer a follow-up question from the candidate.
+    context: JSON string with bridge_projects, gap_summary, verified_skills, job_description.
+    """
+    llm = get_llm_model(temperature=0.5)
+
+    system_prompt = """You are a senior engineering career coach assistant.
+You have access to the candidate's full gap analysis, bridge projects, and learning context.
+Answer their question concisely, specifically, and actionably.
+Reference their actual gap skills and projects by name where relevant.
+Never give generic advice — always tailor to this specific candidate's profile.
+Keep your reply under 150 words unless the question genuinely requires more detail."""
+
+    human_prompt = f"""CANDIDATE CONTEXT:
+{context[:5000]}
+
+CANDIDATE QUESTION:
+{message}
+
+Answer directly and helpfully:"""
+
+    response = await llm.ainvoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt),
+    ])
+    return response.content.strip()
+
+
+# =============================================================================
+# Coach Report HTML Export
+# =============================================================================
+
+def _heatmap_severity_color(severity: str) -> str:
+    return {
+        "Critical": "#ef4444",
+        "Moderate": "#f59e0b",
+        "Minor": "#3b82f6",
+        "None": "#22c55e",
+    }.get(severity, "#94a3b8")
+
+
+def _score_bar(score: int) -> str:
+    color = "#22c55e" if score >= 70 else "#f59e0b" if score >= 40 else "#ef4444"
+    return (
+        f'<div style="display:flex;align-items:center;gap:6px">'
+        f'<div style="flex:1;background:#e2e8f0;border-radius:4px;height:6px">'
+        f'<div style="width:{score}%;background:{color};height:6px;border-radius:4px"></div></div>'
+        f'<span style="font-size:11px;font-weight:700;color:{color}">{score}%</span></div>'
+    )
+
+
+def generate_coach_report_html(
+    candidate_name: str,
+    gap_summary: str,
+    bridge_projects: list[dict],
+    heatmap: Optional[dict] = None,
+    roadmap: Optional[dict] = None,
+) -> str:
+    """
+    Generate a self-contained downloadable HTML coach report.
+    Pattern mirrors generate_ats_html_report() in ats.py.
+    """
+    # ── Heatmap section ───────────────────────────────────────────────────────
+    heatmap_html = ""
+    if heatmap and heatmap.get("rows"):
+        rows_html = ""
+        for row in heatmap["rows"]:
+            sev = row.get("gap_severity", "None")
+            sc = _heatmap_severity_color(sev)
+            ats_icon = "&#x2713;" if row.get("ats_found") else "&#x2717;"
+            ats_color = "#22c55e" if row.get("ats_found") else "#ef4444"
+            rows_html += (
+                f'<tr style="border-bottom:1px solid #f1f5f9">'
+                f'<td style="padding:10px 12px;font-weight:600;font-size:13px">{row.get("skill","")}</td>'
+                f'<td style="padding:10px 12px;font-size:12px;color:#64748b">{row.get("category","")}</td>'
+                f'<td style="padding:10px 12px;text-align:center;font-weight:700;color:{ats_color}">{ats_icon}</td>'
+                f'<td style="padding:10px 12px;min-width:120px">{_score_bar(row.get("verified_score",0))}</td>'
+                f'<td style="padding:10px 12px"><span style="padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;background:{sc}22;color:{sc}">{sev}</span></td>'
+                f'<td style="padding:10px 12px;font-size:12px;color:#475569">{row.get("recommendation","")}</td>'
+                f'</tr>'
+            )
+        overall = heatmap.get("overall_match_pct", 0)
+        crit = heatmap.get("critical_count", 0)
+        mod = heatmap.get("moderate_count", 0)
+        heatmap_html = (
+            f'<div class="card"><p class="section-title">&#x1F4CA; JD Skills Gap Heatmap</p>'
+            f'<div style="display:flex;gap:12px;margin-bottom:16px">'
+            f'<div style="padding:8px 16px;background:#ede9fe;border-radius:10px;text-align:center"><div style="font-size:22px;font-weight:800;color:#7c3aed">{overall}%</div><div style="font-size:11px;color:#6d28d9;font-weight:600">Code Match</div></div>'
+            f'<div style="padding:8px 16px;background:#fee2e2;border-radius:10px;text-align:center"><div style="font-size:22px;font-weight:800;color:#dc2626">{crit}</div><div style="font-size:11px;color:#b91c1c;font-weight:600">Critical</div></div>'
+            f'<div style="padding:8px 16px;background:#fef3c7;border-radius:10px;text-align:center"><div style="font-size:22px;font-weight:800;color:#d97706">{mod}</div><div style="font-size:11px;color:#b45309;font-weight:600">Moderate</div></div>'
+            f'</div>'
+            f'<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#f8fafc">'
+            f'<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase">Skill</th>'
+            f'<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase">Category</th>'
+            f'<th style="padding:10px 12px;text-align:center;font-size:11px;color:#64748b;text-transform:uppercase">In Resume</th>'
+            f'<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase">Code Score</th>'
+            f'<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase">Gap</th>'
+            f'<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase">Tip</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table></div>'
+        )
+
+    # ── Bridge projects ────────────────────────────────────────────────────────
+    projects_html = ""
+    for proj in bridge_projects:
+        steps_html = "".join(f"<li style='margin-bottom:4px'>{s}</li>" for s in proj.get("steps", []))
+        outcomes_html = "".join(f"<li style='margin-bottom:4px;color:#166534'>{o}</li>" for o in proj.get("learning_outcomes", []))
+        tech_badges = "".join(
+            f'<span style="display:inline-block;margin:2px;padding:2px 9px;background:#ede9fe;color:#5b21b6;border-radius:20px;font-size:11px;font-weight:600">{t}</span>'
+            for t in proj.get("tech_stack", [])
+        )
+        diff = proj.get("difficulty", "Intermediate")
+        diff_color = "#22c55e" if diff == "Beginner" else "#f59e0b" if diff == "Intermediate" else "#ef4444"
+        gain = proj.get("estimated_score_gain", 0)
+        gain_badge = f'<span style="margin-left:8px;font-size:11px;background:#e0e7ff;color:#4338ca;padding:2px 8px;border-radius:20px;font-weight:600">+{gain}% match boost</span>' if gain else ""
+        projects_html += (
+            f'<div style="background:#f8fafc;border-radius:12px;padding:20px;margin-bottom:16px;border:1px solid #e2e8f0">'
+            f'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
+            f'<div><span style="font-size:11px;font-weight:700;text-transform:uppercase;color:#7c3aed">Bridge Project #{proj.get("rank",1)} &#x2014; {proj.get("gap_skill","")}</span>{gain_badge}'
+            f'<h3 style="font-size:16px;font-weight:700;margin:4px 0">{proj.get("project_title","")}</h3></div>'
+            f'<span style="padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;background:{diff_color}22;color:{diff_color}">{diff}</span></div>'
+            f'<p style="font-size:13px;color:#475569;margin-bottom:10px">{proj.get("description","")}</p>'
+            f'<div style="margin-bottom:10px">{tech_badges}</div>'
+            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+            f'<div><p style="font-size:12px;font-weight:700;margin-bottom:6px">Steps</p><ol style="padding-left:16px;font-size:12px;color:#475569;line-height:1.6">{steps_html}</ol></div>'
+            f'<div><p style="font-size:12px;font-weight:700;margin-bottom:6px">Learning Outcomes</p><ul style="padding-left:16px;font-size:12px;line-height:1.6">{outcomes_html}</ul></div>'
+            f'</div></div>'
+        )
+
+    # ── Roadmap section ────────────────────────────────────────────────────────
+    roadmap_html = ""
+    if roadmap and roadmap.get("weeks"):
+        weeks_html = ""
+        for w in roadmap["weeks"]:
+            tasks_html = "".join(f"<li style='margin-bottom:4px'>{t}</li>" for t in w.get("tasks", []))
+            weeks_html += (
+                f'<div style="min-width:200px;background:#f8fafc;border-radius:12px;padding:16px;border:1px solid #e2e8f0;flex-shrink:0">'
+                f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;color:#7c3aed;margin-bottom:4px">Week {w.get("week","")}</div>'
+                f'<div style="font-size:14px;font-weight:700;margin-bottom:10px">{w.get("focus_skill","")}</div>'
+                f'<ul style="padding-left:14px;font-size:12px;color:#475569;margin-bottom:10px">{tasks_html}</ul>'
+                f'<div style="font-size:11px;background:#d1fae5;color:#065f46;padding:6px 10px;border-radius:8px">&#x2705; {w.get("milestone","")}</div>'
+                f'<div style="font-size:10px;color:#94a3b8;margin-top:6px">~{w.get("hours_required","")}h</div>'
+                f'</div>'
+            )
+        total_w = roadmap.get("total_weeks", len(roadmap["weeks"]))
+        readiness = roadmap.get("readiness_date", f"~{total_w} weeks")
+        roadmap_html = (
+            f'<div class="card"><p class="section-title">&#x1F5FA; Learning Roadmap</p>'
+            f'<div style="font-size:13px;color:#64748b;margin-bottom:14px">{total_w} weeks &middot; {roadmap.get("total_hours","")} total hours &middot; Ready {readiness}</div>'
+            f'<div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px">{weeks_html}</div></div>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Career Coach Report &mdash; {candidate_name}</title>
+<style>
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f1f5f9;color:#1e293b}}
+  .container{{max-width:980px;margin:0 auto;padding:40px 24px}}
+  .header{{background:linear-gradient(135deg,#7c3aed,#a855f7);color:white;border-radius:16px;padding:32px;margin-bottom:28px}}
+  .header h1{{font-size:26px;margin-bottom:6px}}
+  .gap-box{{background:linear-gradient(135deg,#ede9fe,#f0fdf4);border:1px solid #ddd6fe;border-radius:12px;padding:20px;margin-bottom:20px}}
+  .section-title{{font-size:18px;font-weight:700;margin-bottom:14px;color:#1e293b}}
+  .card{{background:white;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+  .footer{{text-align:center;margin-top:40px;font-size:13px;color:#94a3b8}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>&#x1F3AF; Career Coach Report</h1>
+    <div style="opacity:.85;font-size:14px">Candidate: <strong>{candidate_name}</strong> &nbsp;|&nbsp; Generated by TrueSkill AI</div>
+  </div>
+  <div class="gap-box">
+    <div style="font-weight:700;margin-bottom:8px;color:#7c3aed">&#x1F4CB; Gap Analysis Summary</div>
+    <p style="color:#374151;line-height:1.6;font-size:13px">{gap_summary}</p>
+  </div>
+  {heatmap_html}
+  <div class="card"><p class="section-title">&#x1F680; Bridge Projects</p>{projects_html}</div>
+  {roadmap_html}
+  <div class="footer">Generated by TrueSkill AI &mdash; Career Coach Engine</div>
+</div>
+</body>
+</html>"""

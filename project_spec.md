@@ -16,7 +16,7 @@
 | **Frontend** | Next.js 14 (App Router), TypeScript, Vanilla CSS |
 | **3D Graph** | react-force-graph-3d, Three.js |
 | **Charts** | Recharts |
-| **Backend** | Python 3.11+, FastAPI, Pydantic v2 |
+| **Backend** | Python 3.9+, FastAPI, Pydantic v2 |
 | **AI Orchestration** | LangChain, LangGraph |
 | **LLM** | Groq — Llama 3.3 70B (`langchain_groq`) |
 | **AST Parsing** | tree-sitter (Python, JS, TS, Go, Java, Rust) |
@@ -33,7 +33,7 @@
 | **Reasoning Core** | `agents.py` | LangGraph Parser → Auditor → Grader pipeline |
 | **Forensics** | `forensics.py` | Stylometric authorship & AI-code detection |
 | **ATS Scorer** | `ats.py` | Resume vs JD evaluation, HTML report generation |
-| **Coach Module** | `coach.py` | Gap analysis → bridge project suggestions |
+| **Coach Module** | `coach.py` | Gap analysis, bridge project generation, JD Skills Gap Heatmap, learning roadmap, conversational chat, HTML report export |
 | **Job Finder** | `job_finder.py` | Jooble job search + Apollo.io hiring manager lookup |
 | **Resume Optimizer** | `resume_optimizer.py` | LLM keyword rewriting + personalized email drafting |
 | **Report Generator** | `report.py` | Self-contained HTML verification report |
@@ -42,7 +42,7 @@
 | **Graph Explain** | `graph_explain.py` | 8-section AI architectural summary via Groq Llama 3.3 70B (tech stack, modules, hotspot, suggestions) |
 | **Function Explain** | `function_explain.py` | Per-function AI explanation: purpose, complexity verdict, refactor suggestions |
 | **LLM Client** | `llm.py` | Shared Groq Llama 3.3 70B client + JSON parser |
-| **API** | `api.py` | 25+ FastAPI endpoints with rate limiting |
+| **API** | `api.py` | 30+ FastAPI endpoints with rate limiting |
 
 ---
 
@@ -130,6 +130,39 @@ class ATSReport(BaseModel):
     overall_recommendation: str
     strengths: list[str]
     improvements: list[str]
+```
+
+**Coach — JD Skills Gap Heatmap:**
+```python
+class HeatmapRow(BaseModel):
+    skill: str
+    category: str           # "Language" | "Framework" | "Tool" | "Concept" | "Soft Skill"
+    verified_score: int     # 0-100 from real code analysis (0 = not in profile)
+    ats_found: bool         # whether keyword was found in resume text
+    gap_severity: str       # "None" | "Minor" | "Moderate" | "Critical"
+    recommendation: str     # 1-line actionable tip
+
+class SkillsHeatmapResponse(BaseModel):
+    rows: list[HeatmapRow]
+    overall_match_pct: int
+    critical_count: int
+    moderate_count: int
+```
+
+**Coach — Learning Roadmap:**
+```python
+class RoadmapWeek(BaseModel):
+    week: int
+    focus_skill: str
+    tasks: list[str]        # 3-4 concrete daily tasks
+    milestone: str          # what you will have built by end of week
+    hours_required: int
+
+class RoadmapResponse(BaseModel):
+    weeks: list[RoadmapWeek]
+    total_weeks: int
+    total_hours: int
+    readiness_date: str
 ```
 
 **Graph Explain request (sent to `/api/graph/explain`):**
@@ -223,10 +256,34 @@ Multi-step sequential workflow available at `/resume-toolkit`:
 3. **Hiring Manager Lookup** — Company name + title → Apollo.io `/people/search` (paid) → `/people/match` (free tier) → email pattern guess
 4. **Email Drafting** — PDF + job posting + hiring manager → LLM-personalized cold email
 
-### Workflow 4: Skill Coaching
-1. **Input:** `VerifiedSkills[]` + job description text
+### Workflow 4: Career Coaching Suite
+The Career Coach section provides four integrated sub-workflows:
+
+**4a. Bridge Project Generation** (`POST /api/coach`)
+1. **Input:** `VerifiedSkills[]` + job description text + num_projects (1–5)
 2. **Logic:** Identify gaps (score < 50) + missing JD keywords
-3. **Output:** `BridgeProject` with title, tech stack, and step-by-step build instructions
+3. **Output:** List of `BridgeProject` with title, tech stack, step-by-step instructions
+
+**4b. JD Skills Gap Heatmap** (`POST /api/coach/heatmap`)
+1. **Input:** verified_skills + job_description + optional ats_keyword_matches
+2. **LLM extracts** all JD requirements and classifies each by category
+3. **Triangulation:** JD requirement → code score (verified_score) → resume presence (ats_found)
+4. **Output:** `SkillsHeatmapResponse` sorted Critical→Moderate→Minor→None
+5. **ATS reuse:** if `ats_keyword_matches` provided (from prior ATS run), no extra LLM call for keyword extraction
+
+**4c. Week-by-Week Roadmap** (`POST /api/coach/roadmap`)
+1. **Input:** bridge_projects + gap_summary + hours_per_week
+2. **LLM distributes** bridge project work realistically across weeks
+3. **Output:** `RoadmapResponse` with concrete daily tasks and milestones per week
+
+**4d. Conversational Coach Chat** (`POST /api/coach/chat`)
+1. **Input:** user message + JSON context (bridge_projects, gap_summary, verified_skills, job_description)
+2. **Tailored reply:** answers specific to the candidate's actual profile — no generic advice
+3. **Output:** plain-text reply (≤150 words unless detail required)
+
+**4e. Coach Report Export** (`POST /api/coach/export`)
+- Returns a self-contained HTML file (no external dependencies)
+- Sections: Header → Gap Summary → Heatmap table → Bridge Projects → Roadmap timeline
 
 ### Workflow 5: AI Graph Summary
 Triggered by the ✨ **Explain** button in the 3D Graph toolbar:
@@ -295,9 +352,26 @@ GET    /api/node-code/{repo_id}/{node_id}  → { source_code, name, file_path,
        # Supports forward-slashes via FastAPI :path parameter type
 ```
 
-### Career & ATS Tools
+### Career Coach
 ```
-POST   /api/coach                      { verified_skills, job_description }
+POST   /api/coach                      { verified_skills, job_description, num_projects }
+                                       → { gap_analysis_summary, bridge_projects[], bridge_project }
+
+POST   /api/coach/heatmap              { verified_skills, job_description, ats_keyword_matches? }
+                                       → SkillsHeatmapResponse { rows[], overall_match_pct, critical_count, moderate_count }
+
+POST   /api/coach/roadmap              { bridge_projects, gap_summary, job_description, hours_per_week }
+                                       → RoadmapResponse { weeks[], total_weeks, total_hours, readiness_date }
+
+POST   /api/coach/chat                 { message, context }
+                                       → { reply: str }
+
+POST   /api/coach/export               { candidate_name, gap_summary, bridge_projects, heatmap?, roadmap? }
+                                       → HTML file download (Content-Disposition: attachment)
+```
+
+### ATS Tools
+```
 POST   /api/ats-score                  { pdf_file, job_description }        → ATSReport
 POST   /api/ats-report                 { ats_report, candidate_name }       → HTML download
 POST   /api/export-report              { ...results }                        → HTML download
@@ -326,6 +400,7 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | **Candidate comparison** | ✅ Implemented | SQLite persistence + `/compare` frontend page. |
 | **ATS evaluation** | ✅ Implemented | `ats.py` — weighted keyword/content/format scoring + downloadable report. |
 | **AI Architectural Insights** | ✅ Implemented | `graph_explain.py` — 8-section structured JSON via Groq; collapsible panel in 3D graph view. |
+| **Career Coaching Suite** | ✅ Implemented | `coach.py` — JD Skills Gap Heatmap, week-by-week learning roadmap, conversational AI coach chat, and self-contained HTML export. |
 
 ---
 
@@ -334,7 +409,7 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | Route | Component | Description |
 |---|---|---|
 | `/` | `page.tsx` | Animated landing page with feature cards + tech stack footer |
-| `/dashboard` | `dashboard/page.tsx` | Main workflow: upload PDF → select repo → run analysis → tabbed results (Skills / Radar / Activity / Graph) |
+| `/dashboard` | `dashboard/page.tsx` | Main workflow: upload PDF → select repo → run analysis → tabbed results (Skills / Radar / Activity / Graph) + Career Coach section |
 | `/compare` | `compare/page.tsx` | Side-by-side multi-candidate comparison with gauge charts |
 | `/resume-toolkit` | `resume-toolkit/page.tsx` | 4-step AI Resume Toolkit (Jobs → ATS → Manager → Email) |
 | `/profile/[token]` | `profile/[id]/page.tsx` | Public shareable verified profile page (no auth required) |
@@ -347,6 +422,15 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | **Activity** | Contribution heatmap + language skill timeline. |
 | **Graph** | Interactive 3D force-graph of the Neo4j knowledge graph with AI Summary, Evidence Highlighting, Path Finder, and Analytics Panel. |
 
+### Career Coach Section (below main tabs)
+The Career Coach section is rendered below the main tab grid in the dashboard. It contains:
+1. **Left panel** — Job description input, number of projects selector, Generate Action Plan button, Export Report button
+2. **Right panel** — Bridge project carousel with tab per project (Gap skill, difficulty, tech stack, steps, learning outcomes)
+3. **Below the grid (full width):**
+   - **JD Skills Gap Heatmap** — `SkillsGapHeatmap.tsx` (Generate Heatmap button; reuses ATS data when available)
+   - **Learning Roadmap** — `LearningRoadmap.tsx` (hours/week selector, Generate Roadmap, task checkboxes)
+   - **Coach Chat** — `CoachChat.tsx` (suggested questions, message thread, sessionStorage persistence)
+
 ### Key Frontend Components
 | Component | Description |
 |---|---|
@@ -355,10 +439,10 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 | `CodeViewer.tsx` | Code drill-down modal: inline syntax highlighter (zero npm deps), line numbers, metadata bar (Lines X–Y, CC badge, args), Copy Code, loading skeleton, graceful re-ingest / not-found states, ESC to close |
 | `ErrorBoundary.tsx` | React error boundary wrapping graph and heavy async components; shows friendly fallback UI on crash |
 | `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand so traces always align |
-| `ContributionHeatmap.tsx` | GitHub-style commit heatmap |
-| `SkillTimeline.tsx` | Language timeline chart |
-| `VerifiedBadge.tsx` | Shareable public profile badge |
 | `ATSScorePanel.tsx` | ATS evaluation results panel |
+| `SkillsGapHeatmap.tsx` | Sortable JD Skills Gap Heatmap: severity badges, animated score bars, ATS reuse indicator, collapsible panel |
+| `LearningRoadmap.tsx` | Horizontal scrollable week cards with task checkboxes (localStorage), progress bar, hours/week presets |
+| `CoachChat.tsx` | Collapsible chat panel: suggested questions, user/AI bubbles, typing indicator, Enter-to-send |
 
 ---
 

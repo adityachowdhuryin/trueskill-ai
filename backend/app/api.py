@@ -875,6 +875,166 @@ async def generate_coach_plan(request: CoachRequestModel, req: Request):
 
 
 # =============================================================================
+# Coach — JD Skills Gap Heatmap
+# =============================================================================
+
+class HeatmapRequestModel(BaseModel):
+    verified_skills: list[dict]       # [{topic, score, status}]
+    job_description: str
+    ats_keyword_matches: Optional[list[dict]] = None  # from ATSReport.keyword_matches
+
+
+@router.post("/coach/heatmap")
+async def generate_heatmap(request: HeatmapRequestModel, req: Request):
+    """
+    POST /api/coach/heatmap
+    Generates a JD Skills Gap Heatmap.
+    If ats_keyword_matches is provided (from a previous ATS run), reuses that data
+    for the 'In Resume?' column — no extra LLM extraction needed.
+    """
+    from .coach import generate_skills_heatmap, VerifiedSkill
+
+    check_rate_limit(req.client.host if req.client else "unknown", "coach")
+
+    try:
+        skills = [
+            VerifiedSkill(
+                topic=s.get("topic", ""),
+                score=s.get("score", 0),
+                status=s.get("status", "Unverified"),
+            )
+            for s in request.verified_skills
+        ]
+        if not request.job_description.strip():
+            raise HTTPException(status_code=400, detail="Job description cannot be empty")
+
+        result = await generate_skills_heatmap(
+            verified_skills=skills,
+            job_description=request.job_description,
+            ats_keyword_matches=request.ats_keyword_matches,
+        )
+        return result.model_dump()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Heatmap generation failed: {str(e)}")
+
+
+# =============================================================================
+# Coach — Week-by-Week Learning Roadmap
+# =============================================================================
+
+class RoadmapRequestModel(BaseModel):
+    bridge_projects: list[dict]
+    gap_summary: str = ""
+    job_description: str = ""
+    hours_per_week: int = 10
+
+
+@router.post("/coach/roadmap")
+async def generate_learning_roadmap(request: RoadmapRequestModel, req: Request):
+    """
+    POST /api/coach/roadmap
+    Generates a week-by-week learning roadmap from existing bridge projects.
+    """
+    from .coach import generate_roadmap
+
+    check_rate_limit(req.client.host if req.client else "unknown", "coach")
+
+    try:
+        if not request.bridge_projects:
+            raise HTTPException(status_code=400, detail="bridge_projects cannot be empty")
+
+        result = await generate_roadmap(
+            bridge_projects=request.bridge_projects,
+            gap_summary=request.gap_summary,
+            job_description=request.job_description,
+            hours_per_week=request.hours_per_week,
+        )
+        return result.model_dump()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Roadmap generation failed: {str(e)}")
+
+
+# =============================================================================
+# Coach — Conversational Chat
+# =============================================================================
+
+class CoachChatRequestModel(BaseModel):
+    message: str
+    context: str = ""   # JSON string: bridge_projects + gap_summary + verified_skills + job_description
+
+
+@router.post("/coach/chat")
+async def coach_chat_endpoint(request: CoachChatRequestModel, req: Request):
+    """
+    POST /api/coach/chat
+    Answers a follow-up question in the context of the candidate's gap analysis.
+    """
+    from .coach import coach_chat
+
+    check_rate_limit(req.client.host if req.client else "unknown", "coach")
+
+    try:
+        if not request.message.strip():
+            raise HTTPException(status_code=400, detail="message cannot be empty")
+
+        reply = await coach_chat(message=request.message, context=request.context)
+        return {"reply": reply}
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+# =============================================================================
+# Coach — Export HTML Report
+# =============================================================================
+
+class CoachExportRequestModel(BaseModel):
+    candidate_name: str = "Candidate"
+    gap_summary: str = ""
+    bridge_projects: list[dict] = []
+    heatmap: Optional[dict] = None
+    roadmap: Optional[dict] = None
+
+
+@router.post("/coach/export")
+async def export_coach_report(request: CoachExportRequestModel, req: Request):
+    """
+    POST /api/coach/export
+    Returns a self-contained HTML career coach report as a file download.
+    """
+    from .coach import generate_coach_report_html
+    from fastapi.responses import Response
+
+    try:
+        html = generate_coach_report_html(
+            candidate_name=request.candidate_name,
+            gap_summary=request.gap_summary,
+            bridge_projects=request.bridge_projects,
+            heatmap=request.heatmap,
+            roadmap=request.roadmap,
+        )
+        date_str = __import__("datetime").date.today().isoformat()
+        safe_name = request.candidate_name.replace(" ", "_").lower()
+        filename = f"career_coach_{safe_name}_{date_str}.html"
+        return Response(
+            content=html,
+            media_type="text/html",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+
+# =============================================================================
 # Skill Timeline Endpoint (Feature 8)
 # =============================================================================
 
