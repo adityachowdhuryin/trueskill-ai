@@ -12,14 +12,14 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 trueskill-ai/
 ├── backend/                         # FastAPI Python backend
 │   ├── app/
-│   │   ├── api.py                   # All API routes (25+ endpoints)
+│   │   ├── api.py                   # All API routes (30+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
 │   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring & HTML report
 │   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
 │   │   ├── interview.py             # AI interview question generator
-│   │   ├── coach.py                 # Gap analysis & bridge project generator
+│   │   ├── coach.py                 # Gap analysis, bridge projects, heatmap, roadmap, chat & HTML export
 │   │   ├── job_finder.py            # Jooble job search & Apollo.io hiring manager lookup
 │   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
@@ -56,7 +56,10 @@ trueskill-ai/
 │           ├── SkillTimeline.tsx    # Language timeline chart
 │           ├── Navbar.tsx           # Scroll-aware shared navbar
 │           ├── Skeletons.tsx        # Loading skeletons
-│           └── AnimatedCounter.tsx
+│           ├── AnimatedCounter.tsx
+│           ├── SkillsGapHeatmap.tsx # JD Skills Gap Heatmap (code score vs resume vs JD requirements)
+│           ├── LearningRoadmap.tsx  # Week-by-week learning roadmap with task checkboxes
+│           └── CoachChat.tsx        # Conversational AI coach chat panel
 ├── docker-compose.yml               # (Legacy) local Neo4j container config
 ├── start_all.py                     # One-command dev stack launcher
 └── README.md
@@ -68,7 +71,7 @@ trueskill-ai/
 
 ### Prerequisites
 - Node.js 20+ (for frontend)
-- Python 3.11+ (for backend)
+- Python 3.9+ (for backend)
 - A **Neo4j AuraDB** free-tier instance — [console.neo4j.io](https://console.neo4j.io)
 
 ### Option 1 — One-Command Launch (Recommended)
@@ -154,10 +157,18 @@ npm run dev
 |--------|----------|-------------|
 | `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch raw source code for a Function node — returns `source_code`, `name`, `file_path`, `line_start/end`, `complexity_score`, `args` |
 
-### Career & ATS Tools
+### Career Coach
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/coach` | Generate bridge project for skill gaps |
+| `POST` | `/api/coach` | Generate N bridge projects for skill gaps (configurable 1–5) |
+| `POST` | `/api/coach/heatmap` | JD Skills Gap Heatmap — triangulates JD requirements vs code score vs ATS resume match |
+| `POST` | `/api/coach/roadmap` | Week-by-week learning roadmap from bridge projects + available hours/week |
+| `POST` | `/api/coach/chat` | Conversational AI coaching — context-aware follow-up Q&A |
+| `POST` | `/api/coach/export` | Download self-contained HTML Career Coach report |
+
+### ATS Tools
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | `POST` | `/api/ats-score` | Full ATS evaluation of resume vs job description |
 | `POST` | `/api/ats-report` | Download self-contained HTML ATS report |
 | `POST` | `/api/export-report` | Download HTML verification report |
@@ -185,7 +196,7 @@ npm run dev
 | **Frontend** | Next.js 14 (App Router), TypeScript, Vanilla CSS |
 | **3D Graph** | react-force-graph-3d, Three.js |
 | **Charts** | Recharts |
-| **Backend** | Python 3.11+, FastAPI, Pydantic v2 |
+| **Backend** | Python 3.9+, FastAPI, Pydantic v2 |
 | **AI Orchestration** | LangChain, LangGraph |
 | **LLM** | Groq — Llama 3.3 70B (`langchain_groq`) |
 | **AST Parsing** | tree-sitter (Python, JS, TS, Go, Java, Rust) |
@@ -270,6 +281,39 @@ The dashboard Skills tab is a premium credential report panel:
 - **📍 Show in Graph:** Hover any evidence row → click to jump to 3D Graph with that node highlighted
 - **Evidence Code Drill-Down:** Hover any evidence row → `👁 View` → opens `CodeViewer` modal
 - **AI Interview Prep:** 5 personalised questions per skill with collapsible hints and Copy All button
+
+### Career Coach (Enhanced)
+The Career Coach section transforms skill gap analysis into a full professional development tool:
+
+#### JD Skills Gap Heatmap (`SkillsGapHeatmap.tsx`)
+A sortable table that **triangulates three signals simultaneously** — the only feature in the app to do so:
+| Column | Source |
+|--------|--------|
+| **JD Requirement** | Extracted from pasted job description by LLM |
+| **In Resume?** | From ATS `keyword_matches` (if ATS already run) — no extra LLM call |
+| **Code Score** | From verified code analysis (0–100) |
+| **Gap Severity** | Critical / Moderate / Minor / None based on code score |
+| **Tip** | 1-line actionable recommendation |
+
+Sort by any column. Color-coded severity badges and animated score bars.
+
+#### Week-by-Week Learning Roadmap (`LearningRoadmap.tsx`)
+- Select available hours/week (5 / 10 / 20 / 40h presets)
+- LLM distributes bridge projects across a realistic weekly schedule
+- Each week card: focus skill, 3–4 concrete tasks, milestone badge
+- **Task checkboxes persist to `localStorage`** — survive page refresh
+- Progress bar shows overall completion %
+
+#### Conversational Coach Chat (`CoachChat.tsx`)
+- Context-aware AI Q&A seeded with bridge projects, gap summary, and verified skills
+- Pre-loaded suggested questions: "What should I focus on first?", "Can I finish this in 2 weeks?", etc.
+- Typing indicator + message thread with timestamps
+- Chat messages persist to `sessionStorage`
+
+#### Export Coach Report
+- One-click download of a self-contained HTML report (no external deps)
+- Sections: Gap Summary → Skills Gap Heatmap → Bridge Projects → Learning Roadmap
+- Same pattern as existing ATS HTML report
 
 ### Shareable Verified Profile
 After running an analysis:
