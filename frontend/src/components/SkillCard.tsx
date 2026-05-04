@@ -10,6 +10,13 @@ import {
 import CodeViewer from "./CodeViewer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+interface ScoreBreakdown {
+    evidence_base: number;
+    node_bonus: number;
+    complexity: number;
+    llm: number;
+}
+
 interface VerificationResult {
     claim_id: string;
     topic: string;
@@ -19,14 +26,17 @@ interface VerificationResult {
     evidence_node_ids: string[];
     reasoning: string;
     complexity_analysis: string;
+    score_breakdown?: ScoreBreakdown;
 }
 
 export interface SkillCardProps {
     result: VerificationResult;
     index?: number;
     forceExpanded?: boolean;
-    repoIds?: string[];  // repo IDs to try for code drill-down
-    onShowInGraph?: (evidenceNodeIds: string[]) => void;  // Feature 1: jump to graph
+    repoIds?: string[];
+    onShowInGraph?: (evidenceNodeIds: string[]) => void;
+    /** Feature 4: score delta vs previous run (+12 / -5 / 0) */
+    scoreDelta?: number;
 }
 
 // ─── Status config ────────────────────────────────────────────────────────────
@@ -77,6 +87,37 @@ const STATUS_CONFIG = {
         scoreText: "text-red-500",
     },
 } as const;
+
+// ─── Score Breakdown Panel (Feature 2) ──────────────────────────────────────
+function ScoreBreakdownPanel({ bd }: { bd: ScoreBreakdown }) {
+    const bars = [
+        { label: "Evidence", value: bd.evidence_base, max: 30, color: "#6366f1", bg: "rgba(99,102,241,0.08)" },
+        { label: "Node Bonus", value: bd.node_bonus, max: 20, color: "#6366f1", bg: "rgba(99,102,241,0.06)" },
+        { label: "Complexity", value: bd.complexity, max: 20, color: "#f59e0b", bg: "rgba(245,158,11,0.08)" },
+        { label: "AI Quality", value: bd.llm, max: 30, color: "#7c3aed", bg: "rgba(124,58,237,0.08)" },
+    ];
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { const t = setTimeout(() => setMounted(true), 80); return () => clearTimeout(t); }, []);
+    return (
+        <div className="rounded-xl border border-slate-100 p-3 space-y-2" style={{ background: "rgba(248,250,252,0.9)" }}>
+            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Score Breakdown</p>
+            {bars.map(b => (
+                <div key={b.label} className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500 w-20 flex-shrink-0">{b.label}</span>
+                    <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: b.bg }}>
+                        <div
+                            className="h-full rounded-full transition-all duration-700 ease-out"
+                            style={{ width: mounted ? `${(b.value / b.max) * 100}%` : "0%", background: b.color }}
+                        />
+                    </div>
+                    <span className="text-[10px] font-bold tabular-nums w-10 text-right" style={{ color: b.color }}>
+                        {b.value}<span className="text-slate-300">/{b.max}</span>
+                    </span>
+                </div>
+            ))}
+        </div>
+    );
+}
 
 // ─── Score bar ────────────────────────────────────────────────────────────────
 function ScoreBar({ score, color, delay = 0 }: { score: number; color: string; delay?: number }) {
@@ -300,7 +341,7 @@ function Section({ icon, title, badge, children }: {
 }
 
 // ─── Main Card ────────────────────────────────────────────────────────────────
-export default function SkillCard({ result, index = 0, forceExpanded, repoIds = [], onShowInGraph }: SkillCardProps) {
+export default function SkillCard({ result, index = 0, forceExpanded, repoIds = [], onShowInGraph, scoreDelta }: SkillCardProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [showInterview, setShowInterview] = useState(false);
     const [interviewLoading, setInterviewLoading] = useState(false);
@@ -309,6 +350,39 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
 
     // Code drill-down state
     const [codeViewerNode, setCodeViewerNode] = useState<ParsedNode | null>(null);
+
+    // Feature 3 — Claim Challenger state
+    const [challengeText, setChallengeText] = useState<string | null>(null);
+    const [isChallenging, setIsChallenging] = useState(false);
+    const [showChallenge, setShowChallenge] = useState(false);
+
+    const handleChallenge = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (challengeText) { setShowChallenge(v => !v); return; }
+        setIsChallenging(true);
+        setShowChallenge(true);
+        try {
+            const res = await fetch(`/api/challenge-claim`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    topic: result.topic,
+                    claim_text: result.claim_text,
+                    score: result.score,
+                    status: result.status,
+                    evidence_node_ids: result.evidence_node_ids,
+                    reasoning: result.reasoning,
+                    score_breakdown: result.score_breakdown ?? null,
+                }),
+            });
+            const data = await res.json();
+            setChallengeText(data.challenge ?? "Could not generate challenge.");
+        } catch {
+            setChallengeText("Network error — please try again.");
+        } finally {
+            setIsChallenging(false);
+        }
+    };
 
     // forceExpanded override
     useEffect(() => {
@@ -394,9 +468,23 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                         </div>
                         <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">{result.claim_text}</p>
 
-                        {/* Score bar — always visible */}
-                        <div className="pt-2">
-                            <ScoreBar score={result.score} color={cfg.barColor} delay={index * 40} />
+                        {/* Score bar + delta badge (Feature 4) */}
+                        <div className="pt-2 flex items-center gap-2">
+                            <div className="flex-1">
+                                <ScoreBar score={result.score} color={cfg.barColor} delay={index * 40} />
+                            </div>
+                            {scoreDelta !== undefined && scoreDelta !== 0 && (
+                                <span
+                                    className="flex-shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-md"
+                                    style={{
+                                        color: scoreDelta > 0 ? "#10b981" : "#ef4444",
+                                        background: scoreDelta > 0 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
+                                        border: `1px solid ${scoreDelta > 0 ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)"}`,
+                                    }}
+                                >
+                                    {scoreDelta > 0 ? `↑+${scoreDelta}` : `↓${scoreDelta}`}
+                                </span>
+                            )}
                         </div>
                     </div>
 
@@ -419,6 +507,11 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
             >
                 <div className="px-5 pb-5 pt-0 pl-6 space-y-4 border-t-2 border-dashed border-slate-100 mt-1">
                     <div className="pt-3 space-y-4">
+
+                        {/* ── Score Breakdown (Feature 2) ── */}
+                        {result.score_breakdown && Object.keys(result.score_breakdown).length > 0 && (
+                            <ScoreBreakdownPanel bd={result.score_breakdown as ScoreBreakdown} />
+                        )}
 
                         {/* ── Section 1: AI Reasoning ── */}
                         <Section
@@ -574,6 +667,55 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                             )}
                                         </>
                                     )}
+                                </div>
+                            )}
+                        </Section>
+
+                        {/* ── Section 5: Claim Challenger (Feature 3) ── */}
+                        <Section
+                            icon={<AlertTriangle className="w-3 h-3" />}
+                            title="Devil's Advocate"
+                        >
+                            <button
+                                id={`challenge-btn-${result.claim_id}`}
+                                onClick={handleChallenge}
+                                disabled={isChallenging}
+                                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 hover:scale-[1.02] active:scale-95 disabled:opacity-60 w-full justify-center"
+                                style={{
+                                    background: showChallenge
+                                        ? "linear-gradient(135deg,#ef4444,#dc2626)"
+                                        : "linear-gradient(135deg,rgba(239,68,68,0.06),rgba(220,38,38,0.06))",
+                                    border: "1.5px solid rgba(239,68,68,0.3)",
+                                    color: showChallenge ? "white" : "#ef4444",
+                                    boxShadow: showChallenge ? "0 4px 12px rgba(239,68,68,0.25)" : "none",
+                                }}
+                            >
+                                {isChallenging
+                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    : <AlertTriangle className="w-3.5 h-3.5" />}
+                                {isChallenging
+                                    ? "Generating challenge…"
+                                    : showChallenge && challengeText
+                                        ? "Hide Challenge"
+                                        : "🔴 Challenge This Verdict"}
+                            </button>
+
+                            {showChallenge && (
+                                <div className="mt-3">
+                                    {isChallenging ? (
+                                        <div className="flex items-center gap-3 py-4 px-3 rounded-xl bg-red-50 border border-red-100">
+                                            <Loader2 className="w-4 h-4 animate-spin text-red-400 flex-shrink-0" />
+                                            <p className="text-xs text-red-500">Generating adversarial challenge…</p>
+                                        </div>
+                                    ) : challengeText ? (
+                                        <div className="p-3 rounded-xl border-l-4 border-red-400 border-t border-r border-b border-red-100 bg-red-50/60">
+                                            <div className="flex items-center gap-1.5 mb-2">
+                                                <AlertTriangle className="w-3 h-3 text-red-500" />
+                                                <span className="text-[10px] font-bold text-red-600 uppercase tracking-wider">Sceptical View</span>
+                                            </div>
+                                            <p className="text-xs text-red-800 leading-relaxed">{challengeText}</p>
+                                        </div>
+                                    ) : null}
                                 </div>
                             )}
                         </Section>

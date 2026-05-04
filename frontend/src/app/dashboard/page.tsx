@@ -38,6 +38,9 @@ const SkillsGapHeatmap = dynamic(() => import("@/components/SkillsGapHeatmap"), 
 const LearningRoadmap  = dynamic(() => import("@/components/LearningRoadmap"),  { ssr: false });
 const CoachChat        = dynamic(() => import("@/components/CoachChat"),         { ssr: false });
 
+// Dynamically import Verification Results enhancements
+const VerificationSummaryBar = dynamic(() => import("@/components/VerificationSummaryBar"), { ssr: false });
+
 // ATSReport type (mirrors backend ATSReport Pydantic model)
 interface ATSReport {
     ats_score: number;
@@ -72,6 +75,12 @@ interface VerificationResult {
     evidence_node_ids: string[];
     reasoning: string;
     complexity_analysis: string;
+    score_breakdown?: {
+        evidence_base: number;
+        node_bonus: number;
+        complexity: number;
+        llm: number;
+    };
 }
 
 interface ForensicsData {
@@ -350,6 +359,15 @@ export default function DashboardPage() {
     const [skillSearch, setSkillSearch] = useState("");
     const [skillFilter, setSkillFilter] = useState<"All" | "Verified" | "Partially Verified" | "Unverified">("All");
     const [expandAll, setExpandAll] = useState<boolean | undefined>(undefined);
+
+    // Feature 4 — score history for delta badges (persisted across sessions)
+    const PREV_SCORES_KEY = "trueskill_prev_scores";
+    const [prevScores, setPrevScores] = useState<Record<string, number>>(() => {
+        try {
+            const raw = typeof window !== "undefined" ? localStorage.getItem(PREV_SCORES_KEY) : null;
+            return raw ? JSON.parse(raw) : {};
+        } catch { return {}; }
+    });
 
     // Fetch real graph data when repo is ingested
     const fetchGraphData = useCallback(async (rid: string) => {
@@ -660,6 +678,13 @@ export default function DashboardPage() {
             }
 
             const result = await analyzeRes.json();
+            // Feature 4 — snapshot current scores before overwriting
+            if (analysisResult?.verification_results?.length) {
+                const snap: Record<string, number> = {};
+                analysisResult.verification_results.forEach(v => { snap[v.topic] = v.score; });
+                setPrevScores(snap);
+                try { localStorage.setItem(PREV_SCORES_KEY, JSON.stringify(snap)); } catch { /* quota */ }
+            }
             setAnalysisResult(result);
             setAgentMessages(prev => [...prev, `✨ Analysis complete! ${result.verification_results?.length ?? 0} skills verified across ${ids.length} repo${ids.length > 1 ? "s" : ""}.`]);
             setAgentStatus(null);
@@ -751,6 +776,13 @@ export default function DashboardPage() {
                             setAgentStatus(data.message);
                             setAgentMessages(prev => [...prev, data.message]);
                         } else if (data.type === "complete") {
+                            // Feature 4 — snapshot current scores before overwriting
+                            if (analysisResult?.verification_results?.length) {
+                                const snap: Record<string, number> = {};
+                                analysisResult.verification_results.forEach((v: VerificationResult) => { snap[v.topic] = v.score; });
+                                setPrevScores(snap);
+                                try { localStorage.setItem(PREV_SCORES_KEY, JSON.stringify(snap)); } catch { /* quota */ }
+                            }
                             setAnalysisResult(data);
                         } else if (data.type === "error") {
                             throw new Error(data.message || "Analysis failed");
@@ -1714,6 +1746,13 @@ export default function DashboardPage() {
                                     </div>
                                 ) : analysisResult?.verification_results.length ? (
                                     <>
+                                        {/* ── Feature 1: Verification Summary Dashboard ── */}
+                                        <VerificationSummaryBar
+                                            summary={analysisResult.summary}
+                                            onFilterChange={setSkillFilter}
+                                            activeFilter={skillFilter}
+                                        />
+
                                         {/* ── Filter Toolbar ── */}
                                         <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-slate-100 bg-slate-50/80 space-y-2">
                                             <div className="flex items-center gap-2 flex-wrap">
@@ -1793,6 +1832,11 @@ export default function DashboardPage() {
                                                         forceExpanded={expandAll}
                                                         repoIds={multiRepoIds.length > 0 ? multiRepoIds : (analysisResult.repo_id ? [analysisResult.repo_id] : [])}
                                                         onShowInGraph={handleShowInGraph}
+                                                        scoreDelta={
+                                                            prevScores[result.topic] !== undefined
+                                                                ? result.score - prevScores[result.topic]
+                                                                : undefined
+                                                        }
                                                     />
                                                 ))}
 

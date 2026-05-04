@@ -200,8 +200,46 @@ async def get_node_code(repo_id: str, node_id: str):
 
 
 # =============================================================================
+# AI Claim Challenger Endpoint (Feature 3 — Devil's Advocate)
+# =============================================================================
+
+class ChallengeClaimRequest(BaseModel):
+    topic: str
+    claim_text: str
+    score: int
+    status: str
+    evidence_node_ids: list[str] = []
+    reasoning: str = ""
+    score_breakdown: Optional[dict] = None
+
+
+@router.post("/challenge-claim")
+async def challenge_claim_endpoint(body: ChallengeClaimRequest, req: Request):
+    """
+    POST /api/challenge-claim
+    Returns an adversarial LLM challenge to a verification verdict.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .challenge import challenge_claim
+        text = await challenge_claim(
+            topic=body.topic,
+            claim_text=body.claim_text,
+            score=body.score,
+            status=body.status,
+            evidence_node_ids=body.evidence_node_ids,
+            reasoning=body.reasoning,
+            score_breakdown=body.score_breakdown,
+        )
+        return {"challenge": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Challenge generation failed: {str(e)}")
+
+
+# =============================================================================
 # Extract Profile Endpoint
 # =============================================================================
+
 
 @router.post("/extract-profile", response_model=ExtractProfileResponse)
 async def extract_profile_endpoint(
