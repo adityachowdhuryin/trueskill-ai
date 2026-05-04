@@ -52,6 +52,10 @@ class VerificationResult(BaseModel):
     evidence_node_ids: list[str] = Field(default_factory=list, description="Node IDs that support the claim")
     reasoning: str = Field(description="Explanation of the verification decision")
     complexity_analysis: str = Field(default="", description="Analysis of code complexity if applicable")
+    score_breakdown: dict = Field(
+        default_factory=dict,
+        description="Sub-scores: evidence_base, node_bonus, complexity, llm"
+    )
 
 
 # =============================================================================
@@ -356,36 +360,39 @@ async def grader_node(state: VerificationState) -> VerificationState:
         evidence = GraphEvidence(**evidence_dict) if evidence_dict else GraphEvidence()
         
         # Calculate base score from evidence
-        base_score = 0
+        evidence_base = 0
+        node_bonus = 0
+        complexity_bonus = 0
         complexity_analysis = ""
-        
+
         # Evidence exists
         if evidence.node_ids:
-            base_score += 30
-            
+            evidence_base = 30
+
             # Bonus for number of nodes (max 20 points)
             node_bonus = min(len(evidence.node_ids) * 5, 20)
-            base_score += node_bonus
-            
+
             # Complexity analysis
             if evidence.complexity_scores:
                 avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
                 claimed_difficulty = claim_dict.get("difficulty", 3)
-                
+
                 # Map difficulty to expected complexity ranges
                 complexity_thresholds = {1: 2, 2: 4, 3: 6, 4: 10, 5: 15}
                 expected_complexity = complexity_thresholds.get(claimed_difficulty, 5)
-                
+
                 if avg_complexity >= expected_complexity * 0.7:
-                    base_score += 20
+                    complexity_bonus = 20
                     complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) supports claimed difficulty level {claimed_difficulty}."
                 else:
                     complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) is lower than expected for difficulty level {claimed_difficulty}."
-        
+
+        base_score = evidence_base + node_bonus + complexity_bonus
+
         # Use LLM to analyze if evidence supports claim (up to 30 more points)
         llm_score = 0
         reasoning = ""
-        
+
         if evidence.code_snippets:
             try:
                 analysis_prompt = f"""Analyze if this code evidence supports the resume claim.
@@ -411,15 +418,15 @@ Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
                 analysis = parse_json_response(response.content)
                 llm_score = min(max(analysis.get("score", 0), 0), 30)
                 reasoning = analysis.get("reasoning", "")
-                
+
             except Exception as e:
                 reasoning = f"Analysis error: {str(e)}"
         else:
             reasoning = "No code evidence found in the repository for this claim."
-        
+
         # Calculate final score
         final_score = min(base_score + llm_score, 100)
-        
+
         # Determine status
         if final_score >= 70:
             status = "Verified"
@@ -427,7 +434,7 @@ Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
             status = "Partially Verified"
         else:
             status = "Unverified"
-        
+
         result = VerificationResult(
             claim_id=claim_id,
             topic=claim_dict.get("topic", ""),
@@ -436,7 +443,13 @@ Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
             score=final_score,
             evidence_node_ids=evidence.node_ids,
             reasoning=reasoning,
-            complexity_analysis=complexity_analysis
+            complexity_analysis=complexity_analysis,
+            score_breakdown={
+                "evidence_base": evidence_base,
+                "node_bonus": node_bonus,
+                "complexity": complexity_bonus,
+                "llm": llm_score,
+            }
         )
         
         results.append(result.model_dump())
