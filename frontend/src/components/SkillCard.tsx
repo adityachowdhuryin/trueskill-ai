@@ -5,7 +5,7 @@ import {
     CheckCircle, XCircle, AlertCircle, ChevronDown,
     Code, FileCode, Copy, Check, MessageSquare, Loader2,
     FileText, Braces, Hash, Eye, EyeOff, ClipboardCopy,
-    AlertTriangle, Info,
+    AlertTriangle, Info, MinusCircle, FolderOpen,
 } from "lucide-react";
 import CodeViewer from "./CodeViewer";
 
@@ -21,7 +21,7 @@ interface VerificationResult {
     claim_id: string;
     topic: string;
     claim_text: string;
-    status: "Verified" | "Partially Verified" | "Unverified";
+    status: "Verified" | "Partially Verified" | "Unverified" | "Not Code-Verifiable" | "Repo Not Available";
     score: number;
     evidence_node_ids: string[];
     reasoning: string;
@@ -85,6 +85,36 @@ const STATUS_CONFIG = {
         badgeBorder: "border-red-200",
         sectionBg: "bg-red-50/40",
         scoreText: "text-red-500",
+    },
+    "Not Code-Verifiable": {
+        icon: MinusCircle,
+        gradient: "from-slate-400 to-slate-500",
+        bg: "bg-white",
+        border: "border-slate-200",
+        hoverBorder: "hover:border-slate-300",
+        accentBar: "bg-slate-300",
+        barColor: "#94a3b8",
+        text: "text-slate-500",
+        badgeBg: "bg-slate-50",
+        badgeText: "text-slate-500",
+        badgeBorder: "border-slate-200",
+        sectionBg: "bg-slate-50/40",
+        scoreText: "text-slate-400",
+    },
+    "Repo Not Available": {
+        icon: FolderOpen,
+        gradient: "from-orange-400 to-amber-400",
+        bg: "bg-white",
+        border: "border-orange-200",
+        hoverBorder: "hover:border-orange-300",
+        accentBar: "bg-orange-300",
+        barColor: "#fb923c",
+        text: "text-orange-600",
+        badgeBg: "bg-orange-50",
+        badgeText: "text-orange-600",
+        badgeBorder: "border-orange-200",
+        sectionBg: "bg-orange-50/30",
+        scoreText: "text-orange-500",
     },
 } as const;
 
@@ -434,6 +464,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
     const parsedNodes = result.evidence_node_ids.slice(0, 12).map(parseNodeId);
     const hasEvidence = result.evidence_node_ids.length > 0;
     const isUnverified = result.status === "Unverified";
+    const isNotAssessed = result.status === "Not Code-Verifiable" || result.status === "Repo Not Available";
 
     return (
     <>
@@ -468,7 +499,8 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                         </div>
                         <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">{result.claim_text}</p>
 
-                        {/* Score bar + delta badge (Feature 4) */}
+                        {/* Score bar + delta badge — hidden for not-assessed skills */}
+                        {!isNotAssessed && (
                         <div className="pt-2 flex items-center gap-2">
                             <div className="flex-1">
                                 <ScoreBar score={result.score} color={cfg.barColor} delay={index * 40} />
@@ -486,6 +518,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                 </span>
                             )}
                         </div>
+                        )}
                     </div>
 
                     {/* Expand chevron */}
@@ -508,8 +541,8 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                 <div className="px-5 pb-5 pt-0 pl-6 space-y-4 border-t-2 border-dashed border-slate-100 mt-1">
                     <div className="pt-3 space-y-4">
 
-                        {/* ── Score Breakdown (Feature 2) ── */}
-                        {result.score_breakdown && Object.keys(result.score_breakdown).length > 0 && (
+                        {/* ── Score Breakdown (Feature 2) — hidden for not-assessed ── */}
+                        {!isNotAssessed && result.score_breakdown && Object.keys(result.score_breakdown).length > 0 && (
                             <ScoreBreakdownPanel bd={result.score_breakdown as ScoreBreakdown} />
                         )}
 

@@ -66,17 +66,18 @@ class VerificationState(TypedDict):
     """State passed between nodes in the verification workflow"""
     # Input
     resume_text: str
-    repo_id: str
-    
+    repo_id: str          # primary repo_id (kept for backwards compat)
+    repo_ids: list[str]   # ALL repo_ids to analyze against (routing uses this)
+
     # After Parser
     claims: list[dict]
-    
+
     # After Auditor (evidence per claim)
     evidence_map: dict[str, dict]  # claim_id -> evidence
-    
+
     # After Grader
     results: list[dict]
-    
+
     # Error tracking
     errors: list[str]
 
@@ -131,7 +132,125 @@ def _expand_topic_keywords(topic: str) -> list[str]:
     return list(set(keywords))
 
 
-def generate_cypher_for_claim(claim: ResumeClaim, repo_id: str) -> str:
+# =============================================================================
+# Repo Profile & Claim Routing (Layer 2 of scoped verification)
+# =============================================================================
+
+_LANG_HINTS: dict[str, set[str]] = {
+    "python":          {"python"},
+    "javascript":      {"javascript", "js", "typescript"},
+    "typescript":      {"typescript", "javascript"},
+    "java":            {"java"},
+    "go":              {"go"},
+    "golang":          {"go"},
+    "rust":            {"rust"},
+    "react":           {"javascript", "typescript"},
+    "vue":             {"javascript", "typescript"},
+    "angular":         {"typescript"},
+    "next.js":         {"javascript", "typescript"},
+    "node":            {"javascript", "typescript"},
+    "flask":           {"python"},
+    "django":          {"python"},
+    "fastapi":         {"python"},
+    "machine learning":{"python"},
+    "deep learning":   {"python"},
+    "data science":    {"python"},
+    "pytorch":         {"python"},
+    "tensorflow":      {"python"},
+    "sklearn":         {"python"},
+    "kubernetes":      {"yaml", "go"},
+    "docker":          {"yaml"},
+    "sql":             {"sql", "python", "java"},
+}
+
+
+def build_repo_profile_map(repo_ids: list[str]) -> dict[str, dict]:
+    """
+    Query Neo4j for each repo's language and import profile.
+    Used to route claims to the most relevant repos.
+    """
+    profile_map: dict[str, dict] = {}
+    for repo_id in repo_ids:
+        try:
+            lang_results = query_graph(
+                "MATCH (f:File) WHERE f.repo_id = $rid AND f.language IS NOT NULL "
+                "RETURN DISTINCT toLower(f.language) AS lang",
+                {"rid": repo_id}
+            )
+            languages: set[str] = {r["lang"] for r in lang_results if r.get("lang")}
+
+            import_results = query_graph(
+                "MATCH (i:Import) WHERE i.repo_id = $rid "
+                "RETURN DISTINCT toLower(i.module_name) AS mod LIMIT 50",
+                {"rid": repo_id}
+            )
+            imports: set[str] = {r["mod"] for r in import_results if r.get("mod")}
+
+            name_results = query_graph(
+                "MATCH (n) WHERE n.repo_id = $rid AND n.name IS NOT NULL "
+                "AND (n:Function OR n:Class) "
+                "RETURN DISTINCT toLower(n.name) AS nm LIMIT 60",
+                {"rid": repo_id}
+            )
+            names: set[str] = {r["nm"] for r in name_results if r.get("nm")}
+
+            profile_map[repo_id] = {"languages": languages, "imports": imports, "names": names}
+        except Exception:
+            profile_map[repo_id] = {"languages": set(), "imports": set(), "names": set()}
+    return profile_map
+
+
+def route_claim_to_repos(
+    claim_dict: dict,
+    repo_profile_map: dict[str, dict],
+) -> tuple[list[str], bool]:
+    """
+    Return (repo_ids_to_search, was_fallback).
+    was_fallback=True means no repo matched and we fell back to ALL repos.
+    """
+    if not repo_profile_map:
+        return [], True
+
+    topic = claim_dict.get("topic", "").lower()
+    keywords = set(_expand_topic_keywords(topic))
+
+    lang_hints: set[str] = set()
+    for key, langs in _LANG_HINTS.items():
+        if key in topic or topic in key:
+            lang_hints.update(langs)
+
+    scored: list[tuple[str, int]] = []
+    for repo_id, profile in repo_profile_map.items():
+        languages = profile.get("languages", set())
+        imports   = profile.get("imports", set())
+        names     = profile.get("names", set())
+        score = 0
+
+        if lang_hints and (languages & lang_hints):
+            score += 4
+
+        for kw in keywords:
+            if len(kw) >= 3 and any(kw in imp or imp.startswith(kw) for imp in imports):
+                score += 2
+                break
+
+        for kw in keywords:
+            if len(kw) >= 4 and any(kw in nm for nm in names):
+                score += 1
+                break
+
+        scored.append((repo_id, score))
+
+    relevant = [(rid, s) for rid, s in scored if s > 0]
+    if not relevant:
+        # Fallback: search ALL repos (per user decision)
+        return list(repo_profile_map.keys()), True
+
+    max_score = max(s for _, s in relevant)
+    return [rid for rid, s in relevant if s >= max(1, max_score // 2)], False
+
+
+def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
     """
     Generate a Cypher query to find evidence for a claim.
     Uses expanded synonym-based matching for broader coverage.
@@ -139,32 +258,28 @@ def generate_cypher_for_claim(claim: ResumeClaim, repo_id: str) -> str:
     # Build a query that searches for relevant patterns
     # The $keywords parameter will be a list of strings
     query = """
-    // Search for functions, classes, and imports related to the claim
     MATCH (n)
-    WHERE n.repo_id = $repo_id
+    WHERE n.repo_id IN $repo_ids
       AND ANY(kw IN $keywords WHERE
         toLower(n.name) CONTAINS kw
         OR (n:Import AND toLower(n.module_name) CONTAINS kw)
       )
-    WITH n, labels(n) as node_labels
-    
-    // Get complexity for functions
+    WITH n, labels(n) AS node_labels
     OPTIONAL MATCH (n)-[:CALLS]->(called:Function)
     WHERE n:Function
-    
-    RETURN 
+    RETURN
         n,
         node_labels,
-        n.complexity_score as complexity,
-        collect(DISTINCT called.name) as calls_functions
+        n.complexity_score AS complexity,
+        collect(DISTINCT called.name) AS calls_functions
     LIMIT 50
     """
     return query
 
 
 def query_knowledge_graph(
-    claim: ResumeClaim, 
-    repo_id: str
+    claim: ResumeClaim,
+    repo_ids: list[str],
 ) -> GraphEvidence:
     """
     Query the Neo4j knowledge graph to find evidence for a claim.
@@ -173,13 +288,11 @@ def query_knowledge_graph(
     # Expand the topic into a list of related keywords
     keywords = _expand_topic_keywords(claim.topic)
     
-    # Generate and execute the Cypher query
-    cypher_query = generate_cypher_for_claim(claim, repo_id)
-    
+    cypher_query = generate_cypher_for_claim(claim, repo_ids)
     try:
         results = query_graph(cypher_query, {
-            "repo_id": repo_id,
-            "keywords": keywords
+            "repo_ids": repo_ids,
+            "keywords": keywords,
         })
     except Exception as e:
         return GraphEvidence(
@@ -308,25 +421,43 @@ Return the claims as JSON."""
 async def graph_auditor_node(state: VerificationState) -> VerificationState:
     """
     Query the knowledge graph for evidence supporting each claim.
-    
-    Input: claims (list of ResumeClaim)
-    Output: evidence_map (claim_id -> GraphEvidence)
+    Applies claim-type filtering (Layer 1) and repo routing (Layer 2).
     """
     claims = state["claims"]
-    repo_id = state["repo_id"]
-    evidence_map = {}
-    
+    repo_ids = state.get("repo_ids") or [state["repo_id"]]
+    evidence_map: dict[str, dict] = {}
+
+    # Build repo profile map once for all routing decisions
+    repo_profile_map = build_repo_profile_map(repo_ids)
+
     for claim_dict in claims:
-        claim = ResumeClaim(**{k: v for k, v in claim_dict.items() if k != "id"})
         claim_id = claim_dict.get("id", f"claim_{claims.index(claim_dict)}")
-        
+
+        # Layer 1 — skip not-code-verifiable claims immediately
+        if claim_dict.get("claim_type") == "not_code_verifiable":
+            claim_dict["skip_reason"] = "not_code_verifiable"
+            evidence_map[claim_id] = GraphEvidence().model_dump()
+            continue
+
+        # Layer 2 — route claim to relevant repos (falls back to all if no match)
+        target_repos, was_fallback = route_claim_to_repos(claim_dict, repo_profile_map)
+        if not target_repos:
+            target_repos = repo_ids
+            was_fallback = True
+
+        valid_fields = {k for k in ResumeClaim.model_fields}
+        claim = ResumeClaim(**{k: v for k, v in claim_dict.items() if k in valid_fields})
+
         try:
-            evidence = query_knowledge_graph(claim, repo_id)
+            evidence = query_knowledge_graph(claim, target_repos)
+            # If routing fell back to all repos AND still no evidence found → mark it
+            if was_fallback and not evidence.node_ids:
+                claim_dict["skip_reason"] = "repo_not_available"
             evidence_map[claim_id] = evidence.model_dump()
         except Exception as e:
             state["errors"].append(f"Auditor error for {claim_id}: {str(e)}")
             evidence_map[claim_id] = GraphEvidence().model_dump()
-    
+
     state["evidence_map"] = evidence_map
     return state
 
@@ -348,13 +479,43 @@ async def grader_node(state: VerificationState) -> VerificationState:
     Input: claims + evidence_map
     Output: results (list of VerificationResult)
     """
-    claims = state["claims"]
+    claims  = state["claims"]
     evidence_map = state["evidence_map"]
-    results = []
-    
+    results: list[dict] = []
+
     llm = get_llm_model(temperature=0.1)
-    
+
     for i, claim_dict in enumerate(claims):
+        # Handle Layer-1 / Layer-2 skipped claims first
+        skip_reason = claim_dict.get("skip_reason")
+        if skip_reason == "not_code_verifiable":
+            results.append(VerificationResult(
+                claim_id=claim_dict.get("id", f"claim_{i}"),
+                topic=claim_dict.get("topic", ""),
+                claim_text=claim_dict.get("claim_text", ""),
+                status="Not Code-Verifiable",
+                score=0,
+                evidence_node_ids=[],
+                reasoning="This claim describes a methodology, soft skill, or domain concept that does not manifest directly in source code and cannot be verified via code analysis.",
+                complexity_analysis="",
+                score_breakdown={},
+            ).model_dump())
+            continue
+        if skip_reason == "repo_not_available":
+            results.append(VerificationResult(
+                claim_id=claim_dict.get("id", f"claim_{i}"),
+                topic=claim_dict.get("topic", ""),
+                claim_text=claim_dict.get("claim_text", ""),
+                status="Repo Not Available",
+                score=0,
+                evidence_node_ids=[],
+                reasoning="No ingested repository covers this technology area. Ingest a relevant repository to verify this claim.",
+                complexity_analysis="",
+                score_breakdown={},
+            ).model_dump())
+            continue
+
+
         claim_id = claim_dict.get("id", f"claim_{i}")
         evidence_dict = evidence_map.get(claim_id, {})
         evidence = GraphEvidence(**evidence_dict) if evidence_dict else GraphEvidence()
@@ -449,7 +610,7 @@ Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
                 "node_bonus": node_bonus,
                 "complexity": complexity_bonus,
                 "llm": llm_score,
-            }
+            },
         )
         
         results.append(result.model_dump())
@@ -509,13 +670,13 @@ async def analyze_resume(
     initial_state: VerificationState = {
         "resume_text": resume_text,
         "repo_id": repo_id,
+        "repo_ids": [repo_id],
         "claims": [],
         "evidence_map": {},
         "results": [],
-        "errors": []
+        "errors": [],
     }
-    
-    # Run the verification workflow
+
     final_state = await workflow.ainvoke(initial_state)
     
     # Run forensics analysis if repo path provided
@@ -562,10 +723,11 @@ async def analyze_resume_stream(
     initial_state: VerificationState = {
         "resume_text": resume_text,
         "repo_id": repo_id,
+        "repo_ids": [repo_id],
         "claims": [],
         "evidence_map": {},
         "results": [],
-        "errors": []
+        "errors": [],
     }
     
     node_names = {
@@ -632,22 +794,99 @@ async def analyze_resume_stream(
     yield f"data: {json.dumps(result)}\n\n"
 
 
+NOT_ASSESSED_STATUSES = {"Not Code-Verifiable", "Repo Not Available"}
+
+
 def _generate_summary(results: list[dict]) -> dict:
     """Generate a summary of verification results."""
     if not results:
-        # Keys must match the real-case return AND the frontend AnalysisResponse type
-        return {"verified": 0, "partially_verified": 0, "unverified": 0, "total_claims": 0, "average_score": 0}
+        return {"verified": 0, "partially_verified": 0, "unverified": 0,
+                "not_assessed": 0, "total_claims": 0, "average_score": 0}
 
-    verified = sum(1 for r in results if r["status"] == "Verified")
-    partial = sum(1 for r in results if r["status"] == "Partially Verified")
-    unverified = sum(1 for r in results if r["status"] == "Unverified")
-    avg_score = sum(r["score"] for r in results) / len(results)
+    assessed = [r for r in results if r["status"] not in NOT_ASSESSED_STATUSES]
+    not_assessed = len(results) - len(assessed)
+
+    verified   = sum(1 for r in assessed if r["status"] == "Verified")
+    partial    = sum(1 for r in assessed if r["status"] == "Partially Verified")
+    unverified = sum(1 for r in assessed if r["status"] == "Unverified")
+    avg_score  = round(sum(r["score"] for r in assessed) / max(len(assessed), 1), 1)
 
     return {
         "verified": verified,
         "partially_verified": partial,
         "unverified": unverified,
+        "not_assessed": not_assessed,
         "total_claims": len(results),
-        "average_score": round(avg_score, 1)
+        "average_score": avg_score,
     }
 
+
+
+async def analyze_resume_multi_stream(
+    resume_text: str,
+    repo_ids: list[str],
+    repo_paths=None,
+):
+    """
+    Single-pass verification across all repo_ids simultaneously.
+    Claims are routed to the best-matching repos via build_repo_profile_map.
+    Yields SSE events in the same shape as analyze_resume_stream.
+    """
+    import json
+    workflow = create_verification_workflow()
+
+    initial_state: VerificationState = {
+        "resume_text": resume_text,
+        "repo_id": repo_ids[0],
+        "repo_ids": repo_ids,
+        "claims": [],
+        "evidence_map": {},
+        "results": [],
+        "errors": [],
+    }
+
+    node_names = {
+        "parser":  "Extracting claims from resume",
+        "auditor": "Routing & gathering evidence from code graph",
+        "grader":  "Verifying claims against evidence",
+    }
+
+    final_state = initial_state
+    try:
+        async for event in workflow.astream(initial_state):
+            for node_name, node_state in event.items():
+                final_state = node_state
+                msg = node_names.get(node_name, f"Running {node_name}")
+                yield f"data: {json.dumps({'type': 'progress', 'message': msg, 'node': node_name})}\n\n"
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if "errors" not in final_state:
+            final_state["errors"] = []
+        final_state["errors"].append(str(e))
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        return
+
+    forensics_data = None
+    if repo_paths:
+        try:
+            yield f"data: {json.dumps({'type': 'progress', 'message': 'Running stylometric forensics...', 'node': 'forensics'})}\n\n"
+            from .forensics import analyze_stylometry, get_forensics_summary
+            forensics_report = analyze_stylometry(repo_paths[0])
+            forensics_data = get_forensics_summary(forensics_report)
+        except Exception as e:
+            final_state["errors"].append(f"Forensics error: {str(e)}")
+
+    result = {
+        "type": "complete",
+        "status": "multi_repo_complete",
+        "repo_id": ",".join(repo_ids),
+        "claims_extracted": len(final_state.get("claims", [])),
+        "claims": final_state.get("claims", []),
+        "verification_results": final_state.get("results", []),
+        "errors": final_state.get("errors", []),
+        "summary": _generate_summary(final_state.get("results", [])),
+        "authenticity_score": forensics_data.get("authenticity_score", 100) if forensics_data else None,
+        "forensics": forensics_data,
+    }
+    yield f"data: {json.dumps(result)}\n\n"
