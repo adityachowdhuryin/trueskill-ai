@@ -20,6 +20,7 @@ trueskill-ai/
 │   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
 │   │   ├── interview.py             # AI interview question generator
 │   │   ├── coach.py                 # Gap analysis, bridge projects, heatmap, roadmap, chat & HTML export
+│   │   ├── challenge.py             # Adversarial LLM claim challenger (Devil's Advocate)
 │   │   ├── job_finder.py            # Jooble job search & Apollo.io hiring manager lookup
 │   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
@@ -59,7 +60,8 @@ trueskill-ai/
 │           ├── AnimatedCounter.tsx
 │           ├── SkillsGapHeatmap.tsx # JD Skills Gap Heatmap (code score vs resume vs JD requirements)
 │           ├── LearningRoadmap.tsx  # Week-by-week learning roadmap with task checkboxes
-│           └── CoachChat.tsx        # Conversational AI coach chat panel
+│           ├── CoachChat.tsx        # Conversational AI coach chat panel
+│           └── VerificationSummaryBar.tsx # Animated summary dashboard (donut chart, stat cards, filter)
 ├── docker-compose.yml               # (Legacy) local Neo4j container config
 ├── start_all.py                     # One-command dev stack launcher
 └── README.md
@@ -166,6 +168,11 @@ npm run dev
 | `POST` | `/api/coach/chat` | Conversational AI coaching — context-aware follow-up Q&A |
 | `POST` | `/api/coach/export` | Download self-contained HTML Career Coach report |
 
+### Verification Results Enhancements
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/challenge-claim` | Devil's Advocate — LLM argues the *opposite* verdict for a skill claim (rate-limited) |
+
 ### ATS Tools
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -271,6 +278,36 @@ A self-contained page (`/resume-toolkit`) that guides users through:
 2. **ATS Optimization** — Resume vs JD keyword analysis → LLM rewrites Skills/Summary
 3. **Hiring Manager Lookup** — Apollo.io paid search → free-tier `/people/match` → email pattern fallback
 4. **Outreach Email** — LLM drafts a personalized cold email for the role
+
+### Verification Results Features
+The dashboard Skills tab now includes 4 high-impact enhancements:
+
+#### Verification Summary Dashboard (`VerificationSummaryBar.tsx`)
+A premium analytics banner pinned above the filter toolbar:
+- **Animated donut chart** — multi-segment SVG with colour-matched glow (emerald/amber/rose-red per segment) and avg score in the centre
+- **3 stat cards** — Verified / Partial / Unverified counts; clicking any card instantly filters the skill list; clicking again resets
+- **Context-aware hint** — shows "Click a card to filter" when no filter is active; shows "Clear filter" button when a filter is applied
+
+#### Evidence Strength Meter
+Inside each expanded `SkillCard`, a **4-bar transparent score breakdown panel** shows the sub-scores that make up the final 0–100 score:
+| Bar | Max | Colour |
+|-----|-----|--------|
+| Evidence Presence | 30 | Indigo |
+| Node Bonus | 20 | Indigo |
+| Complexity Match | 20 | Amber |
+| AI Reasoning Quality | 30 | Violet |
+The grader (`agents.py`) now returns a `score_breakdown` dict alongside every `VerificationResult`.
+
+#### AI Claim Challenger / Devil's Advocate
+- A **"🔴 Challenge This Verdict"** button at the bottom of each expanded SkillCard
+- Calls `POST /api/challenge-claim` → `challenge.py` sends an adversarial system prompt to Groq Llama 3.3 70B, instructing it to argue the opposite verdict
+- Returns a ≤180-word sceptical counter-argument rendered in a red-tinted callout box
+- Result is cached per card; clicking again toggles visibility
+
+#### Score Delta / Re-run History
+- On the **second and subsequent analysis runs**, each SkillCard shows a **delta badge** next to its score bar: `↑+12` (emerald) or `↓-5` (red)
+- Score history is persisted in `localStorage` keyed by skill topic — survives browser restarts
+- Pairs naturally with the Career Coach: complete a roadmap item → re-run → see score go up
 
 ### Skills Verification Section
 The dashboard Skills tab is a premium credential report panel:
