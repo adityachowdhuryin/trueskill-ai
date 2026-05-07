@@ -7,13 +7,14 @@ interface Summary {
     verified: number;
     partially_verified: number;
     unverified: number;
+    not_assessed: number;
     total_claims: number;
     average_score: number;
 }
 
 interface VerificationSummaryBarProps {
     summary: Summary;
-    onFilterChange: (filter: "All" | "Verified" | "Partially Verified" | "Unverified") => void;
+    onFilterChange: (filter: "All" | "Verified" | "Partially Verified" | "Unverified" | "Not Assessed") => void;
     activeFilter: string;
 }
 
@@ -57,7 +58,8 @@ function PremiumDonut({
     const circ = 2 * Math.PI * r;
 
     const GAP = 0.018; // 1.8% of circumference between segments as gap
-    const denominator = total || 1;
+    // Donut only shows assessed skills — not_assessed skipped intentionally
+    const denominator = (verified + partial + unverified) || 1;
 
     const segs = [
         { value: verified,  color: "#10b981", glow: "rgba(16,185,129,0.45)", filter: "Verified" },
@@ -161,6 +163,17 @@ export default function VerificationSummaryBar({
             activeBorder: "#f43f5e",
             filter: "Unverified" as const,
         },
+        ...(summary.not_assessed > 0 ? [{
+            label: "Not Assessed",
+            value: summary.not_assessed,
+            icon: TrendingUp,  // reusing TrendingUp as placeholder
+            color: "#94a3b8",
+            bg: "rgba(148,163,184,0.06)",
+            activeBg: "rgba(148,163,184,0.13)",
+            border: "rgba(148,163,184,0.18)",
+            activeBorder: "#94a3b8",
+            filter: "Not Assessed" as const,
+        }] : []),
     ];
 
     const isFiltering = activeFilter !== "All";

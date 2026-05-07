@@ -70,7 +70,7 @@ interface VerificationResult {
     claim_id: string;
     topic: string;
     claim_text: string;
-    status: "Verified" | "Partially Verified" | "Unverified";
+    status: "Verified" | "Partially Verified" | "Unverified" | "Not Code-Verifiable" | "Repo Not Available";
     score: number;
     evidence_node_ids: string[];
     reasoning: string;
@@ -108,12 +108,14 @@ interface AnalysisResponse {
         topic: string;
         claim_text: string;
         difficulty: number;
+        claim_type?: "code_verifiable" | "not_code_verifiable";
     }>;
     verification_results: VerificationResult[];
     summary: {
         verified: number;
         partially_verified: number;
         unverified: number;
+        not_assessed: number;
         total_claims: number;
         average_score: number;
     };
@@ -369,7 +371,7 @@ export default function DashboardPage() {
 
     // Skills tab — filter / search / expand-all
     const [skillSearch, setSkillSearch] = useState("");
-    const [skillFilter, setSkillFilter] = useState<"All" | "Verified" | "Partially Verified" | "Unverified">("All");
+    const [skillFilter, setSkillFilter] = useState<"All" | "Verified" | "Partially Verified" | "Unverified" | "Not Assessed">("All");
     const [expandAll, setExpandAll] = useState<boolean | undefined>(undefined);
 
     // Feature 4 — score history for delta badges (persisted across sessions)
@@ -1287,6 +1289,14 @@ export default function DashboardPage() {
                                     <AnimatedCounter target={analysisResult.summary.unverified} className="font-semibold" /> Unverified
                                 </span>
                             </div>
+                            {(analysisResult.summary.not_assessed ?? 0) > 0 && (
+                                <div className="flex items-center gap-2 animate-slide-in-right" style={{ animationDelay: "160ms" }}>
+                                    <span style={{ fontSize: 14, color: "#94a3b8" }}>⊘</span>
+                                    <span className="text-slate-500" style={{ fontSize: 13 }}>
+                                        <AnimatedCounter target={analysisResult.summary.not_assessed ?? 0} className="font-semibold" /> Not Assessed
+                                    </span>
+                                </div>
+                            )}
                             {/* Radial avg score ring */}
                             <div className="flex items-center gap-2 pl-3 border-l border-slate-200 animate-slide-in-right" style={{ animationDelay: "180ms" }}>
                                 <div className="relative w-9 h-9 flex-shrink-0">
@@ -1830,7 +1840,7 @@ export default function DashboardPage() {
                                     <>
                                         {/* ── Feature 1: Verification Summary Dashboard ── */}
                                         <VerificationSummaryBar
-                                            summary={analysisResult.summary}
+                                            summary={{ ...analysisResult.summary, not_assessed: analysisResult.summary.not_assessed ?? 0 }}
                                             onFilterChange={setSkillFilter}
                                             activeFilter={skillFilter}
                                         />
@@ -1864,6 +1874,7 @@ export default function DashboardPage() {
                                                         <option value="Verified">✅ Verified</option>
                                                         <option value="Partially Verified">⚠️ Partial</option>
                                                         <option value="Unverified">❌ Unverified</option>
+                                                        <option value="Not Assessed">⧘ Not Assessed</option>
                                                     </select>
                                                 </div>
 
@@ -1896,16 +1907,20 @@ export default function DashboardPage() {
 
                                         {/* ── Skill Cards ── */}
                                         <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                                            {[...analysisResult.verification_results]
-                                                .filter(r =>
-                                                    (skillFilter === "All" || r.status === skillFilter) &&
-                                                    r.topic.toLowerCase().includes(skillSearch.toLowerCase())
-                                                )
-                                                .sort((a, b) => {
-                                                    const order: Record<string, number> = { "Verified": 0, "Partially Verified": 1, "Unverified": 2 };
-                                                    const diff = (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                                                    return diff !== 0 ? diff : b.score - a.score;
-                                                })
+                                            {(() => {
+                                                const NOT_ASSESSED = new Set(["Not Code-Verifiable", "Repo Not Available"]);
+                                                const filterFn = (r: VerificationResult) => {
+                                                    if (skillFilter === "Not Assessed") return NOT_ASSESSED.has(r.status);
+                                                    if (skillFilter === "All") return !NOT_ASSESSED.has(r.status);
+                                                    return r.status === skillFilter;
+                                                };
+                                                const order: Record<string, number> = { "Verified": 0, "Partially Verified": 1, "Unverified": 2, "Not Code-Verifiable": 3, "Repo Not Available": 3 };
+                                                return [...analysisResult.verification_results]
+                                                    .filter(r => filterFn(r) && r.topic.toLowerCase().includes(skillSearch.toLowerCase()))
+                                                    .sort((a, b) => {
+                                                        const diff = (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                                                        return diff !== 0 ? diff : b.score - a.score;
+                                                    })
                                                 .map((result, idx) => (
                                                     <SkillCard
                                                         key={result.claim_id}
@@ -1920,13 +1935,15 @@ export default function DashboardPage() {
                                                                 : undefined
                                                         }
                                                     />
-                                                ))}
+                                                ));
+                                             })()}
 
                                             {/* Empty filter state */}
-                                            {analysisResult.verification_results.filter(r =>
-                                                (skillFilter === "All" || r.status === skillFilter) &&
-                                                r.topic.toLowerCase().includes(skillSearch.toLowerCase())
-                                            ).length === 0 && (
+                                            {(() => {
+                                                 const NOT_ASSESSED_SET = new Set(["Not Code-Verifiable", "Repo Not Available"]);
+                                                 const fn = (r: VerificationResult) => skillFilter === "Not Assessed" ? NOT_ASSESSED_SET.has(r.status) : skillFilter === "All" ? !NOT_ASSESSED_SET.has(r.status) : r.status === skillFilter;
+                                                 return analysisResult.verification_results.filter(r => fn(r) && r.topic.toLowerCase().includes(skillSearch.toLowerCase())).length === 0;
+                                             })() && (
                                                 <div className="flex flex-col items-center justify-center py-12 gap-3 text-slate-400">
                                                     <Search className="w-8 h-8 text-slate-300" />
                                                     <p className="text-sm font-medium">No skills match your filter</p>

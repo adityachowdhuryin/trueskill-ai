@@ -440,11 +440,12 @@ async def _collect_analysis_result(resume_text: str, repo_id: str) -> dict:
 
 def _merge_analysis_results(results: list[dict]) -> dict:
     """
-    Merge multiple analysis results.
-    - Verification results: deduplicated by topic (keep highest score for each topic).
-    - Summary: recalculated from merged results.
-    - authenticity_score: average of all non-None scores.
+    Merge multiple per-repo analysis results.
+    Kept for potential backwards-compat; multi endpoint now uses single-pass.
+    - Verification results: deduplicated by topic (keep highest score).
+    - not-assessed statuses are excluded from verified/unverified counts.
     """
+    from .agents import NOT_ASSESSED_STATUSES
     by_topic: dict[str, dict] = {}
     total_claims = 0
     all_errors: list[str] = []
@@ -469,14 +470,21 @@ def _merge_analysis_results(results: list[dict]) -> dict:
         for v in r.get("verification_results") or []:
             topic = v.get("topic", "")
             existing = by_topic.get(topic)
-            if existing is None or v.get("score", 0) > existing.get("score", 0):
+            # Prefer assessed results over not-assessed when deduplicating
+            if existing is None:
+                by_topic[topic] = v
+            elif v.get("status") not in NOT_ASSESSED_STATUSES and existing.get("status") in NOT_ASSESSED_STATUSES:
+                by_topic[topic] = v
+            elif v.get("score", 0) > existing.get("score", 0) and existing.get("status") not in NOT_ASSESSED_STATUSES:
                 by_topic[topic] = v
 
     merged = list(by_topic.values())
-    verified = sum(1 for v in merged if v.get("status") == "Verified")
-    partial = sum(1 for v in merged if v.get("status") == "Partially Verified")
-    unverified = sum(1 for v in merged if v.get("status") == "Unverified")
-    avg = round(sum(v.get("score", 0) for v in merged) / max(len(merged), 1), 1)
+    assessed = [v for v in merged if v.get("status") not in NOT_ASSESSED_STATUSES]
+    not_assessed_count = len(merged) - len(assessed)
+    verified   = sum(1 for v in assessed if v.get("status") == "Verified")
+    partial    = sum(1 for v in assessed if v.get("status") == "Partially Verified")
+    unverified = sum(1 for v in assessed if v.get("status") == "Unverified")
+    avg = round(sum(v.get("score", 0) for v in assessed) / max(len(assessed), 1), 1)
     avg_auth = round(sum(auth_scores) / len(auth_scores), 1) if auth_scores else None
 
     return {
@@ -490,6 +498,7 @@ def _merge_analysis_results(results: list[dict]) -> dict:
             "verified": verified,
             "partially_verified": partial,
             "unverified": unverified,
+            "not_assessed": not_assessed_count,
             "total_claims": len(merged),
             "average_score": avg,
         },
@@ -508,12 +517,13 @@ async def analyze_multi_repos(
     """
     POST /api/analyze/multi
     Accepts { pdf_file (multipart), repo_ids (JSON string list) }.
-    Runs analysis for each repo_id and returns merged AnalysisResponse JSON.
-    Non-streaming — waits for all repos to finish then returns combined result.
+    Runs a SINGLE verification workflow across all repo_ids simultaneously,
+    routing each claim to the most relevant repo(s).
     """
     import json
     from PyPDF2 import PdfReader
     from io import BytesIO
+    from .agents import analyze_resume_multi_stream
 
     check_rate_limit(req.client.host if req.client else "unknown", "analyze-multi")
 
@@ -540,26 +550,30 @@ async def analyze_multi_repos(
         if not resume_text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF")
 
-        # Run analysis for each repo and collect results
-        results = []
-        for repo_id in ids:
-            result = await _collect_analysis_result(resume_text, repo_id)
-            results.append(result)
+        # Single-pass multi-repo stream → collect final result
+        final: dict | None = None
+        async for chunk in analyze_resume_multi_stream(resume_text, ids):
+            raw = chunk.decode() if isinstance(chunk, (bytes, bytearray)) else str(chunk)
+            for line in raw.split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    try:
+                        d = json.loads(line[6:])
+                        if d.get("type") == "complete":
+                            final = d
+                    except Exception:
+                        pass
 
-        if not results:
-            raise HTTPException(status_code=500, detail="No analysis results were produced")
+        if final is None:
+            raise HTTPException(status_code=500, detail="No analysis result was produced")
 
-        # If only one repo, return it directly (no merging needed)
-        if len(results) == 1:
-            return results[0]
-
-        merged = _merge_analysis_results(results)
-        return merged
+        return final
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Multi-repo analysis failed: {str(e)}")
+
 
 
 # =============================================================================
