@@ -10,9 +10,9 @@ Workflow 2 (from project_spec.md):
 
 import os
 import json
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
 
 from .llm import get_llm_model, parse_json_response
@@ -496,36 +496,195 @@ Generate a realistic week-by-week roadmap. Return only valid JSON."""
 
 
 # =============================================================================
-# Conversational Coach Chat
+# Conversational Coach Chat — upgraded multi-turn + streaming
 # =============================================================================
 
-async def coach_chat(message: str, context: str) -> str:
+def _build_coach_context(context_data: dict) -> str:
     """
-    Answer a follow-up question from the candidate.
-    context: JSON string with bridge_projects, gap_summary, verified_skills, job_description.
+    Build a clean, structured markdown context block that the LLM can
+    reliably parse — much better than a raw JSON blob.
+    """
+    lines: list[str] = []
+
+    # Candidate verified skills
+    skills: list[dict] = context_data.get("verified_skills", [])
+    if skills:
+        lines.append("### CANDIDATE VERIFIED SKILLS (from real code analysis)")
+        for s in skills:
+            icon = "✅" if s.get("status") == "Verified" else "⚠️" if s.get("status") == "Partially Verified" else "❌"
+            lines.append(f"  {icon} {s.get('topic', '?')}: {s.get('score', 0)}% ({s.get('status', '')})")
+        lines.append("")
+
+    # Gap summary
+    gap_summary = context_data.get("gap_summary", "")
+    if gap_summary:
+        lines.append("### GAP ANALYSIS SUMMARY")
+        lines.append(gap_summary)
+        lines.append("")
+
+    # Bridge projects (concise)
+    bridge_projects: list[dict] = context_data.get("bridge_projects", [])
+    if bridge_projects:
+        lines.append("### ASSIGNED BRIDGE PROJECTS")
+        for p in bridge_projects[:5]:
+            tech = ", ".join(p.get("tech_stack", [])[:3])
+            lines.append(
+                f"  #{p.get('rank', '?')} — {p.get('project_title', '?')} "
+                f"(gap: {p.get('gap_skill', '?')}, est. {p.get('estimated_time', '?')}, "
+                f"stack: {tech})"
+            )
+        lines.append("")
+
+    # Learning roadmap (week titles only to save tokens)
+    roadmap: Optional[dict] = context_data.get("roadmap")
+    if roadmap and roadmap.get("weeks"):
+        lines.append("### LEARNING ROADMAP")
+        for w in roadmap["weeks"]:
+            lines.append(f"  Week {w.get('week')}: {w.get('focus_skill')} — {w.get('milestone', '')}")
+        lines.append(f"  Total: {roadmap.get('total_weeks')} weeks, {roadmap.get('total_hours')} hours")
+        lines.append("")
+
+    # Job description (first 800 chars)
+    jd = context_data.get("job_description", "")
+    if jd:
+        lines.append("### TARGET JOB DESCRIPTION (excerpt)")
+        lines.append(jd[:800] + ("..." if len(jd) > 800 else ""))
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+SYSTEM_PROMPT_COACH = """You are **Alex**, a senior software engineering career coach embedded in TrueSkill AI.
+You have access to the candidate's verified skill profile (scores from real static code analysis), their assigned bridge projects, and their learning roadmap.
+
+Your personality: Direct, warm, encouraging but honest. You give concrete, specific advice — never generic platitudes.
+
+OUTPUT RULES (always follow these):
+- Use bullet points or numbered lists when listing multiple items
+- Bold (**text**) key skill names, project titles, and important numbers
+- Keep replies under 200 words unless the user explicitly asks for a detailed breakdown
+- Always reference the candidate's actual skill names and scores when relevant
+- If you don't have enough context to answer precisely, say so and ask a clarifying question
+- End your reply with a single, specific follow-up question that moves the conversation forward
+
+AFTER YOUR REPLY, always output a JSON block (hidden from the user) on the last line:
+<!-- suggestions: ["Short follow-up 1?", "Short follow-up 2?", "Short follow-up 3?"] -->
+These 3 suggestions must be short (≤8 words each) and directly relevant to what you just said."""
+
+
+async def coach_chat(
+    message: str,
+    context_data: dict,
+    history: Optional[list[dict]] = None,
+) -> tuple[str, list[str]]:
+    """
+    Answer a follow-up question from the candidate with full conversation history.
+
+    Args:
+        message:      The latest user message.
+        context_data: Structured dict with verified_skills, bridge_projects,
+                      gap_summary, roadmap, job_description.
+        history:      Previous [{role, content}] turns (oldest first).
+
+    Returns:
+        (reply_text, suggestions_list)
     """
     llm = get_llm_model(temperature=0.5)
+    history = history or []
 
-    system_prompt = """You are a senior engineering career coach assistant.
-You have access to the candidate's full gap analysis, bridge projects, and learning context.
-Answer their question concisely, specifically, and actionably.
-Reference their actual gap skills and projects by name where relevant.
-Never give generic advice — always tailor to this specific candidate's profile.
-Keep your reply under 150 words unless the question genuinely requires more detail."""
+    context_block = _build_coach_context(context_data)
+    system_content = SYSTEM_PROMPT_COACH + "\n\n" + context_block
 
-    human_prompt = f"""CANDIDATE CONTEXT:
-{context[:5000]}
+    # Build message chain: system + history + current user message
+    messages: list[Any] = [SystemMessage(content=system_content)]
+    for turn in history:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        if role == "assistant":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    messages.append(HumanMessage(content=message))
 
-CANDIDATE QUESTION:
-{message}
+    response = await llm.ainvoke(messages)
+    raw = response.content.strip()
 
-Answer directly and helpfully:"""
+    # Extract embedded suggestions from <!-- suggestions: [...] --> footer
+    suggestions: list[str] = []
+    import re as _re
+    m = _re.search(r'<!--\s*suggestions:\s*(\[.*?\])\s*-->', raw, _re.DOTALL)
+    if m:
+        try:
+            suggestions = json.loads(m.group(1))
+        except Exception:
+            suggestions = []
+        raw = raw[:m.start()].strip()
 
-    response = await llm.ainvoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_prompt),
-    ])
-    return response.content.strip()
+    # Fallback suggestions if the LLM forgot to include them
+    if not suggestions:
+        suggestions = [
+            "What should I build first?",
+            "How long will this take me?",
+            "Which skill gap hurts most?",
+        ]
+
+    return raw, suggestions
+
+
+async def stream_coach_chat(
+    message: str,
+    context_data: dict,
+    history: Optional[list[dict]] = None,
+) -> AsyncIterator[str]:
+    """
+    Streaming variant — yields text chunks as the LLM generates them.
+    Yields regular text chunks, then a final JSON line with suggestions:
+        data: <chunk>\n
+        ...
+        data: [DONE]\n
+        data: {"suggestions": [...]}\n
+    """
+    llm = get_llm_model(temperature=0.5)
+    history = history or []
+
+    context_block = _build_coach_context(context_data)
+    system_content = SYSTEM_PROMPT_COACH + "\n\n" + context_block
+
+    messages: list[Any] = [SystemMessage(content=system_content)]
+    for turn in history:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        if role == "assistant":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    messages.append(HumanMessage(content=message))
+
+    full_text = ""
+    import re as _re
+    async for chunk in llm.astream(messages):
+        token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+        full_text += token
+        # Don't stream the hidden suggestions footer
+        if '<!--' not in full_text:
+            yield f"data: {json.dumps({'token': token})}\n\n"
+
+    # Extract suggestions
+    suggestions: list[str] = []
+    m = _re.search(r'<!--\s*suggestions:\s*(\[.*?\])\s*-->', full_text, _re.DOTALL)
+    if m:
+        try:
+            suggestions = json.loads(m.group(1))
+        except Exception:
+            pass
+    if not suggestions:
+        suggestions = [
+            "What should I build first?",
+            "How long will this take me?",
+            "Which skill gap hurts most?",
+        ]
+
+    yield f"data: {json.dumps({'done': True, 'suggestions': suggestions})}\n\n"
 
 
 # =============================================================================

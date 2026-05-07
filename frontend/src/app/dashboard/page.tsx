@@ -168,6 +168,13 @@ interface ChatMessage {
     role: "user" | "assistant";
     content: string;
     timestamp: number;
+    streaming?: boolean;
+}
+interface ContextStatus {
+    skills: boolean;
+    bridge_projects: boolean;
+    roadmap: boolean;
+    ats: boolean;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -327,6 +334,11 @@ export default function DashboardPage() {
     const [hoursPerWeek, setHoursPerWeek] = useState(10);
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [isChatLoading, setIsChatLoading] = useState(false);
+    const [chatSuggestions, setChatSuggestions] = useState<string[]>([
+        "What should I focus on first?",
+        "Can I finish this in 2 weeks?",
+        "Best free resources for my top gap skill?",
+    ]);
     const [isExportingCoach, setIsExportingCoach] = useState(false);
 
     // ATS Score state
@@ -1017,37 +1029,107 @@ export default function DashboardPage() {
         }
     }, [bridgeProjects, gapSummary, jobDescription, hoursPerWeek]);
 
-    // ── Coach Chat handler ───────────────────────────────────────────────────
+    // ── Coach Chat handler (streaming) ──────────────────────────────────────
     const handleCoachChat = useCallback(async (message: string) => {
         const userMsg: ChatMessage = { role: "user", content: message, timestamp: Date.now() };
         setChatMessages(prev => [...prev, userMsg]);
         setIsChatLoading(true);
+
+        // Build structured context (not raw JSON string)
+        const context_data = {
+            verified_skills: analysisResult?.verification_results?.map(r => ({
+                topic: r.topic, score: r.score, status: r.status,
+            })) ?? [],
+            bridge_projects: bridgeProjects,
+            gap_summary: gapSummary ?? "",
+            roadmap: roadmap ?? null,
+            job_description: jobDescription,
+        };
+
+        // History = all previous messages (exclude the one we just added above)
+        const history = chatMessages.map(m => ({ role: m.role, content: m.content }));
+
+        // Placeholder streaming message
+        const streamingMsg: ChatMessage = { role: "assistant", content: "", timestamp: Date.now(), streaming: true };
+        setChatMessages(prev => [...prev, streamingMsg]);
+
         try {
-            const context = JSON.stringify({
-                bridge_projects: bridgeProjects,
-                gap_summary: gapSummary,
-                job_description: jobDescription,
-                verified_skills: analysisResult?.verification_results?.map(r => ({
-                    topic: r.topic, score: r.score, status: r.status,
-                })) ?? [],
-            });
-            const response = await fetch(`${API_BASE_URL}/api/coach/chat`, {
+            const response = await fetch(`${API_BASE_URL}/api/coach/chat/stream`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ message, context }),
+                body: JSON.stringify({ message, context_data, history }),
             });
-            if (!response.ok) throw new Error("Chat failed");
-            const data = await response.json();
-            const aiMsg: ChatMessage = { role: "assistant", content: data.reply, timestamp: Date.now() };
-            setChatMessages(prev => [...prev, aiMsg]);
+
+            if (!response.ok || !response.body) throw new Error("Stream failed");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let accumulated = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const text = decoder.decode(value, { stream: true });
+                const lines = text.split("\n");
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue;
+                    const jsonStr = line.slice(6).trim();
+                    if (!jsonStr) continue;
+
+                    try {
+                        const parsed = JSON.parse(jsonStr);
+
+                        if (parsed.token !== undefined) {
+                            accumulated += parsed.token;
+                            setChatMessages(prev => {
+                                const next = [...prev];
+                                next[next.length - 1] = {
+                                    ...next[next.length - 1],
+                                    content: accumulated,
+                                    streaming: true,
+                                };
+                                return next;
+                            });
+                        }
+
+                        if (parsed.done) {
+                            // Finalise message (remove streaming flag)
+                            setChatMessages(prev => {
+                                const next = [...prev];
+                                next[next.length - 1] = {
+                                    ...next[next.length - 1],
+                                    content: accumulated,
+                                    streaming: false,
+                                };
+                                return next;
+                            });
+                            if (Array.isArray(parsed.suggestions)) {
+                                setChatSuggestions(parsed.suggestions);
+                            }
+                        }
+                    } catch { /* ignore parse errors */ }
+                }
+            }
         } catch (err) {
-            console.error("Coach chat error:", err);
-            const errMsg: ChatMessage = { role: "assistant", content: "Sorry, I couldn't process that. Please try again.", timestamp: Date.now() };
-            setChatMessages(prev => [...prev, errMsg]);
+            console.error("Coach chat stream error:", err);
+            setChatMessages(prev => {
+                const next = [...prev];
+                next[next.length - 1] = {
+                    ...next[next.length - 1],
+                    content: "Sorry, I couldn't process that. Please try again.",
+                    streaming: false,
+                };
+                return next;
+            });
         } finally {
             setIsChatLoading(false);
+            setChatMessages(prev =>
+                prev.map(m => ({ ...m, streaming: false }))
+            );
         }
-    }, [bridgeProjects, gapSummary, jobDescription, analysisResult]);
+    }, [chatMessages, bridgeProjects, gapSummary, jobDescription, roadmap, analysisResult]);
 
     // ── Coach Report Export handler ──────────────────────────────────────────
     const handleExportCoachReport = useCallback(async () => {
@@ -2271,7 +2353,14 @@ export default function DashboardPage() {
                             messages={chatMessages}
                             isLoading={isChatLoading}
                             onSend={handleCoachChat}
-                            disabled={bridgeProjects.length === 0}
+                            disabled={!analysisResult && bridgeProjects.length === 0}
+                            suggestions={chatSuggestions}
+                            contextStatus={{
+                                skills: (analysisResult?.verification_results?.length ?? 0) > 0,
+                                bridge_projects: bridgeProjects.length > 0,
+                                roadmap: !!roadmap,
+                                ats: !!atsReport,
+                            }}
                         />
                     </div>
 

@@ -1004,14 +1004,18 @@ async def generate_learning_roadmap(request: RoadmapRequestModel, req: Request):
 
 class CoachChatRequestModel(BaseModel):
     message: str
-    context: str = ""   # JSON string: bridge_projects + gap_summary + verified_skills + job_description
+    # Structured context dict (preferred over legacy `context` string)
+    context_data: dict = {}   # {verified_skills, bridge_projects, gap_summary, roadmap, job_description}
+    # Full conversation history for multi-turn memory
+    history: list[dict] = []  # [{role: "user"|"assistant", content: str}, ...]
 
 
 @router.post("/coach/chat")
 async def coach_chat_endpoint(request: CoachChatRequestModel, req: Request):
     """
     POST /api/coach/chat
-    Answers a follow-up question in the context of the candidate's gap analysis.
+    Multi-turn conversational coaching with structured context.
+    Returns { reply, suggestions }.
     """
     from .coach import coach_chat
 
@@ -1021,13 +1025,45 @@ async def coach_chat_endpoint(request: CoachChatRequestModel, req: Request):
         if not request.message.strip():
             raise HTTPException(status_code=400, detail="message cannot be empty")
 
-        reply = await coach_chat(message=request.message, context=request.context)
-        return {"reply": reply}
+        reply, suggestions = await coach_chat(
+            message=request.message,
+            context_data=request.context_data,
+            history=request.history,
+        )
+        return {"reply": reply, "suggestions": suggestions}
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+@router.post("/coach/chat/stream")
+async def coach_chat_stream_endpoint(request: CoachChatRequestModel, req: Request):
+    """
+    POST /api/coach/chat/stream
+    Streaming variant — returns SSE tokens as they are generated.
+    Each event is a JSON chunk: {token} or {done, suggestions}.
+    """
+    from .coach import stream_coach_chat
+
+    check_rate_limit(req.client.host if req.client else "unknown", "coach")
+
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="message cannot be empty")
+
+    return StreamingResponse(
+        stream_coach_chat(
+            message=request.message,
+            context_data=request.context_data,
+            history=request.history,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # =============================================================================
