@@ -34,6 +34,7 @@
 | **Forensics** | `forensics.py` | Stylometric authorship & AI-code detection |
 | **ATS Scorer** | `ats.py` | Resume vs JD evaluation, HTML report generation |
 | **Coach Module** | `coach.py` | Gap analysis, bridge project generation, JD Skills Gap Heatmap, learning roadmap, conversational chat, HTML report export |
+| **Claim Challenger** | `challenge.py` | Adversarial LLM function — argues the opposite verdict for a skill claim (Devil's Advocate) |
 | **Job Finder** | `job_finder.py` | Jooble job search + Apollo.io hiring manager lookup |
 | **Resume Optimizer** | `resume_optimizer.py` | LLM keyword rewriting + personalized email drafting |
 | **Report Generator** | `report.py` | Self-contained HTML verification report |
@@ -87,6 +88,8 @@ class VerificationResult(BaseModel):
     evidence_node_ids: list[str]
     reasoning: str
     complexity_analysis: str
+    score_breakdown: dict   # {evidence_base: int, node_bonus: int, complexity: int, llm: int}
+                            # Sub-scores that sum to final score (max 30+20+20+30=100)
 ```
 
 **Function node (Neo4j + in-memory):**
@@ -285,7 +288,32 @@ The Career Coach section provides four integrated sub-workflows:
 - Returns a self-contained HTML file (no external dependencies)
 - Sections: Header → Gap Summary → Heatmap table → Bridge Projects → Roadmap timeline
 
-### Workflow 5: AI Graph Summary
+### Workflow 7: Verification Results Enhancement Suite
+Four features added to the Skills tab to increase transparency and depth:
+
+**7a. Verification Summary Dashboard** (`VerificationSummaryBar.tsx`)
+- Renders above the filter toolbar
+- **Animated SVG donut chart** — each segment is an independent `<circle>` rotated by accumulated start angle; colour-matched glow via `drop-shadow` filter
+- **3 stat cards** — Verified / Partial / Unverified with animated counters; click-to-filter wired to `skillFilter` state
+- **Avg score** displayed in donut centre, colour-coded by threshold (green ≥70 / amber ≥40 / red <40)
+
+**7b. Evidence Strength Meter**
+- `agents.py` grader now captures `evidence_base`, `node_bonus`, `complexity_bonus`, `llm_score` as separate variables and returns them in `score_breakdown`
+- `ScoreBreakdownPanel` sub-component inside `SkillCard` renders 4 animated bars (indigo / indigo / amber / violet)
+- Bars animate from 0→score on mount via CSS transition
+
+**7c. AI Claim Challenger** (`challenge.py` + `POST /api/challenge-claim`)
+- Adversarial system prompt: *"You are a sceptical hiring manager. Argue why this claim should NOT be verified."*
+- Sends topic, claim text, score, status, evidence count, and `score_breakdown` to Groq Llama 3.3 70B
+- Response ≤180 words; cached per card; toggled by clicking the button again
+- Rate-limited via existing `check_rate_limit()` helper
+
+**7d. Score Delta / Re-run History**
+- Before overwriting `analysisResult` on any new analysis run, scores are snapshotted to `localStorage` keyed by `"trueskill_prev_scores"` (topic → score map)
+- Each `SkillCard` receives `scoreDelta = newScore - prevScore` via prop
+- Displays `↑+N` (emerald) or `↓-N` (red) badge next to the score bar when delta ≠ 0
+
+### Workflow 8: AI Graph Summary
 Triggered by the ✨ **Explain** button in the 3D Graph toolbar:
 
 1. **Client computes** structural metrics: file list, edge type counts, avg complexity, class/import lists, top hub nodes, top complex nodes
@@ -377,6 +405,14 @@ POST   /api/ats-report                 { ats_report, candidate_name }       → 
 POST   /api/export-report              { ...results }                        → HTML download
 ```
 
+### Verification Results Enhancements
+```
+POST   /api/challenge-claim            { topic, claim_text, score, status,
+                                         evidence_node_ids, reasoning,
+                                         score_breakdown? }
+                                       → { challenge: str }   # ≤180-word adversarial counter-argument
+```
+
 ### Resume Toolkit
 ```
 POST   /api/resume-toolkit/find-jobs             { pdf_file, location_override? }
@@ -394,13 +430,16 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 |---|---|---|
 | **Cyclomatic Complexity** | ✅ Implemented | `ingest.py` — full AST traversal counts decision points (if/for/while/except/and/or/ternary). Grader scores against claimed difficulty level. |
 | **Stylometry** | ✅ Implemented | `forensics.py` — Shannon entropy of snake_case/camelCase/PascalCase distribution, git history bulk-commit detection, authenticity score 0–100. |
-| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids`; SkillCard shows 👁 View Code + 📍 Show in Graph per evidence row; GraphVisualizer NodeInfoPanel exposes Code Drill-Down + Function Explain for Function nodes; AI Graph Summary explains overall architecture. |
+| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` + `score_breakdown`; SkillCard shows 👁 View Code + 📍 Show in Graph per evidence row + Evidence Strength Meter (4-bar sub-score breakdown); GraphVisualizer NodeInfoPanel exposes Code Drill-Down + Function Explain for Function nodes; AI Graph Summary explains overall architecture. |
 | **Multi-language support** | ✅ Implemented | tree-sitter parsers for Python, JavaScript, TypeScript, Go, Java, Rust. |
 | **Streaming results** | ✅ Implemented | `/api/analyze` returns SSE with live per-node progress then final JSON. |
 | **Candidate comparison** | ✅ Implemented | SQLite persistence + `/compare` frontend page. |
 | **ATS evaluation** | ✅ Implemented | `ats.py` — weighted keyword/content/format scoring + downloadable report. |
 | **AI Architectural Insights** | ✅ Implemented | `graph_explain.py` — 8-section structured JSON via Groq; collapsible panel in 3D graph view. |
 | **Career Coaching Suite** | ✅ Implemented | `coach.py` — JD Skills Gap Heatmap, week-by-week learning roadmap, conversational AI coach chat, and self-contained HTML export. |
+| **Adversarial Verification** | ✅ Implemented | `challenge.py` + `POST /api/challenge-claim` — Devil's Advocate LLM argues the opposite verdict; stress-tests weak evidence to demonstrate intellectual honesty. |
+| **Score Transparency** | ✅ Implemented | `VerificationResult.score_breakdown` exposes 4 sub-scores (evidence_base/node_bonus/complexity/llm) returned by grader and visualised as animated bars in each SkillCard. |
+| **Progress Tracking** | ✅ Implemented | Score delta badges (↑/↓) on re-run; history persisted in `localStorage`; pairs with Career Coach roadmap to show measurable improvement. |
 
 ---
 
@@ -435,7 +474,8 @@ The Career Coach section is rendered below the main tab grid in the dashboard. I
 | Component | Description |
 |---|---|
 | `GraphVisualizer.tsx` | 3D force-graph (**react-force-graph-3d** + Three.js): Bloom post-processing, Neighborhood Focus Mode, **AI Graph Summary** (8-section collapsible panel), **Evidence Node Highlighting** (amber highlight for Show-in-Graph), **Function Explain** (per-node AI explanation), **Path Finder** (start→end dependency path), **Analytics Panel**, Code Drill-Down, Type/Complexity/Repo colour modes, search + type filters, first-load dimension fix |
-| `SkillCard.tsx` | Per-claim card: animated score bar, parsed evidence nodes (file type badge + file→function), sectioned layout, hover **📍 Show in Graph** per evidence row, hover **👁 View Code** button, Interview Prep with collapsible hints + Copy All |
+| `SkillCard.tsx` | Per-claim card: animated score bar + **delta badge** (↑/↓ vs previous run), parsed evidence nodes (file type badge + file→function), **Evidence Strength Meter** (4-bar score breakdown: evidence/node bonus/complexity/LLM), sectioned layout, hover **📍 Show in Graph** per evidence row, hover **👁 View Code** button, Interview Prep with collapsible hints + Copy All, **🔴 Challenge This Verdict** button (Devil's Advocate adversarial challenge) |
+| `VerificationSummaryBar.tsx` | Animated summary banner above filter toolbar: premium SVG donut chart (per-segment glow, avg score in centre), 3 animated stat cards (Verified/Partial/Unverified), click-to-filter + click-to-clear integration, context-aware hint text |
 | `CodeViewer.tsx` | Code drill-down modal: inline syntax highlighter (zero npm deps), line numbers, metadata bar (Lines X–Y, CC badge, args), Copy Code, loading skeleton, graceful re-ingest / not-found states, ESC to close |
 | `ErrorBoundary.tsx` | React error boundary wrapping graph and heavy async components; shows friendly fallback UI on crash |
 | `SkillRadar.tsx` | Recharts radar: fetches LLM benchmarks on-demand so traces always align |
