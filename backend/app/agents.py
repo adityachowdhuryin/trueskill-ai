@@ -105,6 +105,14 @@ TOPIC_SYNONYMS: dict[str, list[str]] = {
     "authentication": ["auth", "jwt", "oauth", "token", "session", "login", "password", "bcrypt", "security"],
     "frontend": ["react", "vue", "angular", "next", "nuxt", "svelte", "component", "state", "hook", "redux", "tailwind"],
     "backend": ["server", "api", "middleware", "controller", "service", "handler", "route", "endpoint"],
+    # Modern AI / LLM terms (Issue #20)
+    "llm": ["language model", "openai", "anthropic", "claude", "gemini", "llama", "mistral", "completion", "prompt", "token", "chat", "generation"],
+    "langchain": ["chain", "agent", "retriever", "langchain", "langgraph", "tool", "memory", "runnable"],
+    "rag": ["retrieval", "vectorstore", "chunk", "similarity", "pinecone", "faiss", "chroma", "weaviate", "qdrant", "context", "augmented"],
+    "vector database": ["faiss", "pinecone", "chroma", "weaviate", "qdrant", "embedding", "similarity", "index", "upsert", "query_vector"],
+    "transformer": ["attention", "bert", "gpt", "t5", "roberta", "encoder", "decoder", "huggingface", "transformers", "tokenizer"],
+    "reinforcement learning": ["reward", "policy", "gym", "q_learning", "ppo", "dqn", "episode", "agent", "environment", "action", "state"],
+    "generative ai": ["generate", "diffusion", "stable_diffusion", "gan", "vae", "latent", "sampling", "dalle", "midjourney"],
 }
 
 
@@ -253,16 +261,17 @@ def route_claim_to_repos(
 def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
     """
     Generate a Cypher query to find evidence for a claim.
-    Uses expanded synonym-based matching for broader coverage.
+    Searches: node names, import module names, function source code bodies, and file paths.
     """
-    # Build a query that searches for relevant patterns
-    # The $keywords parameter will be a list of strings
     query = """
     MATCH (n)
     WHERE n.repo_id IN $repo_ids
       AND ANY(kw IN $keywords WHERE
         toLower(n.name) CONTAINS kw
         OR (n:Import AND toLower(n.module_name) CONTAINS kw)
+        OR (n:Function AND n.source_code IS NOT NULL
+            AND toLower(substring(n.source_code, 0, 1500)) CONTAINS kw)
+        OR (n.file_path IS NOT NULL AND toLower(n.file_path) CONTAINS kw)
       )
     WITH n, labels(n) AS node_labels
     OPTIONAL MATCH (n)-[:CALLS]->(called:Function)
@@ -271,7 +280,10 @@ def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
         n,
         node_labels,
         n.complexity_score AS complexity,
-        collect(DISTINCT called.name) AS calls_functions
+        collect(DISTINCT called.name) AS calls_functions,
+        CASE WHEN (n:Function OR n:Class) AND n.source_code IS NOT NULL
+             THEN substring(n.source_code, 0, 500)
+             ELSE null END AS source_preview
     LIMIT 50
     """
     return query
@@ -303,32 +315,36 @@ def query_knowledge_graph(
     # Parse results into evidence
     node_ids = []
     node_types = []
-    code_snippets = []
+    code_snippets = []  # Now includes source previews for richer LLM context
     complexity_scores = []
-    
+
     for record in results:
         node = record.get("n", {})
         labels = record.get("node_labels", [])
         complexity = record.get("complexity")
-        
+        source_preview = record.get("source_preview") or ""
+
         # Extract node ID (using name + file_path as composite ID)
         node_name = node.get("name", node.get("module_name", "unknown"))
         file_path = node.get("file_path", node.get("path", ""))
         node_id = f"{file_path}:{node_name}" if file_path else node_name
-        
+
         node_ids.append(node_id)
         node_types.extend(labels)
-        
+
         if complexity is not None:
             complexity_scores.append(complexity)
-        
-        # Create a code snippet reference
+
+        # Build rich snippet: signature + first 300 chars of body
         if "Function" in labels:
             args = node.get("args", [])
-            snippet = f"def {node_name}({', '.join(args)})"
+            sig = f"def {node_name}({', '.join(args)})"
+            body = source_preview[:300].strip() if source_preview else ""
+            snippet = f"{sig}\n{body}" if body else sig
             code_snippets.append(snippet)
         elif "Class" in labels:
-            snippet = f"class {node_name}"
+            body = source_preview[:200].strip() if source_preview else ""
+            snippet = f"class {node_name}\n{body}" if body else f"class {node_name}"
             code_snippets.append(snippet)
         elif "Import" in labels:
             snippet = f"import {node.get('module_name', node_name)}"
@@ -359,24 +375,30 @@ async def resume_parser_node(state: VerificationState) -> VerificationState:
     
     llm = get_llm_model(temperature=0.1)
     
-    system_prompt = """You are an expert resume analyzer. Your task is to extract specific, verifiable technical claims from a resume.
+    system_prompt = """You are an expert resume analyzer. Extract ALL specific, verifiable claims from this resume.
 
-For each claim, identify:
-1. **topic**: The specific technology, language, framework, or skill (e.g., "Python", "React", "Machine Learning", "REST APIs")
-2. **claim_text**: The exact claim being made (e.g., "Built a recommendation engine using collaborative filtering")
-3. **difficulty**: Rate the claimed expertise level 1-5:
-   - 1: Basic familiarity
+For each claim, provide ALL FOUR fields:
+1. **topic**: Specific technology, language, framework, or tool (e.g., "Python", "React", "PostgreSQL", "TensorFlow")
+2. **claim_text**: The exact claim from the resume (e.g., "Built a recommendation engine using collaborative filtering")
+3. **difficulty**: Claimed expertise level 1-5:
+   - 1: Basic familiarity / exposure
    - 2: Can use with guidance
    - 3: Proficient, independent work
    - 4: Advanced, complex projects
-   - 5: Expert level, leadership/architecture
+   - 5: Expert, leadership/architecture
+4. **claim_type**: EXACTLY one of:
+   - "code_verifiable" — the skill uses a specific library, framework, language, algorithm, or API that appears as imports, function names, class names, or code patterns in a repository
+   - "not_code_verifiable" — methodology, soft skill, process, or concept that does NOT appear in source code. Examples: "Agile", "Scrum", "Kanban", "stakeholder management", "team leadership", "communication", "project management", "requirements gathering", "data storytelling", "Git workflow", "CI/CD pipeline management", "code review process", "mentoring", "presentations"
 
-Focus on TECHNICAL claims that could be verified by analyzing code. Ignore soft skills, education dates, or company names.
+IMPORTANT RULES:
+- Extract ONE claim per distinct technology/skill — if "Python" appears 5 times, extract the STRONGEST (highest difficulty) claim
+- Maximum 20 claims total
+- Focus on claims a technical interviewer would ask about
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 {
   "claims": [
-    {"topic": "...", "claim_text": "...", "difficulty": 3},
+    {"topic": "...", "claim_text": "...", "difficulty": 3, "claim_type": "code_verifiable"},
     ...
   ]
 }"""
@@ -394,23 +416,33 @@ Return the claims as JSON."""
             SystemMessage(content=system_prompt),
             HumanMessage(content=human_prompt)
         ])
-        
-        # Parse the response using shared utility
+
         parsed = parse_json_response(response.content)
-        claims = parsed.get("claims", [])
-        
-        # Add unique IDs to each claim — prefix with repo_id slice to prevent
-        # collisions when multiple repos are analyzed and results are merged
-        repo_prefix = state["repo_id"][:6] if state.get("repo_id") else "repo"
+        raw_claims = parsed.get("claims", [])
+
+        # Dedup by topic: keep highest-difficulty claim per unique topic
+        seen: dict[str, dict] = {}
+        for claim in raw_claims:
+            key = claim.get("topic", "").lower().strip()
+            if not key:
+                continue
+            existing = seen.get(key)
+            if existing is None or claim.get("difficulty", 0) > existing.get("difficulty", 0):
+                seen[key] = claim
+
+        claims = list(seen.values())[:20]  # hard cap at 20
+
+        # Add unique IDs — 8-char prefix to match UUID generation in clone_repo
+        repo_prefix = state["repo_id"][:8] if state.get("repo_id") else "repo"
         for i, claim in enumerate(claims):
             claim["id"] = f"{repo_prefix}_{i}"
-        
+
         state["claims"] = claims
-        
+
     except Exception as e:
         state["errors"].append(f"Parser error: {str(e)}")
         state["claims"] = []
-    
+
     return state
 
 
@@ -519,65 +551,74 @@ async def grader_node(state: VerificationState) -> VerificationState:
         claim_id = claim_dict.get("id", f"claim_{i}")
         evidence_dict = evidence_map.get(claim_id, {})
         evidence = GraphEvidence(**evidence_dict) if evidence_dict else GraphEvidence()
-        
-        # Calculate base score from evidence
-        evidence_base = 0
-        node_bonus = 0
+
+        # ── Graduated evidence_base by node type quality ──────────────────────
+        # Import nodes (library used) = 15 pts
+        # Function/Class nodes (actual implementation) = 30 pts
+        has_functions = any(t == "Function" for t in evidence.node_types)
+        has_classes   = any(t == "Class"    for t in evidence.node_types)
+        has_imports   = any(t == "Import"   for t in evidence.node_types)
+
+        if has_functions or has_classes:
+            evidence_base = 30
+        elif has_imports:
+            evidence_base = 15
+        else:
+            evidence_base = 0
+
+        # ── Node count bonus (capped at 10) ───────────────────────────────────
+        node_bonus = min(len(evidence.node_ids) * 2, 10) if evidence.node_ids else 0
+
+        # ── Complexity bonus (threshold tightened to 1.0×) ───────────────────
         complexity_bonus = 0
         complexity_analysis = ""
-
-        # Evidence exists
-        if evidence.node_ids:
-            evidence_base = 30
-
-            # Bonus for number of nodes (max 20 points)
-            node_bonus = min(len(evidence.node_ids) * 5, 20)
-
-            # Complexity analysis
-            if evidence.complexity_scores:
-                avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
-                claimed_difficulty = claim_dict.get("difficulty", 3)
-
-                # Map difficulty to expected complexity ranges
-                complexity_thresholds = {1: 2, 2: 4, 3: 6, 4: 10, 5: 15}
-                expected_complexity = complexity_thresholds.get(claimed_difficulty, 5)
-
-                if avg_complexity >= expected_complexity * 0.7:
-                    complexity_bonus = 20
-                    complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) supports claimed difficulty level {claimed_difficulty}."
-                else:
-                    complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) is lower than expected for difficulty level {claimed_difficulty}."
+        if evidence.complexity_scores:
+            avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
+            claimed_difficulty = claim_dict.get("difficulty", 3)
+            complexity_thresholds = {1: 2, 2: 4, 3: 6, 4: 10, 5: 15}
+            expected_complexity = complexity_thresholds.get(claimed_difficulty, 5)
+            if avg_complexity >= expected_complexity:  # tightened from 0.7×
+                complexity_bonus = 20
+                complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) confirms claimed difficulty level {claimed_difficulty}/5."
+            else:
+                complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) is below expected ({expected_complexity}) for difficulty level {claimed_difficulty}/5."
 
         base_score = evidence_base + node_bonus + complexity_bonus
 
-        # Use LLM to analyze if evidence supports claim (up to 30 more points)
+        # ── LLM semantic analysis (0-40 pts) — fires on any node evidence ─────
         llm_score = 0
         reasoning = ""
 
-        if evidence.code_snippets:
+        if evidence.node_ids:
             try:
-                analysis_prompt = f"""Analyze if this code evidence supports the resume claim.
+                evidence_summary = "\n---\n".join(evidence.code_snippets[:12]) if evidence.code_snippets else \
+                    f"Evidence nodes found: {', '.join(evidence.node_ids[:10])}"
 
-CLAIM: {claim_dict.get('claim_text', '')}
-TOPIC: {claim_dict.get('topic', '')}
-DIFFICULTY CLAIMED: {claim_dict.get('difficulty', 3)}/5
+                analysis_prompt = f"""You are a senior engineering interviewer verifying a resume claim against actual code.
 
-CODE EVIDENCE FOUND:
-{chr(10).join(evidence.code_snippets[:10])}
+CALIBRATION:
+- Score 32-40: Strong evidence directly implementing the claimed technology at the stated difficulty
+- Score 15-31: Partial evidence — framework used but depth unclear, or only imports visible
+- Score 5-14: Weak evidence — keyword match in names only, no real implementation visible
+- Score 0-4: No semantic support — code is unrelated despite name overlap
 
-NODE TYPES: {', '.join(evidence.node_types)}
-FUNCTIONS FOUND: {len([t for t in evidence.node_types if t == 'Function'])}
-CLASSES FOUND: {len([t for t in evidence.node_types if t == 'Class'])}
+CLAIM TO VERIFY:
+  Topic: {claim_dict.get('topic', '')}
+  Claim: {claim_dict.get('claim_text', '')}
+  Stated Difficulty: {claim_dict.get('difficulty', 3)}/5
 
-Provide:
-1. A score 0-30 for how well the evidence supports the claim
-2. A brief explanation
+CODE EVIDENCE FROM REPOSITORY:
+{evidence_summary}
 
-Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
+STATISTICS: {has_functions and len([t for t in evidence.node_types if t=='Function'])} functions, \
+{has_classes and len([t for t in evidence.node_types if t=='Class'])} classes, \
+{has_imports and len([t for t in evidence.node_types if t=='Import'])} imports
+
+Return JSON only: {{"score": <0-40>, "reasoning": "<2-3 sentence explanation>"}}"""
 
                 response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
                 analysis = parse_json_response(response.content)
-                llm_score = min(max(analysis.get("score", 0), 0), 30)
+                llm_score = min(max(int(analysis.get("score", 0)), 0), 40)
                 reasoning = analysis.get("reasoning", "")
 
             except Exception as e:
@@ -585,13 +626,12 @@ Return JSON: {{"score": <0-30>, "reasoning": "<explanation>"}}"""
         else:
             reasoning = "No code evidence found in the repository for this claim."
 
-        # Calculate final score
+        # ── Final score (max 100) and status thresholds ───────────────────────
         final_score = min(base_score + llm_score, 100)
 
-        # Determine status
-        if final_score >= 70:
+        if final_score >= 65:
             status = "Verified"
-        elif final_score >= 40:
+        elif final_score >= 35:
             status = "Partially Verified"
         else:
             status = "Unverified"

@@ -466,6 +466,14 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
     const isUnverified = result.status === "Unverified";
     const isNotAssessed = result.status === "Not Code-Verifiable" || result.status === "Repo Not Available";
 
+    // Confidence tier based on evidence node count
+    const evidenceCount = result.evidence_node_ids.length;
+    const confidenceTier =
+        evidenceCount === 0 ? null :
+        evidenceCount <= 3  ? { label: "Low confidence",    color: "#f59e0b", bg: "rgba(245,158,11,0.08)" } :
+        evidenceCount <= 10 ? { label: "Medium confidence", color: "#6366f1", bg: "rgba(99,102,241,0.08)" } :
+                              { label: "High confidence",   color: "#10b981", bg: "rgba(16,185,129,0.08)" };
+
     return (
     <>
         <div
@@ -505,6 +513,16 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                             <div className="flex-1">
                                 <ScoreBar score={result.score} color={cfg.barColor} delay={index * 40} />
                             </div>
+                            {/* Confidence tier badge */}
+                            {confidenceTier && (
+                                <span
+                                    className="flex-shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap"
+                                    style={{ color: confidenceTier.color, background: confidenceTier.bg }}
+                                    title={`${evidenceCount} evidence nodes found`}
+                                >
+                                    {confidenceTier.label}
+                                </span>
+                            )}
                             {scoreDelta !== undefined && scoreDelta !== 0 && (
                                 <span
                                     className="flex-shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-md"
@@ -551,13 +569,14 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                             icon={<Code className="w-3 h-3" />}
                             title="AI Reasoning"
                         >
-                            {isUnverified && !hasEvidence ? (
+                            {/* AI Reasoning */}
+                            {isUnverified && !hasEvidence && !result.reasoning ? (
                                 <div className="flex items-start gap-2.5 p-3 rounded-xl bg-red-50 border border-red-100 text-red-700">
                                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
                                     <div className="space-y-1">
                                         <p className="text-xs font-semibold">No code evidence found</p>
                                         <p className="text-xs text-red-600/80 leading-relaxed">
-                                            This skill wasn't demonstrated in the selected repositories.
+                                            This skill wasn&apos;t demonstrated in the selected repositories.
                                             Try ingesting more repos or adding projects that show this skill.
                                         </p>
                                     </div>
@@ -704,7 +723,8 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                             )}
                         </Section>
 
-                        {/* ── Section 5: Claim Challenger (Feature 3) ── */}
+                        {/* ── Section 5: Claim Challenger — hidden when no meaningful evidence ── */}
+                        {(!isNotAssessed && (hasEvidence || result.score > 0)) && (
                         <Section
                             icon={<AlertTriangle className="w-3 h-3" />}
                             title="Devil's Advocate"
@@ -752,6 +772,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                 </div>
                             )}
                         </Section>
+                        )}
 
                     </div>
                 </div>

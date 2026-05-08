@@ -1890,16 +1890,21 @@ export default function DashboardPage() {
 
                                             {/* Results count */}
                                             {(() => {
-                                                const total = analysisResult.verification_results.length;
-                                                const filtered = analysisResult.verification_results.filter(r =>
-                                                    (skillFilter === "All" || r.status === skillFilter) &&
-                                                    r.topic.toLowerCase().includes(skillSearch.toLowerCase())
+                                                const NOT_ASSESSED = new Set(["Not Code-Verifiable", "Repo Not Available"]);
+                                                const filterFn = (r: VerificationResult) => {
+                                                    if (skillFilter === "Not Assessed") return NOT_ASSESSED.has(r.status);
+                                                    if (skillFilter === "All") return !NOT_ASSESSED.has(r.status);
+                                                    return r.status === skillFilter;
+                                                };
+                                                const shown = analysisResult.verification_results.filter(
+                                                    r => filterFn(r) && r.topic.toLowerCase().includes(skillSearch.toLowerCase())
                                                 ).length;
+                                                const assessed = analysisResult.verification_results.filter(r => !NOT_ASSESSED.has(r.status)).length;
                                                 return (
                                                     <p className="text-[10px] text-slate-400 font-medium">
-                                                        {filtered === total
-                                                            ? `${total} skill${total !== 1 ? "s" : ""}`
-                                                            : `Showing ${filtered} of ${total} skills`}
+                                                        {skillFilter === "All" && !skillSearch
+                                                            ? `${assessed} assessed skill${assessed !== 1 ? "s" : ""}`
+                                                            : `Showing ${shown} skill${shown !== 1 ? "s" : ""}`}
                                                     </p>
                                                 );
                                             })()}

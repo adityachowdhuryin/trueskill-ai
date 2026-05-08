@@ -222,10 +222,15 @@ export default function VerificationSummaryBar({
             <div className="w-px self-stretch bg-slate-200 mx-1 flex-shrink-0" />
 
             {/* Stat cards */}
-            <div className="flex-1 grid grid-cols-3 gap-2.5 min-w-0">
+            <div className="flex-1 grid gap-2.5 min-w-0" style={{ gridTemplateColumns: `repeat(${stats.length}, minmax(0, 1fr))` }}>
                 {stats.map((s) => {
                     const Icon = s.icon;
                     const isActive = activeFilter === s.filter;
+                    // % relative to assessed-only denominator (excludes not_assessed)
+                    const assessedTotal = summary.verified + summary.partially_verified + summary.unverified;
+                    const pct = (s.filter !== "Not Assessed" && assessedTotal > 0)
+                        ? Math.round((s.value / assessedTotal) * 100)
+                        : null;
                     return (
                         <button
                             key={s.label}
@@ -250,6 +255,14 @@ export default function VerificationSummaryBar({
                                 <AnimCount target={s.value} />
                             </span>
                             <span className="text-[10px] font-semibold text-slate-500 leading-none">{s.label}</span>
+                            {pct !== null && (
+                                <span
+                                    className="text-[9px] font-bold leading-none mt-0.5 px-1 py-0.5 rounded"
+                                    style={{ color: s.color, background: s.bg }}
+                                >
+                                    {pct}%
+                                </span>
+                            )}
                         </button>
                     );
                 })}
