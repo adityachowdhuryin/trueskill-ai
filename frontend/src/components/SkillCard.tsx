@@ -569,8 +569,8 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                             icon={<Code className="w-3 h-3" />}
                             title="AI Reasoning"
                         >
-                            {/* AI Reasoning */}
-                            {isUnverified && !hasEvidence && !result.reasoning ? (
+                            {/* No-evidence error state (Unverified + no graph nodes found) */}
+                            {isUnverified && !hasEvidence ? (
                                 <div className="flex items-start gap-2.5 p-3 rounded-xl bg-red-50 border border-red-100 text-red-700">
                                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
                                     <div className="space-y-1">
