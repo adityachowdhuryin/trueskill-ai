@@ -23,6 +23,7 @@ Thresholds:
     Repo Not Ingested  — matched_repo_id is empty
 """
 
+from typing import Optional
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -183,7 +184,7 @@ def match_project_to_repo(
     project: ProjectClaim,
     repo_profile_map: dict[str, dict],
     repo_url_map: dict[str, str],  # repo_id -> github_url (lower-cased)
-) -> str | None:
+) -> Optional[str]:
     """
     Find the best-matching ingested repo for a project.
 
