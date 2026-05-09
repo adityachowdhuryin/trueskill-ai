@@ -23,13 +23,13 @@ Thresholds:
     Repo Not Ingested  — matched_repo_id is empty
 """
 
-import re
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .db import query_graph
 from .llm import get_llm_model, parse_json_response
 from .agents import _expand_topic_keywords, build_repo_profile_map
+from .storage import get_repo_info
 
 
 # =============================================================================
@@ -483,36 +483,17 @@ async def analyze_projects(
     # Build repo profile map for tech-overlap matching
     repo_profile_map = build_repo_profile_map(repo_ids)
 
-    # Fetch repo names + URLs from Neo4j for display and URL matching
-    repo_meta: dict[str, dict] = {}  # repo_id -> {name, url}
+    # Fetch repo names + GitHub URLs from SQLite repo_registry (stored at ingest time)
+    repo_meta: dict[str, dict] = {}   # repo_id -> {name, url}
+    repo_url_map: dict[str, str] = {} # repo_id -> github_url (for URL matching)
     for rid in repo_ids:
-        try:
-            rows = query_graph(
-                "MATCH (f:File) WHERE f.repo_id = $rid "
-                "RETURN f.path AS path LIMIT 1",
-                {"rid": rid}
-            )
-            # Try to infer repo name from file paths
-            sample_path = rows[0].get("path", "") if rows else ""
-            repo_name = sample_path.split("/")[0] if "/" in sample_path else rid[:8]
-            repo_meta[rid] = {"name": repo_name, "url": ""}
-        except Exception:
+        info = get_repo_info(rid)  # reads from SQLite repo_registry table
+        if info:
+            repo_meta[rid]  = {"name": info["repo_name"], "url": info["github_url"]}
+            repo_url_map[rid] = info["github_url"]
+        else:
+            # Fallback: use first 8 chars of repo_id as display name
             repo_meta[rid] = {"name": rid[:8], "url": ""}
-
-    # Fetch GitHub URLs stored in Neo4j (stored as repo metadata if ingested via ingest.py)
-    repo_url_map: dict[str, str] = {}
-    for rid in repo_ids:
-        try:
-            rows = query_graph(
-                "MATCH (f:File) WHERE f.repo_id = $rid AND f.github_url IS NOT NULL "
-                "RETURN f.github_url AS url LIMIT 1",
-                {"rid": rid}
-            )
-            if rows and rows[0].get("url"):
-                repo_url_map[rid] = rows[0]["url"]
-                repo_meta[rid]["url"] = rows[0]["url"]
-        except Exception:
-            pass
 
     # Parse project claims from resume
     projects = await parse_project_claims(resume_text)
