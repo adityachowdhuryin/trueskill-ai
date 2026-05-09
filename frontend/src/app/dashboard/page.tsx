@@ -8,10 +8,13 @@ import {
     Github, Network, List, Sparkles, BookOpen, Clock, Target, ChevronRight,
     ShieldCheck, ShieldAlert, ShieldX, Star, Download, Save, Link2, Maximize2, FileSearch,
     Terminal, ArrowLeft, RotateCcw, Play, CheckSquare, Square, Share2, Copy, Check, ExternalLink,
-    Search, ChevronsUpDown, Filter, MessageSquare, Map, TableProperties, FileDown
+    Search, ChevronsUpDown, Filter, MessageSquare, Map, TableProperties, FileDown,
+    FolderGit2
 } from "lucide-react";
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
+import ProjectCard from "@/components/ProjectCard";
+import type { ProjectVerificationResult } from "@/components/ProjectCard";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { SkillCardSkeleton, GraphSkeleton } from "@/components/Skeletons";
 import SkillTimeline from "@/components/SkillTimeline";
@@ -182,7 +185,16 @@ interface ContextStatus {
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type ViewMode = "cards" | "graph";
-type ResultTab = "skills" | "radar" | "activity" | "graph";
+type ResultTab = "skills" | "radar" | "activity" | "graph" | "projects";
+
+interface ProjectSummary {
+    total: number;
+    verified: number;
+    partially_verified: number;
+    unverified: number;
+    repo_not_ingested: number;
+    average_score: number;
+}
 
 /** Ingestion step-progress loader */
 const INGEST_STEPS = ["Cloning Repository", "Parsing Code", "Building Graph", "Indexing"];
@@ -373,6 +385,12 @@ export default function DashboardPage() {
     const [skillSearch, setSkillSearch] = useState("");
     const [skillFilter, setSkillFilter] = useState<"All" | "Verified" | "Partially Verified" | "Unverified" | "Not Assessed">("All");
     const [expandAll, setExpandAll] = useState<boolean | undefined>(undefined);
+
+    // Project verification state
+    const [projectResults, setProjectResults] = useState<ProjectVerificationResult[] | null>(null);
+    const [projectSummary, setProjectSummary] = useState<ProjectSummary | null>(null);
+    const [isAnalyzingProjects, setIsAnalyzingProjects] = useState(false);
+    const [projectError, setProjectError] = useState<string | null>(null);
 
     // Feature 4 — score history for delta badges (persisted across sessions)
     const PREV_SCORES_KEY = "trueskill_prev_scores";
@@ -711,7 +729,41 @@ export default function DashboardPage() {
         }
     }, [selectedRepos, pdfFile, fetchGraphData]);
 
-    // Handle PDF upload and trigger extraction
+    // ── Project Verification ────────────────────────────────────────────────────
+    const handleVerifyProjects = useCallback(async () => {
+        if (!pdfFile) { setProjectError("Please upload your resume PDF first."); return; }
+        const ids = multiRepoIds.length > 0 ? multiRepoIds : (repoId ? [repoId] : []);
+        if (ids.length === 0) { setProjectError("No ingested repositories found. Please analyse your resume first."); return; }
+
+        setIsAnalyzingProjects(true);
+        setProjectError(null);
+        setProjectResults(null);
+        setProjectSummary(null);
+
+        try {
+            const formData = new FormData();
+            formData.append("pdf_file", pdfFile);
+            formData.append("repo_ids", JSON.stringify(ids));
+
+            const res = await fetch(`${API_BASE_URL}/api/analyze/projects`, {
+                method: "POST",
+                body: formData,
+            });
+            if (!res.ok) {
+                const e = await res.json().catch(() => ({}));
+                throw new Error(e.detail || `Project verification failed (${res.status})`);
+            }
+            const data = await res.json();
+            setProjectResults(data.projects ?? []);
+            setProjectSummary(data.summary ?? null);
+        } catch (err) {
+            setProjectError(err instanceof Error ? err.message : "Project verification failed");
+        } finally {
+            setIsAnalyzingProjects(false);
+        }
+    }, [pdfFile, multiRepoIds, repoId]);
+
+
     const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file && file.type === "application/pdf") {
@@ -1743,6 +1795,7 @@ export default function DashboardPage() {
                         <div className="flex border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
                             {([
                                 { id: "skills",   label: "Skills",     icon: <List className="w-3.5 h-3.5" /> },
+                                { id: "projects", label: "Projects",   icon: <FolderGit2 className="w-3.5 h-3.5" /> },
                                 { id: "radar",    label: "Radar",      icon: <Target className="w-3.5 h-3.5" /> },
                                 { id: "activity", label: "Activity",   icon: <Network className="w-3.5 h-3.5" /> },
                                 { id: "graph",    label: "3D Graph",   icon: <Network className="w-3.5 h-3.5" /> },
@@ -1763,6 +1816,11 @@ export default function DashboardPage() {
                                 >
                                     {tab.icon}
                                     {tab.label}
+                                    {tab.id === "projects" && projectResults && (
+                                        <span className="ml-0.5 px-1.5 py-0.5 text-[9px] font-bold bg-indigo-100 text-indigo-600 rounded-full">
+                                            {projectResults.length}
+                                        </span>
+                                    )}
                                 </button>
                             ))}
                         </div>
@@ -1975,7 +2033,154 @@ export default function DashboardPage() {
                             </div>
                         )}
 
-                        {/* ── Tab: Radar ── */}
+                        {/* ── Tab: Projects ── */}
+                        {resultTab === "projects" && (
+                            <div className="flex-1 overflow-y-auto flex flex-col">
+                                {/* ── No resume yet ── */}
+                                {!analysisResult && !isAnalyzingProjects && !projectResults && (
+                                    <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-8">
+                                        <div className="relative mb-4">
+                                            <div className="absolute inset-0 animate-ping-slow rounded-full bg-slate-200" />
+                                            <FolderGit2 className="w-12 h-12 relative z-10 text-slate-300" />
+                                        </div>
+                                        <p className="font-medium text-slate-400">No analysis yet</p>
+                                        <p className="text-sm mt-1 text-slate-400 text-center max-w-xs">
+                                            Run a Skills analysis first, then come back here to verify your project claims.
+                                        </p>
+                                    </div>
+                                )}
+
+                                {/* ── Ready to verify — show Verify Projects button ── */}
+                                {analysisResult && !isAnalyzingProjects && !projectResults && (
+                                    <div className="flex flex-col items-center justify-center flex-1 p-8 gap-5">
+                                        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg">
+                                            <FolderGit2 className="w-8 h-8 text-white" />
+                                        </div>
+                                        <div className="text-center max-w-sm">
+                                            <h3 className="font-semibold text-slate-800 text-base">Verify Your Projects</h3>
+                                            <p className="text-sm text-slate-500 mt-1.5 leading-relaxed">
+                                                TrueSkill will parse each project block from your resume, match it to
+                                                an ingested repo, and check tech stack coverage + architectural claims.
+                                            </p>
+                                        </div>
+                                        {projectError && (
+                                            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs max-w-sm w-full">
+                                                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                                                {projectError}
+                                            </div>
+                                        )}
+                                        <button
+                                            id="verify-projects-btn"
+                                            onClick={handleVerifyProjects}
+                                            className="flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 active:scale-100"
+                                            style={{
+                                                background: "linear-gradient(135deg, #6366f1, #7c3aed)",
+                                                boxShadow: "0 4px 16px rgba(99,102,241,0.35)",
+                                            }}
+                                        >
+                                            <Sparkles className="w-4 h-4" />
+                                            Verify Projects
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* ── Loading ── */}
+                                {isAnalyzingProjects && (
+                                    <div className="flex flex-col gap-4 p-6 flex-1">
+                                        <div className="flex items-center gap-3">
+                                            <div className="relative flex-shrink-0">
+                                                <div className="absolute inset-0 bg-violet-400/20 rounded-full blur-md animate-pulse" />
+                                                <div className="w-10 h-10 rounded-full bg-white border border-violet-100 shadow-sm flex items-center justify-center relative z-10">
+                                                    <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <h3 className="font-semibold text-slate-800 text-sm">Verifying Projects</h3>
+                                                <p className="text-xs text-slate-400">Parsing project blocks · Matching repos · Assessing claims…</p>
+                                            </div>
+                                        </div>
+                                        {[0,1,2].map(i => (
+                                            <div key={i} className="h-24 rounded-2xl bg-slate-100 animate-pulse" style={{ animationDelay: `${i * 150}ms` }} />
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* ── Results ── */}
+                                {projectResults && projectResults.length > 0 && (
+                                    <div className="flex-1 flex flex-col">
+                                        {/* Summary row */}
+                                        {projectSummary && (
+                                            <div className="px-4 pt-4 pb-2 border-b border-slate-100 bg-slate-50/70 flex flex-wrap gap-3 items-center">
+                                                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Projects</span>
+                                                <div className="flex items-center gap-1.5">
+                                                    <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
+                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.verified}</span> Verified</span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5">
+                                                    <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.partially_verified}</span> Partial</span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5">
+                                                    <XCircle className="w-3.5 h-3.5 text-red-400" />
+                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.unverified}</span> Unverified</span>
+                                                </div>
+                                                {projectSummary.repo_not_ingested > 0 && (
+                                                    <div className="flex items-center gap-1.5">
+                                                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                                        <span className="text-xs text-slate-500"><span className="font-semibold">{projectSummary.repo_not_ingested}</span> Not Ingested</span>
+                                                    </div>
+                                                )}
+                                                <div className="ml-auto flex items-center gap-1.5">
+                                                    <span className="text-[11px] font-medium text-slate-500">Avg score</span>
+                                                    <span
+                                                        className="text-xs font-bold px-2 py-0.5 rounded-full"
+                                                        style={{
+                                                            background: projectSummary.average_score >= 65 ? "#d1fae5" : projectSummary.average_score >= 35 ? "#fef3c7" : "#fee2e2",
+                                                            color:      projectSummary.average_score >= 65 ? "#065f46" : projectSummary.average_score >= 35 ? "#92400e" : "#991b1b",
+                                                        }}
+                                                    >
+                                                        {projectSummary.average_score.toFixed(0)}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    onClick={() => { setProjectResults(null); setProjectSummary(null); setProjectError(null); }}
+                                                    className="text-[11px] text-indigo-500 hover:underline"
+                                                >
+                                                    Re-verify
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {/* Project card list */}
+                                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                            {projectResults.map((proj, idx) => (
+                                                <ProjectCard key={proj.project_id} result={proj} index={idx} />
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ── No projects found in resume ── */}
+                                {projectResults && projectResults.length === 0 && (
+                                    <div className="flex-1 flex flex-col items-center justify-center text-slate-400 p-8 gap-3">
+                                        <FolderGit2 className="w-10 h-10 text-slate-300" />
+                                        <p className="font-medium text-slate-500">No projects detected</p>
+                                        <p className="text-sm text-center max-w-xs">
+                                            The AI couldn&apos;t find any project blocks in your resume.
+                                            Make sure projects are listed with a name, tech stack, and bullet points.
+                                        </p>
+                                        <button
+                                            onClick={() => { setProjectResults(null); setProjectError(null); }}
+                                            className="text-xs text-indigo-500 hover:underline mt-1"
+                                        >
+                                            Try again
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+
                         {resultTab === "radar" && (
                             <div className="flex-1 overflow-y-auto p-5">
                                 {analysisResult?.verification_results.length ? (

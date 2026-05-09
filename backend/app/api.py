@@ -577,6 +577,62 @@ async def analyze_multi_repos(
 
 
 # =============================================================================
+# Project Verification Endpoint
+# =============================================================================
+
+@router.post("/analyze/projects")
+async def analyze_projects_endpoint(
+    req: Request,
+    pdf_file: UploadFile = File(...),
+    repo_ids: str = Form(...),   # JSON-encoded list of repo_id strings
+):
+    """
+    POST /api/analyze/projects
+    Accepts { pdf_file (multipart), repo_ids (JSON string list) }.
+    Parses project blocks from the resume and verifies each against ingested repos.
+    Returns a plain JSON response (not SSE).
+    """
+    import json
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+    from .project_verifier import analyze_projects
+
+    check_rate_limit(req.client.host if req.client else "unknown", "analyze-projects")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        ids: list[str] = json.loads(repo_ids)
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("repo_ids must be a non-empty JSON array")
+    except Exception:
+        raise HTTPException(status_code=400, detail="repo_ids must be a valid JSON array of strings")
+
+    try:
+        pdf_content = await pdf_file.read()
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail=f"PDF too large (max {MAX_PDF_SIZE_BYTES // (1024*1024)} MB)")
+
+        pdf_reader = PdfReader(BytesIO(pdf_content))
+        resume_text = ""
+        for page in pdf_reader.pages:
+            resume_text += page.extract_text() + "\n"
+
+        if not resume_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        result = await analyze_projects(resume_text, ids)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project analysis failed: {str(e)}")
+
+
+
+# =============================================================================
 # Graph Data Endpoint — smart sampling, multi-repo, server-side edge filter
 # =============================================================================
 
