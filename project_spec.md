@@ -75,6 +75,7 @@ class ResumeClaim(BaseModel):
     topic: str          # e.g. "Python", "Machine Learning"
     claim_text: str     # Exact claim from resume
     difficulty: int     # 1-5 expertise level
+    claim_type: str     # "code_verifiable" | "not_code_verifiable"
 ```
 
 **Verification result (per claim):**
@@ -84,12 +85,13 @@ class VerificationResult(BaseModel):
     topic: str
     claim_text: str
     status: str         # "Verified" | "Partially Verified" | "Unverified"
-    score: int          # 0-100
+                        # | "Not Code-Verifiable" | "Repo Not Available"
+    score: int          # 0-100 (0 for Not Code-Verifiable / Repo Not Available)
     evidence_node_ids: list[str]
     reasoning: str
     complexity_analysis: str
     score_breakdown: dict   # {evidence_base: int, node_bonus: int, complexity: int, llm: int}
-                            # Sub-scores that sum to final score (max 30+20+20+30=100)
+                            # Sub-scores; max = 30+10+20+40 = 100
 ```
 
 **Function node (Neo4j + in-memory):**
@@ -231,18 +233,30 @@ START → Parser Node → Auditor Node → Grader Node → END
 ```
 
 1. **Parser (Node A):** Resume text → `List[ResumeClaim]` via Groq Llama 3.3 70B
-2. **Auditor (Node B):** Per claim → topic-synonym expansion → Cypher query → `GraphEvidence`
+   - Extracts 4-field claims: `topic`, `claim_text`, `difficulty`, `claim_type`
+   - Deduplicates by topic (keeps highest-difficulty claim per unique topic)
+   - Hard cap: 20 claims per analysis
+   - Claim IDs prefixed with first 8 chars of `repo_id` (e.g. `abc12345_0`)
+
+2. **Auditor (Node B) — 3-Layer Scoped Verification:**
+   - **Layer 1 — Claim Classification:** `claim_type == "not_code_verifiable"` (Agile, Scrum, soft skills, Git workflow, etc.) are flagged immediately and bypass graph search
+   - **Layer 2 — Repo Routing:** `build_repo_profile_map()` profiles each ingested repo (languages, imports, function names). `route_claim_to_repos()` routes each claim to the most relevant subset. Falls back to all repos if no match found.
+   - **Layer 3 — Graph Search:** Cypher query searches `n.name`, `n.module_name`, `n.source_code` (first 1,500 chars), and `n.file_path` for keyword matches. Returns `source_preview` (500-char body) per Function/Class node.
+
 3. **Grader (Node C):** Evidence + LLM analysis → `VerificationResult` (0–100 score)
+   - Not Code-Verifiable claims → status `"Not Code-Verifiable"`, score 0, excluded from stats
+   - No evidence after routing fallback → status `"Repo Not Available"`, score 0
 
-**Scoring formula:**
-- +30 base if evidence nodes exist
-- +5 per node (max +20)
-- +20 if code complexity matches claimed difficulty level
-- +30 from LLM reasoning quality assessment
+**Scoring formula (max 100):**
+- **evidence_base:** +0 (no nodes) / +15 (imports only) / +30 (function or class nodes) — graduated by node type quality
+- **node_bonus:** +2 per node, capped at +10
+- **complexity_bonus:** +20 if avg cyclomatic complexity ≥ expected threshold (1.0× of difficulty-mapped value)
+- **llm_score:** 0–40 from LLM semantic analysis (calibrated rubric: 32–40 strong / 15–31 partial / 5–14 weak / 0–4 no support)
+- **Thresholds:** Verified ≥ 65 · Partially Verified ≥ 35 · Unverified < 35
 
-**Topic synonym expansion** (`TOPIC_SYNONYMS` map) covers 15+ tech domains for broader graph matching.
+**Topic synonym expansion** (`TOPIC_SYNONYMS` map) covers 22+ tech domains for broader graph matching, including modern AI/LLM terms: `llm`, `langchain`, `rag`, `vector database`, `transformer`, `reinforcement learning`, `generative ai`.
 
-**`claim_id` uniqueness:** Each claim is assigned an ID prefixed with the first 6 characters of `repo_id` (e.g. `abc123_0`). This prevents collisions when results from multiple repo analysis runs are merged by topic.
+**Confidence tier** displayed per card based on `evidence_node_ids.length`: Low (1–3 nodes, amber) · Medium (4–10, indigo) · High (11+, emerald).
 
 ### Workflow 2: The ATS Pipeline
 Standalone async call (no graph dependency):
@@ -294,8 +308,9 @@ Four features added to the Skills tab to increase transparency and depth:
 **7a. Verification Summary Dashboard** (`VerificationSummaryBar.tsx`)
 - Renders above the filter toolbar
 - **Animated SVG donut chart** — each segment is an independent `<circle>` rotated by accumulated start angle; colour-matched glow via `drop-shadow` filter
-- **3 stat cards** — Verified / Partial / Unverified with animated counters; click-to-filter wired to `skillFilter` state
-- **Avg score** displayed in donut centre, colour-coded by threshold (green ≥70 / amber ≥40 / red <40)
+- **4 stat cards** — Verified / Partial / Unverified / Not Assessed with animated counters; click-to-filter wired to `skillFilter` state. Each card shows a **% badge** relative to the assessed-only denominator (Verified+Partial+Unverified).
+- **Avg score** displayed in donut centre, colour-coded by threshold (green ≥65 / amber ≥35 / red <35); denominator is assessed claims only
+- Grid dynamically expands to accommodate 4 cards when not-assessed claims are present
 
 **7b. Evidence Strength Meter**
 - `agents.py` grader now captures `evidence_base`, `node_bonus`, `complexity_bonus`, `llm_score` as separate variables and returns them in `score_breakdown`
@@ -428,18 +443,19 @@ POST   /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring
 
 | Requirement | Status | Implementation |
 |---|---|---|
-| **Cyclomatic Complexity** | ✅ Implemented | `ingest.py` — full AST traversal counts decision points (if/for/while/except/and/or/ternary). Grader scores against claimed difficulty level. |
+| **Cyclomatic Complexity** | ✅ Implemented | `ingest.py` — full AST traversal counts decision points (if/for/while/except/and/or/ternary). Grader scores against claimed difficulty level with tightened 1.0× threshold. |
 | **Stylometry** | ✅ Implemented | `forensics.py` — Shannon entropy of snake_case/camelCase/PascalCase distribution, git history bulk-commit detection, authenticity score 0–100. |
-| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` + `score_breakdown`; SkillCard shows 👁 View Code + 📍 Show in Graph per evidence row + Evidence Strength Meter (4-bar sub-score breakdown); GraphVisualizer NodeInfoPanel exposes Code Drill-Down + Function Explain for Function nodes; AI Graph Summary explains overall architecture. |
+| **Explainability** | ✅ Implemented | Every `VerificationResult` returns `evidence_node_ids` + `score_breakdown`; SkillCard shows 👁 View Code + 📍 Show in Graph per evidence row + Evidence Strength Meter (4-bar sub-score breakdown) + **confidence tier badge** (Low/Medium/High based on evidence node count); GraphVisualizer NodeInfoPanel exposes Code Drill-Down + Function Explain for Function nodes; AI Graph Summary explains overall architecture. |
 | **Multi-language support** | ✅ Implemented | tree-sitter parsers for Python, JavaScript, TypeScript, Go, Java, Rust. |
 | **Streaming results** | ✅ Implemented | `/api/analyze` returns SSE with live per-node progress then final JSON. |
 | **Candidate comparison** | ✅ Implemented | SQLite persistence + `/compare` frontend page. |
 | **ATS evaluation** | ✅ Implemented | `ats.py` — weighted keyword/content/format scoring + downloadable report. |
 | **AI Architectural Insights** | ✅ Implemented | `graph_explain.py` — 8-section structured JSON via Groq; collapsible panel in 3D graph view. |
 | **Career Coaching Suite** | ✅ Implemented | `coach.py` — JD Skills Gap Heatmap, week-by-week learning roadmap, conversational AI coach chat, and self-contained HTML export. |
-| **Adversarial Verification** | ✅ Implemented | `challenge.py` + `POST /api/challenge-claim` — Devil's Advocate LLM argues the opposite verdict; stress-tests weak evidence to demonstrate intellectual honesty. |
-| **Score Transparency** | ✅ Implemented | `VerificationResult.score_breakdown` exposes 4 sub-scores (evidence_base/node_bonus/complexity/llm) returned by grader and visualised as animated bars in each SkillCard. |
+| **Adversarial Verification** | ✅ Implemented | `challenge.py` + `POST /api/challenge-claim` — Devil's Advocate LLM argues the opposite verdict; hidden for 0-score/no-evidence cards to avoid unhelpful output. |
+| **Score Transparency** | ✅ Implemented | `VerificationResult.score_breakdown` exposes 4 sub-scores (evidence_base/node_bonus/complexity/llm) returned by grader and visualised as animated bars in each SkillCard. % badges on summary stat cards show honest coverage. |
 | **Progress Tracking** | ✅ Implemented | Score delta badges (↑/↓) on re-run; history persisted in `localStorage`; pairs with Career Coach roadmap to show measurable improvement. |
+| **Honest Verification Scope** | ✅ Implemented | 3-layer scoped pipeline: (1) claim classification tags soft-skills as `not_code_verifiable`, (2) repo routing matches claims to relevant repos, (3) `Repo Not Available` status when no ingested repo covers the technology. Not-assessed claims excluded from score stats. |
 
 ---
 

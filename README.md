@@ -218,9 +218,18 @@ npm run dev
 
 ### Verification Pipeline
 The core LangGraph workflow runs three sequential agents:
-1. **Parser** — Extracts structured technical claims from resume PDF
-2. **Auditor** — Queries the Neo4j knowledge graph using topic-synonym expansion
-3. **Grader** — Scores each claim 0–100 using evidence count, cyclomatic complexity alignment, and LLM reasoning
+1. **Parser** — Extracts structured technical claims from resume PDF. Classifies each claim as `code_verifiable` or `not_code_verifiable` (e.g. Agile, Scrum, soft skills). Deduplicates by topic (keeps highest-difficulty claim per unique topic). Hard cap at 20 claims.
+2. **Auditor** — 3-layer scoped verification:
+   - **Layer 1:** Skips `not_code_verifiable` claims immediately (no graph search needed)
+   - **Layer 2:** Routes each claim to the most relevant ingested repos via language/import profiling; falls back to all repos if no match
+   - **Layer 3:** Cypher query searches `n.name`, `n.source_code` (first 1,500 chars), and `n.file_path` for keyword matches — not just node names
+3. **Grader** — Scores each claim 0–100 using a calibrated rubric:
+   - `evidence_base`: 0 (none) / +15 (imports only) / +30 (function or class nodes)
+   - `node_bonus`: +2 per node, capped at +10
+   - `complexity_bonus`: +20 if avg cyclomatic complexity meets difficulty threshold (1.0× multiplier)
+   - `llm_score`: 0–40 from LLM semantic analysis with 4-tier calibration rubric
+   - **Verified** ≥ 65 · **Partially Verified** ≥ 35 · **Unverified** < 35
+   - `Not Code-Verifiable` and `Repo Not Available` claims score 0 and are excluded from stats
 
 Results stream back to the frontend via **Server-Sent Events (SSE)**.
 
@@ -284,24 +293,32 @@ The dashboard Skills tab now includes 4 high-impact enhancements:
 
 #### Verification Summary Dashboard (`VerificationSummaryBar.tsx`)
 A premium analytics banner pinned above the filter toolbar:
-- **Animated donut chart** — multi-segment SVG with colour-matched glow (emerald/amber/rose-red per segment) and avg score in the centre
-- **3 stat cards** — Verified / Partial / Unverified counts; clicking any card instantly filters the skill list; clicking again resets
-- **Context-aware hint** — shows "Click a card to filter" when no filter is active; shows "Clear filter" button when a filter is applied
+- **Animated donut chart** — multi-segment SVG with colour-matched glow (emerald/amber/rose-red per segment) and avg score in the centre (assessed claims only)
+- **4 stat cards** — Verified / Partial / Unverified / Not Assessed counts; clicking any card instantly filters the skill list. Each card shows a **% badge** relative to the assessed-only denominator
+- **Context-aware filter count** — shows "N assessed skills" (excluding not-assessed) when no filter active; shows "Showing N skills" when filtered
 
 #### Evidence Strength Meter
 Inside each expanded `SkillCard`, a **4-bar transparent score breakdown panel** shows the sub-scores that make up the final 0–100 score:
 | Bar | Max | Colour |
 |-----|-----|--------|
-| Evidence Presence | 30 | Indigo |
-| Node Bonus | 20 | Indigo |
+| Evidence Presence (graduated by type) | 30 | Indigo |
+| Node Bonus | 10 | Indigo |
 | Complexity Match | 20 | Amber |
-| AI Reasoning Quality | 30 | Violet |
+| AI Reasoning Quality | 40 | Violet |
 The grader (`agents.py`) now returns a `score_breakdown` dict alongside every `VerificationResult`.
+
+A **confidence tier badge** is displayed next to the score bar based on evidence node count:
+| Count | Tier | Colour |
+|-------|------|--------|
+| 1–3 nodes | Low confidence | Amber |
+| 4–10 nodes | Medium confidence | Indigo |
+| 11+ nodes | High confidence | Emerald |
 
 #### AI Claim Challenger / Devil's Advocate
 - A **"🔴 Challenge This Verdict"** button at the bottom of each expanded SkillCard
 - Calls `POST /api/challenge-claim` → `challenge.py` sends an adversarial system prompt to Groq Llama 3.3 70B, instructing it to argue the opposite verdict
 - Returns a ≤180-word sceptical counter-argument rendered in a red-tinted callout box
+- **Hidden for 0-score/no-evidence cards** (and Not Assessed cards) to avoid unhelpful or tautological output
 - Result is cached per card; clicking again toggles visibility
 
 #### Score Delta / Re-run History
