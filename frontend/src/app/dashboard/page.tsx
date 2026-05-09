@@ -14,7 +14,9 @@ import {
 import AnimatedCounter from "@/components/AnimatedCounter";
 import SkillCard from "@/components/SkillCard";
 import ProjectCard from "@/components/ProjectCard";
-import type { ProjectVerificationResult } from "@/components/ProjectCard";
+import type { ProjectVerificationResult, IngestedRepo } from "@/components/ProjectCard";
+import ProjectSummaryBar from "@/components/ProjectSummaryBar";
+import type { ProjectSummaryData } from "@/components/ProjectSummaryBar";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { SkillCardSkeleton, GraphSkeleton } from "@/components/Skeletons";
 import SkillTimeline from "@/components/SkillTimeline";
@@ -43,6 +45,23 @@ const CoachChat        = dynamic(() => import("@/components/CoachChat"),        
 
 // Dynamically import Verification Results enhancements
 const VerificationSummaryBar = dynamic(() => import("@/components/VerificationSummaryBar"), { ssr: false });
+
+// ─── Module-level constants (no re-creation on each render) ───────────────────
+const VERIFY_STEPS = [
+    "Parsing project blocks from resume…",
+    "Matching projects to ingested repos…",
+    "Running tech stack coverage checks…",
+    "Assessing architectural claims…",
+    "Computing final scores…",
+];
+
+interface IngestedRepoRecord {
+    repo_id: string;
+    repo_name: string;
+    github_url: string;
+    owner: string;
+    ingested_at: string;
+}
 
 // ATSReport type (mirrors backend ATSReport Pydantic model)
 interface ATSReport {
@@ -388,9 +407,16 @@ export default function DashboardPage() {
 
     // Project verification state
     const [projectResults, setProjectResults] = useState<ProjectVerificationResult[] | null>(null);
-    const [projectSummary, setProjectSummary] = useState<ProjectSummary | null>(null);
+    const [projectSummary, setProjectSummary] = useState<ProjectSummaryData | null>(null);
     const [isAnalyzingProjects, setIsAnalyzingProjects] = useState(false);
     const [projectError, setProjectError] = useState<string | null>(null);
+    const [projectSearch, setProjectSearch] = useState("");
+    const [projectFilter, setProjectFilter] = useState<"All"|"Verified"|"Partially Verified"|"Unverified"|"Repo Not Ingested">("All");
+    const [projectExpandAll, setProjectExpandAll] = useState<boolean | undefined>(undefined);
+    const [reVerifyingProject, setReVerifyingProject] = useState<string | null>(null);
+    const [verifyStep, setVerifyStep] = useState(0);
+    // Ingested repo registry — fetched once from backend, used to label override dropdown
+    const [ingestedRepoMap, setIngestedRepoMap] = useState<IngestedRepoRecord[]>([]);
 
     // Feature 4 — score history for delta badges (persisted across sessions)
     const PREV_SCORES_KEY = "trueskill_prev_scores";
@@ -585,6 +611,22 @@ export default function DashboardPage() {
         });
     }, []);
 
+    // ── Fetch ingested repo registry on mount (for override dropdown) ─────────
+    useEffect(() => {
+        const fetchIngestedRepos = async () => {
+            try {
+                const res = await fetch(`${API_BASE_URL}/api/repos/ingested`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setIngestedRepoMap(data.repos ?? []);
+                }
+            } catch {
+                // Non-critical — override dropdown will fall back to UUID strings
+            }
+        };
+        fetchIngestedRepos();
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
     // ── Session Storage: restore on mount ──────────────────────────────────────
     const SESSION_KEY = "trueskill_dashboard_v2";
 
@@ -609,6 +651,8 @@ export default function DashboardPage() {
             if (d.heatmap)        setHeatmap(d.heatmap);
             if (d.roadmap)        setRoadmap(d.roadmap);
             if (d.chatMessages?.length) setChatMessages(d.chatMessages);
+            if (d.projectResults?.length) setProjectResults(d.projectResults);
+            if (d.projectSummary) setProjectSummary(d.projectSummary);
         } catch { /* silently ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -623,13 +667,14 @@ export default function DashboardPage() {
                 jobDescription, atsReport,
                 pdfFileName: pdfFile?.name ?? pdfFileName,
                 viewMode, heatmap, roadmap, chatMessages,
+                projectResults, projectSummary,
             }));
         } catch { /* quota exceeded or serialization error — ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [repoUrl, repoId, githubUsername, extractedRepos, selectedRepos,
         multiRepoIds, analysisResult, bridgeProjects, gapSummary,
         jobDescription, atsReport, pdfFile, pdfFileName, viewMode,
-        heatmap, roadmap, chatMessages]);
+        heatmap, roadmap, chatMessages, projectResults, projectSummary]);
 
     // ── Reset all state & session ──────────────────────────────────────────────
     const handleResetAll = useCallback(() => {
@@ -644,6 +689,8 @@ export default function DashboardPage() {
         setAtsError(null); setAgentMessages([]); setAgentStatus(null);
         setIsManualMode(false);
         setHeatmap(null); setRoadmap(null); setChatMessages([]);
+        setProjectResults(null); setProjectSummary(null); setProjectError(null);
+        setProjectSearch(""); setProjectFilter("All");
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Multi-repo analyze flow ────────────────────────────────────────────────
@@ -739,6 +786,10 @@ export default function DashboardPage() {
         setProjectError(null);
         setProjectResults(null);
         setProjectSummary(null);
+        setVerifyStep(0);
+
+        // Cycle through step text while running
+        const stepTimer = setInterval(() => setVerifyStep(s => (s + 1) % VERIFY_STEPS.length), 2500);
 
         try {
             const formData = new FormData();
@@ -759,9 +810,41 @@ export default function DashboardPage() {
         } catch (err) {
             setProjectError(err instanceof Error ? err.message : "Project verification failed");
         } finally {
+            clearInterval(stepTimer);
             setIsAnalyzingProjects(false);
         }
     }, [pdfFile, multiRepoIds, repoId]);
+
+    // ── Single-project re-verify (manual repo override) ─────────────────────────
+    const handleSingleReVerify = useCallback(async (projectId: string, repoId: string) => {
+        if (!projectResults) return;
+        const project = projectResults.find(p => p.project_id === projectId);
+        if (!project) return;
+        setReVerifyingProject(projectId);
+        try {
+            const projectClaim = {
+                project_id: project.project_id,
+                name: project.name,
+                tech_stack: project.tech_stack,
+                github_url: "",
+                bullet_claims: project.bullet_verdicts.map((v: { claim: string }) => v.claim),
+            };
+            const res = await fetch(`${API_BASE_URL}/api/analyze/projects/single`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ project_claim: projectClaim, repo_id: repoId }),
+            });
+            if (!res.ok) throw new Error("Re-verification failed");
+            const updated = await res.json();
+            setProjectResults(prev => prev?.map(p => p.project_id === projectId ? updated : p) ?? [updated]);
+        } catch (err) {
+            console.error("Re-verify error:", err);
+        } finally {
+            setReVerifyingProject(null);
+        }
+    }, [projectResults]);
+
+
 
 
     const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2036,7 +2119,8 @@ export default function DashboardPage() {
                         {/* ── Tab: Projects ── */}
                         {resultTab === "projects" && (
                             <div className="flex-1 overflow-y-auto flex flex-col">
-                                {/* ── No resume yet ── */}
+
+                                {/* No analysis yet */}
                                 {!analysisResult && !isAnalyzingProjects && !projectResults && (
                                     <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-8">
                                         <div className="relative mb-4">
@@ -2050,7 +2134,7 @@ export default function DashboardPage() {
                                     </div>
                                 )}
 
-                                {/* ── Ready to verify — show Verify Projects button ── */}
+                                {/* Ready to verify */}
                                 {analysisResult && !isAnalyzingProjects && !projectResults && (
                                     <div className="flex flex-col items-center justify-center flex-1 p-8 gap-5">
                                         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg">
@@ -2059,8 +2143,7 @@ export default function DashboardPage() {
                                         <div className="text-center max-w-sm">
                                             <h3 className="font-semibold text-slate-800 text-base">Verify Your Projects</h3>
                                             <p className="text-sm text-slate-500 mt-1.5 leading-relaxed">
-                                                TrueSkill will parse each project block from your resume, match it to
-                                                an ingested repo, and check tech stack coverage + architectural claims.
+                                                TrueSkill will parse each project block from your resume, match it to an ingested repo, and check tech stack coverage + architectural claims.
                                             </p>
                                         </div>
                                         {projectError && (
@@ -2069,22 +2152,16 @@ export default function DashboardPage() {
                                                 {projectError}
                                             </div>
                                         )}
-                                        <button
-                                            id="verify-projects-btn"
-                                            onClick={handleVerifyProjects}
+                                        <button id="verify-projects-btn" onClick={handleVerifyProjects}
                                             className="flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 active:scale-100"
-                                            style={{
-                                                background: "linear-gradient(135deg, #6366f1, #7c3aed)",
-                                                boxShadow: "0 4px 16px rgba(99,102,241,0.35)",
-                                            }}
-                                        >
+                                            style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 4px 16px rgba(99,102,241,0.35)" }}>
                                             <Sparkles className="w-4 h-4" />
                                             Verify Projects
                                         </button>
                                     </div>
                                 )}
 
-                                {/* ── Loading ── */}
+                                {/* Loading with animated step text */}
                                 {isAnalyzingProjects && (
                                     <div className="flex flex-col gap-4 p-6 flex-1">
                                         <div className="flex items-center gap-3">
@@ -2096,7 +2173,7 @@ export default function DashboardPage() {
                                             </div>
                                             <div>
                                                 <h3 className="font-semibold text-slate-800 text-sm">Verifying Projects</h3>
-                                                <p className="text-xs text-slate-400">Parsing project blocks · Matching repos · Assessing claims…</p>
+                                                <p className="text-xs text-slate-400 transition-all duration-500">{VERIFY_STEPS[verifyStep]}</p>
                                             </div>
                                         </div>
                                         {[0,1,2].map(i => (
@@ -2105,76 +2182,105 @@ export default function DashboardPage() {
                                     </div>
                                 )}
 
-                                {/* ── Results ── */}
-                                {projectResults && projectResults.length > 0 && (
-                                    <div className="flex-1 flex flex-col">
-                                        {/* Summary row */}
-                                        {projectSummary && (
-                                            <div className="px-4 pt-4 pb-2 border-b border-slate-100 bg-slate-50/70 flex flex-wrap gap-3 items-center">
-                                                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Projects</span>
-                                                <div className="flex items-center gap-1.5">
-                                                    <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
-                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.verified}</span> Verified</span>
+                                {/* Results */}
+                                {projectResults && projectResults.length > 0 && (() => {
+                                    // Build ingestedRepos list from registry:
+                                    // - If multiRepoIds exist, filter registry to only those IDs
+                                    // - Otherwise fall back to the full registry
+                                    const relevantIds = new Set(multiRepoIds.length > 0 ? multiRepoIds : [repoId].filter(Boolean));
+                                    const ingestedRepos: IngestedRepo[] = (
+                                        ingestedRepoMap.length > 0
+                                            ? ingestedRepoMap.filter(r => relevantIds.size === 0 || relevantIds.has(r.repo_id))
+                                            : multiRepoIds.map(rid => ({ repo_id: rid, repo_name: rid.slice(0, 12), github_url: "", owner: "", ingested_at: "" }))
+                                    ).map(r => ({ id: r.repo_id, name: r.repo_name }));
+                                    const search   = projectSearch.toLowerCase();
+                                    const filtered = projectResults.filter(p => {
+                                        const matchesSearch = !search || p.name.toLowerCase().includes(search) || p.tech_stack.some(t => t.toLowerCase().includes(search));
+                                        const matchesFilter = projectFilter === "All" || p.status === projectFilter;
+                                        return matchesSearch && matchesFilter;
+                                    });
+                                    return (
+                                        <div className="flex-1 flex flex-col min-h-0">
+                                            {/* ProjectSummaryBar */}
+                                            {projectSummary && (
+                                                <ProjectSummaryBar
+                                                    summary={projectSummary}
+                                                    onFilterChange={f => setProjectFilter(f as typeof projectFilter)}
+                                                    activeFilter={projectFilter}
+                                                />
+                                            )}
+
+                                            {/* Toolbar */}
+                                            <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-slate-100 bg-slate-50/80 space-y-2">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <div className="relative flex-1 min-w-[140px]">
+                                                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                                                        <input type="text" placeholder="Search projects or tech…"
+                                                            value={projectSearch} onChange={e => setProjectSearch(e.target.value)}
+                                                            className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 placeholder:text-slate-400" />
+                                                    </div>
+                                                    <div className="relative">
+                                                        <Filter className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                                                        <select value={projectFilter} onChange={e => setProjectFilter(e.target.value as typeof projectFilter)}
+                                                            className="pl-7 pr-6 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 text-slate-600 appearance-none cursor-pointer">
+                                                            <option value="All">All</option>
+                                                            <option value="Verified">✅ Verified</option>
+                                                            <option value="Partially Verified">⚠️ Partial</option>
+                                                            <option value="Unverified">❌ Unverified</option>
+                                                            <option value="Repo Not Ingested">🕐 Not Ingested</option>
+                                                        </select>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => setProjectExpandAll(v => v === true ? false : true)}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 hover:bg-indigo-50/50 transition-colors">
+                                                        <ChevronsUpDown className="w-3 h-3" />
+                                                        {projectExpandAll ? "Collapse All" : "Expand All"}
+                                                    </button>
+                                                    <button onClick={() => { setProjectResults(null); setProjectSummary(null); setProjectError(null); setProjectFilter("All"); setProjectSearch(""); }}
+                                                        className="text-[11px] text-indigo-500 hover:underline px-1">
+                                                        Re-verify
+                                                    </button>
                                                 </div>
-                                                <div className="flex items-center gap-1.5">
-                                                    <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
-                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.partially_verified}</span> Partial</span>
-                                                </div>
-                                                <div className="flex items-center gap-1.5">
-                                                    <XCircle className="w-3.5 h-3.5 text-red-400" />
-                                                    <span className="text-xs text-slate-600"><span className="font-semibold">{projectSummary.unverified}</span> Unverified</span>
-                                                </div>
-                                                {projectSummary.repo_not_ingested > 0 && (
-                                                    <div className="flex items-center gap-1.5">
-                                                        <Clock className="w-3.5 h-3.5 text-slate-400" />
-                                                        <span className="text-xs text-slate-500"><span className="font-semibold">{projectSummary.repo_not_ingested}</span> Not Ingested</span>
+                                                <p className="text-[11px] text-slate-400">
+                                                    {filtered.length} of {projectResults.length} project{projectResults.length !== 1 ? "s" : ""} shown
+                                                </p>
+                                            </div>
+
+                                            {/* Card list */}
+                                            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                                {filtered.length > 0 ? filtered.map((proj, idx) => (
+                                                    <ProjectCard
+                                                        key={proj.project_id}
+                                                        result={proj}
+                                                        index={idx}
+                                                        forceExpanded={projectExpandAll}
+                                                        onShowInGraph={ids => { setGraphHighlightIds(ids); setResultTab("graph"); }}
+                                                        ingestedRepos={ingestedRepos}
+                                                        onReVerify={handleSingleReVerify}
+                                                        isReVerifying={reVerifyingProject === proj.project_id}
+                                                        repoIds={multiRepoIds}
+                                                    />
+                                                )) : (
+                                                    <div className="flex flex-col items-center justify-center py-12 gap-3 text-slate-400">
+                                                        <Search className="w-8 h-8 text-slate-300" />
+                                                        <p className="text-sm font-medium">No projects match your filter</p>
+                                                        <button onClick={() => { setProjectSearch(""); setProjectFilter("All"); }} className="text-xs text-indigo-500 hover:underline">Clear filters</button>
                                                     </div>
                                                 )}
-                                                <div className="ml-auto flex items-center gap-1.5">
-                                                    <span className="text-[11px] font-medium text-slate-500">Avg score</span>
-                                                    <span
-                                                        className="text-xs font-bold px-2 py-0.5 rounded-full"
-                                                        style={{
-                                                            background: projectSummary.average_score >= 65 ? "#d1fae5" : projectSummary.average_score >= 35 ? "#fef3c7" : "#fee2e2",
-                                                            color:      projectSummary.average_score >= 65 ? "#065f46" : projectSummary.average_score >= 35 ? "#92400e" : "#991b1b",
-                                                        }}
-                                                    >
-                                                        {projectSummary.average_score.toFixed(0)}
-                                                    </span>
-                                                </div>
-                                                <button
-                                                    onClick={() => { setProjectResults(null); setProjectSummary(null); setProjectError(null); }}
-                                                    className="text-[11px] text-indigo-500 hover:underline"
-                                                >
-                                                    Re-verify
-                                                </button>
                                             </div>
-                                        )}
-
-                                        {/* Project card list */}
-                                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                                            {projectResults.map((proj, idx) => (
-                                                <ProjectCard key={proj.project_id} result={proj} index={idx} />
-                                            ))}
                                         </div>
-                                    </div>
-                                )}
+                                    );
+                                })()}
 
-                                {/* ── No projects found in resume ── */}
+                                {/* No projects found in resume */}
                                 {projectResults && projectResults.length === 0 && (
                                     <div className="flex-1 flex flex-col items-center justify-center text-slate-400 p-8 gap-3">
                                         <FolderGit2 className="w-10 h-10 text-slate-300" />
                                         <p className="font-medium text-slate-500">No projects detected</p>
                                         <p className="text-sm text-center max-w-xs">
-                                            The AI couldn&apos;t find any project blocks in your resume.
-                                            Make sure projects are listed with a name, tech stack, and bullet points.
+                                            The AI couldn&apos;t find any project blocks in your resume. Make sure projects are listed with a name, tech stack, and bullet points.
                                         </p>
-                                        <button
-                                            onClick={() => { setProjectResults(null); setProjectError(null); }}
-                                            className="text-xs text-indigo-500 hover:underline mt-1"
-                                        >
-                                            Try again
-                                        </button>
+                                        <button onClick={() => { setProjectResults(null); setProjectError(null); }} className="text-xs text-indigo-500 hover:underline mt-1">Try again</button>
                                     </div>
                                 )}
                             </div>

@@ -631,6 +631,260 @@ async def analyze_projects_endpoint(
         raise HTTPException(status_code=500, detail=f"Project analysis failed: {str(e)}")
 
 
+# =============================================================================
+# Single-Project Re-Verification (manual repo override)
+# =============================================================================
+
+class SingleProjectRequest(BaseModel):
+    project_claim: dict   # serialised ProjectClaim
+    repo_id: str
+
+
+@router.post("/analyze/projects/single")
+async def analyze_single_project_endpoint(
+    request: SingleProjectRequest,
+    req: Request,
+):
+    """
+    POST /api/analyze/projects/single
+    Re-verify one project against a specific (user-chosen) repo.
+    Body: { project_claim: {...}, repo_id: "abc12345" }
+    Returns: ProjectVerificationResult as JSON.
+    """
+    from .project_verifier import verify_single_project
+    check_rate_limit(req.client.host if req.client else "unknown", "analyze-projects-single")
+
+    if not request.repo_id or not request.project_claim:
+        raise HTTPException(status_code=400, detail="project_claim and repo_id are required")
+
+    try:
+        result = await verify_single_project(request.project_claim, request.repo_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Single project verification failed: {str(e)}")
+
+
+# =============================================================================
+# Ingested Repos Registry — for frontend override dropdown
+# =============================================================================
+
+@router.get("/repos/ingested")
+async def list_ingested_repos():
+    """
+    GET /api/repos/ingested
+    Returns all repos currently registered in the repo_registry table.
+    Used by the frontend to populate the manual repo override dropdown with
+    human-readable names instead of raw UUIDs.
+    Response: { repos: [{repo_id, repo_name, github_url, owner, ingested_at}] }
+    """
+    from .storage import get_all_repos
+    try:
+        repos = get_all_repos()
+        return {"repos": repos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list ingested repos: {str(e)}")
+
+
+# =============================================================================
+# Project Feature Endpoints (Interview, Challenge, Arch Snapshot, Bullet Explain)
+# =============================================================================
+
+class ProjectInterviewRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    bullet_claims: list[str] = []
+    all_evidence_node_ids: list[str] = []
+    reasoning: str = ""
+    matched_repo_name: str = ""
+    num_questions: int = 6
+
+
+@router.post("/projects/interview-questions")
+async def project_interview_questions(body: ProjectInterviewRequest, req: Request):
+    """
+    POST /api/projects/interview-questions
+    Generate personalised interview questions scoped to the entire project
+    (architecture, tech choices, bullet claims) using evidence nodes from the repo.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "interview-questions")
+    try:
+        from .project_features import generate_project_interview_questions
+        result = await generate_project_interview_questions(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            bullet_claims=body.bullet_claims,
+            all_evidence_node_ids=body.all_evidence_node_ids,
+            reasoning=body.reasoning,
+            matched_repo_name=body.matched_repo_name,
+            num_questions=body.num_questions,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project interview generation failed: {str(e)}")
+
+
+class ProjectChallengeRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    status: str = ""
+    overall_score: int = 0
+    tech_coverage_score: int = 0
+    architecture_score: int = 0
+    claim_support_score: int = 0
+    reasoning: str = ""
+    bullet_verdicts: list[dict] = []
+    match_confidence: float = 0.0
+
+
+@router.post("/projects/challenge")
+async def project_challenge(body: ProjectChallengeRequest, req: Request):
+    """
+    POST /api/projects/challenge
+    Generate an adversarial devil's advocate challenge for the full project verdict.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .project_features import challenge_project_verdict
+        text = await challenge_project_verdict(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            status=body.status,
+            overall_score=body.overall_score,
+            tech_coverage_score=body.tech_coverage_score,
+            architecture_score=body.architecture_score,
+            claim_support_score=body.claim_support_score,
+            reasoning=body.reasoning,
+            bullet_verdicts=body.bullet_verdicts,
+            match_confidence=body.match_confidence,
+        )
+        return {"challenge": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project challenge failed: {str(e)}")
+
+
+class ProjectArchSnapshotRequest(BaseModel):
+    matched_repo_id: str
+    matched_repo_name: str = ""
+
+
+@router.post("/projects/architecture-snapshot")
+async def project_architecture_snapshot(body: ProjectArchSnapshotRequest, req: Request):
+    """
+    POST /api/projects/architecture-snapshot
+    Run graph_explain on the matched repo to produce a rich architectural analysis:
+    architecture style, module breakdown, hotspots, complexity verdict, improvement suggestions.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    if not body.matched_repo_id:
+        raise HTTPException(status_code=400, detail="matched_repo_id is required")
+    try:
+        from .graph_explain import generate_graph_explanation
+        from .db import query_graph
+
+        rid = body.matched_repo_id
+
+        # Collect graph stats for the repo (same pattern as the graph-explain endpoint)
+        type_rows = query_graph(
+            "MATCH (n) WHERE n.repo_id = $rid RETURN labels(n)[0] AS lbl, count(n) AS cnt",
+            {"rid": rid}
+        )
+        type_counts = {r["lbl"]: r["cnt"] for r in type_rows if r.get("lbl")}
+
+        edge_rows = query_graph(
+            "MATCH ()-[r]->() WHERE (startNode(r)).repo_id = $rid RETURN type(r) AS t, count(r) AS cnt",
+            {"rid": rid}
+        )
+        edge_type_counts = {r["t"]: r["cnt"] for r in edge_rows if r.get("t")}
+
+        node_count  = sum(type_counts.values())
+        edge_count  = sum(edge_type_counts.values())
+
+        complex_rows = query_graph(
+            "MATCH (n) WHERE n.repo_id = $rid AND n.complexity_score IS NOT NULL "
+            "RETURN n.name AS name, labels(n)[0] AS type, n.complexity_score AS cs, n.file_path AS fp "
+            "ORDER BY cs DESC LIMIT 10",
+            {"rid": rid}
+        )
+        top_complex = [{"name": r["name"], "type": r["type"], "complexity_score": r["cs"], "file_path": r.get("fp")} for r in complex_rows]
+
+        hub_rows = query_graph(
+            "MATCH (n) WHERE n.repo_id = $rid "
+            "WITH n, size([(n)-[]-() | 1]) AS deg "
+            "ORDER BY deg DESC LIMIT 10 "
+            "RETURN n.name AS name, labels(n)[0] AS type, deg AS degree, n.file_path AS fp",
+            {"rid": rid}
+        )
+        top_hubs = [{"name": r["name"], "type": r["type"], "degree": r["degree"], "file_path": r.get("fp")} for r in hub_rows]
+
+        file_rows   = query_graph("MATCH (f:File) WHERE f.repo_id = $rid RETURN f.path AS p LIMIT 30", {"rid": rid})
+        file_list   = [r["p"] for r in file_rows if r.get("p")]
+        class_rows  = query_graph("MATCH (c:Class) WHERE c.repo_id = $rid RETURN c.name AS n LIMIT 15", {"rid": rid})
+        class_list  = [r["n"] for r in class_rows if r.get("n")]
+        import_rows = query_graph("MATCH (i:Import) WHERE i.repo_id = $rid RETURN DISTINCT i.module_name AS m LIMIT 20", {"rid": rid})
+        import_list = [r["m"] for r in import_rows if r.get("m")]
+
+        avg_c_rows  = query_graph(
+            "MATCH (n) WHERE n.repo_id = $rid AND n.complexity_score IS NOT NULL RETURN avg(n.complexity_score) AS avg_c",
+            {"rid": rid}
+        )
+        avg_complexity = avg_c_rows[0]["avg_c"] if avg_c_rows and avg_c_rows[0].get("avg_c") else 0.0
+
+        orphan_rows = query_graph(
+            "MATCH (n) WHERE n.repo_id = $rid AND NOT (n)--() RETURN count(n) AS cnt",
+            {"rid": rid}
+        )
+        orphan_count = orphan_rows[0]["cnt"] if orphan_rows else 0
+
+        graph_stats = {
+            "repo_id":          rid,
+            "repo_names":       [body.matched_repo_name] if body.matched_repo_name else [rid[:8]],
+            "node_count":       node_count,
+            "edge_count":       edge_count,
+            "type_counts":      type_counts,
+            "edge_type_counts": edge_type_counts,
+            "top_complex":      top_complex,
+            "top_hubs":         top_hubs,
+            "file_list":        file_list,
+            "class_list":       class_list,
+            "import_list":      import_list,
+            "avg_complexity":   float(avg_complexity),
+            "orphan_count":     orphan_count,
+        }
+
+        result = await generate_graph_explanation(graph_stats)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Architecture snapshot failed: {str(e)}")
+
+
+class ProjectBulletExplainRequest(BaseModel):
+    project_name: str
+    bullet_claim: str
+    tech_stack: list[str] = []
+    matched_repo_name: str = ""
+    missing_evidence_hint: str = ""
+
+
+@router.post("/projects/explain-missing-bullet")
+async def project_explain_missing_bullet(body: ProjectBulletExplainRequest, req: Request):
+    """
+    POST /api/projects/explain-missing-bullet
+    Explain why a specific bullet claim could not be verified and what code would prove it.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "interview-questions")
+    try:
+        from .project_features import explain_missing_bullet
+        text = await explain_missing_bullet(
+            project_name=body.project_name,
+            bullet_claim=body.bullet_claim,
+            tech_stack=body.tech_stack,
+            matched_repo_name=body.matched_repo_name,
+            missing_evidence_hint=body.missing_evidence_hint,
+        )
+        return {"explanation": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bullet explanation failed: {str(e)}")
+
 
 # =============================================================================
 # Graph Data Endpoint — smart sampling, multi-repo, server-side edge filter

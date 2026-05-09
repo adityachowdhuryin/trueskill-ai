@@ -12,15 +12,17 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 trueskill-ai/
 ├── backend/                         # FastAPI Python backend
 │   ├── app/
-│   │   ├── api.py                   # All API routes (30+ endpoints)
+│   │   ├── api.py                   # All API routes (35+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
 │   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring & HTML report
 │   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
-│   │   ├── interview.py             # AI interview question generator
+│   │   ├── interview.py             # AI interview question generator (skill-scoped)
 │   │   ├── coach.py                 # Gap analysis, bridge projects, heatmap, roadmap, chat & HTML export
 │   │   ├── challenge.py             # Adversarial LLM claim challenger (Devil's Advocate)
+│   │   ├── project_verifier.py      # Project verification pipeline (tech coverage, arch score, bullet verdicts)
+│   │   ├── project_features.py      # Project-scoped LLM features (interview, challenge, bullet explain)
 │   │   ├── job_finder.py            # Jooble job search & Apollo.io hiring manager lookup
 │   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
@@ -28,7 +30,7 @@ trueskill-ai/
 │   │   ├── db.py                    # Neo4j AuraDB driver & query helpers
 │   │   ├── graph_explain.py         # AI architectural summary (8-section structured JSON via Groq)
 │   │   ├── function_explain.py      # Per-function AI explanation with complexity & suggestion
-│   │   └── llm.py                   # Shared LLM client (Groq Llama 3.3 70B)
+│   │   └── llm.py                   # Shared LLM client (Groq Llama 3.3 70B) + backup key rotation
 │   ├── main.py                      # FastAPI entry point
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -46,7 +48,9 @@ trueskill-ai/
 │           ├── GraphFullscreenModal.tsx
 │           ├── ErrorBoundary.tsx    # React error boundary for graph & heavy components
 │           ├── ATSScorePanel.tsx    # ATS evaluation results panel
-│           ├── SkillCard.tsx        # Per-claim card: score bar, evidence, "Show in Graph", interview prep, code drill-down
+│           ├── SkillCard.tsx        # Per-claim card: score bar, evidence, "Show in Graph", interview prep, code drill-down, devil's advocate
+│           ├── ProjectCard.tsx      # Per-project card: tech coverage, arch score, bullet verdicts + 5 AI features
+│           ├── ProjectSummaryBar.tsx # Project verification summary banner with score rings & status counts
 │           ├── CodeViewer.tsx       # Source code modal with inline syntax highlighting
 │           ├── SkillRadar.tsx       # Radar chart with LLM-generated benchmarks
 │           ├── ContributionHeatmap.tsx # GitHub-style commit heatmap
@@ -58,7 +62,7 @@ trueskill-ai/
 │           ├── Navbar.tsx           # Scroll-aware shared navbar
 │           ├── Skeletons.tsx        # Loading skeletons
 │           ├── AnimatedCounter.tsx
-│           ├── SkillsGapHeatmap.tsx # JD Skills Gap Heatmap (code score vs resume vs JD requirements)
+│           ├── SkillsGapHeatmap.tsx # JD Skills Gap Heatmap
 │           ├── LearningRoadmap.tsx  # Week-by-week learning roadmap with task checkboxes
 │           ├── CoachChat.tsx        # Conversational AI coach chat panel
 │           └── VerificationSummaryBar.tsx # Animated summary dashboard (donut chart, stat cards, filter)
@@ -173,6 +177,16 @@ npm run dev
 |--------|----------|-------------|
 | `POST` | `/api/challenge-claim` | Devil's Advocate — LLM argues the *opposite* verdict for a skill claim (rate-limited) |
 
+### Project Verification
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/analyze/projects` | Verify all resume projects against ingested repos (tech coverage, arch score, bullet verdicts) |
+| `POST` | `/api/analyze/projects/single` | Re-verify a single project against a specific repo |
+| `POST` | `/api/projects/interview-questions` | Generate 6 project-scoped interview questions using evidence nodes |
+| `POST` | `/api/projects/challenge` | Devil's Advocate challenge for the full project verdict |
+| `POST` | `/api/projects/architecture-snapshot` | On-demand deep architectural analysis of a matched repo |
+| `POST` | `/api/projects/explain-missing-bullet` | Explain why a bullet claim is unverified & what code would prove it |
+
 ### ATS Tools
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -273,6 +287,27 @@ The ✨ **Explain** button sends rich structural context to Groq Llama 3.3 70B a
 - **Module Breakdown** — logical subsystem grouping with key file tags (collapsed by default)
 - **Improvement Suggestions** — 3 numbered actionable refactoring recommendations (collapsed by default)
 - **Complexity Verdict** — architecture style badge + complexity rating
+
+### Project Verification Section
+The **Projects tab** in the dashboard verifies resume project claims against ingested GitHub repos:
+- **Tech Stack Coverage (40 pts)** — checks each claimed technology against code evidence nodes
+- **Architecture Assessment (35 pts)** — LLM assesses architecture patterns, design decisions, and code quality
+- **Claim Support (25 pts)** — evaluates each resume bullet against found code evidence
+- **Bullet Verdicts** — per-bullet supported/unsupported with missing evidence hints
+- **Match Confidence** — Jaccard + substring containment matching to map projects → repos
+- **Repo Override** — manual repo dropdown to re-verify against a different ingested repo
+
+#### 5 AI Features inside each Project card
+| Feature | Description |
+|---|---|
+| **👁 View Code** | Click any tech evidence node ID → opens `CodeViewer` modal with full source |
+| **🏗️ Architecture Snapshot** | On-demand deep architectural analysis: style badge, module breakdown, ⚡ hotspot callout, improvement suggestions |
+| **✨ Interview Prep** | 6 project-scoped questions covering architecture decisions, tech choices, and bullet claim specifics |
+| **🔴 Devil's Advocate** | Adversarial challenge targeting the full project verdict — references scores, unsupported bullets, and match confidence |
+| **💡 Bullet Deep-Dive** | On each unsupported bullet: explains *why* it's hard to verify and *what code* would prove it |
+
+### LLM Key Rotation (Reliability)
+`llm.py` uses a `_FallbackChatGroq` wrapper that automatically retries with `GROQ_API_KEY_BACKUP` on 429 rate-limit errors. All call sites benefit transparently without any changes.
 
 ### Stylometric Forensics
 The `forensics.py` module detects AI-generated or copy-pasted code via:
@@ -400,6 +435,7 @@ NEO4J_DATABASE=<database-name>
 
 # Groq (required — powers all LLM calls)
 GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY_BACKUP=your_backup_key_here   # optional — auto-used on 429 rate-limit errors
 
 # GitHub Token (optional — avoids rate limits on repo fetch)
 GITHUB_TOKEN=your_github_token_here

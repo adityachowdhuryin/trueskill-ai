@@ -237,3 +237,24 @@ def get_repo_info(repo_id: str) -> Optional[dict[str, str]]:
         }
     finally:
         conn.close()
+
+
+def get_all_repos() -> list:
+    """Return all ingested repos from the registry as a list of dicts."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT repo_id, github_url, owner, repo_name, ingested_at FROM repo_registry ORDER BY ingested_at DESC"
+        ).fetchall()
+        return [
+            {
+                "repo_id": r["repo_id"],
+                "github_url": r["github_url"],
+                "owner": r["owner"],
+                "repo_name": r["repo_name"],
+                "ingested_at": r["ingested_at"],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()

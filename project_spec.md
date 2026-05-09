@@ -35,6 +35,8 @@
 | **ATS Scorer** | `ats.py` | Resume vs JD evaluation, HTML report generation |
 | **Coach Module** | `coach.py` | Gap analysis, bridge project generation, JD Skills Gap Heatmap, learning roadmap, conversational chat, HTML report export |
 | **Claim Challenger** | `challenge.py` | Adversarial LLM function — argues the opposite verdict for a skill claim (Devil's Advocate) |
+| **Project Verifier** | `project_verifier.py` | Project verification pipeline: tech coverage scoring, architecture assessment, bullet verdict analysis, repo matching |
+| **Project Features** | `project_features.py` | Project-scoped LLM features: interview question generation, project verdict challenge, bullet deep-dive explanations |
 | **Job Finder** | `job_finder.py` | Jooble job search + Apollo.io hiring manager lookup |
 | **Resume Optimizer** | `resume_optimizer.py` | LLM keyword rewriting + personalized email drafting |
 | **Report Generator** | `report.py` | Self-contained HTML verification report |
@@ -42,8 +44,8 @@
 | **Database** | `db.py` | Neo4j AuraDB driver + `query_graph()` helper; supports `NEO4J_USERNAME` / `NEO4J_DATABASE` |
 | **Graph Explain** | `graph_explain.py` | 8-section AI architectural summary via Groq Llama 3.3 70B (tech stack, modules, hotspot, suggestions) |
 | **Function Explain** | `function_explain.py` | Per-function AI explanation: purpose, complexity verdict, refactor suggestions |
-| **LLM Client** | `llm.py` | Shared Groq Llama 3.3 70B client + JSON parser |
-| **API** | `api.py` | 30+ FastAPI endpoints with rate limiting |
+| **LLM Client** | `llm.py` | Shared Groq Llama 3.3 70B client + JSON parser; `_FallbackChatGroq` wrapper auto-retries with `GROQ_API_KEY_BACKUP` on 429 errors |
+| **API** | `api.py` | 35+ FastAPI endpoints with rate limiting |
 
 ---
 
@@ -92,6 +94,30 @@ class VerificationResult(BaseModel):
     complexity_analysis: str
     score_breakdown: dict   # {evidence_base: int, node_bonus: int, complexity: int, llm: int}
                             # Sub-scores; max = 30+10+20+40 = 100
+```
+
+**Project verification result (per project):**
+```python
+class ProjectVerificationResult(BaseModel):
+    project_id: str
+    name: str
+    tech_stack: list[str]
+    status: str             # "Verified" | "Partially Verified" | "Unverified" | "Repo Not Ingested"
+    overall_score: int      # weighted average of 3 sub-scores
+    matched_repo_id: str
+    matched_repo_name: str
+    repo_github_url: str
+    match_confidence: float # Jaccard + substring containment
+    match_reason: str
+    tech_coverage: list[TechCoverageItem]   # per-technology: found + evidence_node_ids
+    tech_coverage_score: int   # 0-100 (40% of overall)
+    architecture_score: int    # 0-100 (35% of overall)
+    claim_support_score: int   # 0-100 (25% of overall)
+    tech_found_count: int
+    tech_total_count: int
+    reasoning: str
+    bullet_verdicts: list[BulletVerdict]    # per-bullet: supported + evidence_nodes + missing hint
+    all_evidence_node_ids: list[str]        # flat union across all found tech nodes
 ```
 
 **Function node (Neo4j + in-memory):**
@@ -428,6 +454,36 @@ POST   /api/challenge-claim            { topic, claim_text, score, status,
                                        → { challenge: str }   # ≤180-word adversarial counter-argument
 ```
 
+### Project Verification
+```
+POST   /api/analyze/projects           { pdf_file, repo_ids[] }
+                                       → { projects: [ProjectVerificationResult] }
+
+POST   /api/analyze/projects/single    { project_id, project_name, tech_stack,
+                                         bullet_claims, repo_id }
+                                       → ProjectVerificationResult
+
+POST   /api/projects/interview-questions { project_name, tech_stack, bullet_claims,
+                                           all_evidence_node_ids, reasoning,
+                                           matched_repo_name, num_questions }
+                                         → { questions[], interviewer_note }
+
+POST   /api/projects/challenge          { project_name, tech_stack, status,
+                                          overall_score, tech_coverage_score,
+                                          architecture_score, claim_support_score,
+                                          reasoning, bullet_verdicts, match_confidence }
+                                        → { challenge: str }
+
+POST   /api/projects/architecture-snapshot { matched_repo_id, matched_repo_name }
+                                           → { summary, architecture_style, modules[],
+                                              hotspot_analysis, improvement_suggestions[],
+                                              complexity_verdict, complexity_reasoning }
+
+POST   /api/projects/explain-missing-bullet { project_name, bullet_claim, tech_stack,
+                                              matched_repo_name, missing_evidence_hint }
+                                            → { explanation: str }
+```
+
 ### Resume Toolkit
 ```
 POST   /api/resume-toolkit/find-jobs             { pdf_file, location_override? }
@@ -499,6 +555,27 @@ The Career Coach section is rendered below the main tab grid in the dashboard. I
 | `SkillsGapHeatmap.tsx` | Sortable JD Skills Gap Heatmap: severity badges, animated score bars, ATS reuse indicator, collapsible panel |
 | `LearningRoadmap.tsx` | Horizontal scrollable week cards with task checkboxes (localStorage), progress bar, hours/week presets |
 | `CoachChat.tsx` | Collapsible chat panel: suggested questions, user/AI bubbles, typing indicator, Enter-to-send |
+| `ProjectCard.tsx` | Per-project card: tech stack coverage bars, bullet verdicts, score rings + 5 on-demand AI features (View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive) |
+| `ProjectSummaryBar.tsx` | Project verification summary banner: score rings, status counts (Verified/Partial/Unverified/Not Ingested) |
+
+### Workflow 9: Project Verification Suite
+Runs when user clicks "Verify My Projects" in the Projects tab:
+
+1. **Input:** PDF resume + list of ingested repo IDs
+2. **Project Extraction:** Parser LLM identifies distinct projects from resume, extracting name, tech stack, and bullet claims
+3. **Repo Matching:** Jaccard similarity (name token overlap) + substring containment matches each project to the most relevant ingested repo
+4. **Three-Dimension Scoring:**
+   - **Tech Coverage (40%):** For each claimed technology, searches graph for evidence nodes. Scores by ratio found/total.
+   - **Architecture Assessment (35%):** Sends project claims + matched repo stats to LLM for architecture pattern analysis
+   - **Claim Support (25%):** Each resume bullet is evaluated against found code evidence for support/unsupported verdict
+5. **Output:** `ProjectVerificationResult` with `all_evidence_node_ids` (flat union of all tech evidence)
+
+**5 on-demand AI features per project card (lazy-loaded):**
+- **Architecture Snapshot:** Queries Neo4j for hub nodes, file types, node counts → sends to `graph_explain.py` for expert codebase X-ray
+- **Interview Questions:** 6 questions scoped to this project's actual tech, architecture, and bullet claim evidence
+- **Devil's Advocate:** Adversarial challenge referencing actual sub-scores and unsupported bullets
+- **Bullet Deep-Dive:** For each unsupported bullet, explains what code is missing and how to prove it
+- **View Code:** Inline `CodeViewer` for any tech evidence node
 
 ---
 
@@ -527,6 +604,7 @@ NEO4J_DATABASE=<database-name>
 
 # Groq (required — powers all LLM calls via langchain_groq)
 GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY_BACKUP=your_backup_key_here   # optional — auto-used on 429 rate-limit errors
 
 # GitHub Token (optional — avoids public API rate limits)
 GITHUB_TOKEN=your_github_token_here
