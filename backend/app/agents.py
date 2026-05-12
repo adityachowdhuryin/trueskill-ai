@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from .db import query_graph
 from .llm import get_llm_model, parse_json_response
+from .alias_map import LIBRARY_ALIAS_MAP
 
 
 # =============================================================================
@@ -30,6 +31,7 @@ class ResumeClaim(BaseModel):
     topic: str = Field(description="The skill or technology category (e.g., 'Python', 'Machine Learning')")
     claim_text: str = Field(description="The exact claim made in the resume")
     difficulty: int = Field(description="Difficulty level 1-5, where 5 is expert level", ge=1, le=5)
+    specific_libraries: list[str] = Field(default_factory=list, description="Exact library/package import names mentioned (e.g., ['torch', 'cv2', 'sklearn'])")
 
 
 class GraphEvidence(BaseModel):
@@ -116,23 +118,39 @@ TOPIC_SYNONYMS: dict[str, list[str]] = {
 }
 
 
-def _expand_topic_keywords(topic: str) -> list[str]:
+def _expand_topic_keywords(topic: str, specific_libraries: Optional[list[str]] = None) -> list[str]:
     """
     Expand a topic into a list of related keywords for broader Cypher matching.
-    Returns the original topic + all synonym terms.
+    Fix 1: checks LIBRARY_ALIAS_MAP first so 'PyTorch' finds 'torch' imports.
+    Fix 6: merges in specific_libraries extracted by the parser.
     """
     topic_lower = topic.lower().strip()
-    keywords = [topic_lower]
+    keywords: list[str] = [topic_lower]
 
-    # Check against all synonym groups
+    # Fix 1 — alias map: marketing name → actual import package names
+    for alias_key, alias_packages in LIBRARY_ALIAS_MAP.items():
+        if topic_lower == alias_key or topic_lower in alias_key or alias_key in topic_lower:
+            keywords.extend(alias_packages)
+
+    # Existing synonym expansion
     for group_key, synonyms in TOPIC_SYNONYMS.items():
-        # If the topic matches the group key or any of its synonyms
         if (topic_lower in group_key
                 or group_key in topic_lower
                 or any(syn in topic_lower for syn in synonyms)):
             keywords.extend(synonyms)
 
-    # Also split multi-word topics into individual tokens
+    # Fix 6 — specific libraries extracted by the parser LLM
+    if specific_libraries:
+        for lib in specific_libraries:
+            lib_lower = lib.lower().strip()
+            if lib_lower and lib_lower not in keywords:
+                keywords.append(lib_lower)
+                # Also look up aliases for each specific library
+                for alias_key, alias_packages in LIBRARY_ALIAS_MAP.items():
+                    if lib_lower == alias_key or alias_key in lib_lower:
+                        keywords.extend(p for p in alias_packages if p not in keywords)
+
+    # Token split for multi-word topics
     for word in topic_lower.split():
         if word not in keywords and len(word) > 2:
             keywords.append(word)
@@ -261,7 +279,9 @@ def route_claim_to_repos(
 def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
     """
     Generate a Cypher query to find evidence for a claim.
-    Searches: node names, import module names, function source code bodies, and file paths.
+    Fix 2: searches first 8000 chars of source_code (was 1500) and docstrings.
+    Fix 2: LIMIT raised to 100 (was 50).
+    Fix 3: source_preview raised to 2000 chars for richer LLM context.
     """
     query = """
     MATCH (n)
@@ -270,7 +290,9 @@ def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
         toLower(n.name) CONTAINS kw
         OR (n:Import AND toLower(n.module_name) CONTAINS kw)
         OR (n:Function AND n.source_code IS NOT NULL
-            AND toLower(substring(n.source_code, 0, 1500)) CONTAINS kw)
+            AND toLower(substring(n.source_code, 0, 8000)) CONTAINS kw)
+        OR (n:Function AND n.docstring IS NOT NULL
+            AND toLower(n.docstring) CONTAINS kw)
         OR (n.file_path IS NOT NULL AND toLower(n.file_path) CONTAINS kw)
       )
     WITH n, labels(n) AS node_labels
@@ -282,11 +304,23 @@ def generate_cypher_for_claim(claim: ResumeClaim, repo_ids: list[str]) -> str:
         n.complexity_score AS complexity,
         collect(DISTINCT called.name) AS calls_functions,
         CASE WHEN (n:Function OR n:Class) AND n.source_code IS NOT NULL
-             THEN substring(n.source_code, 0, 500)
+             THEN substring(n.source_code, 0, 2000)
              ELSE null END AS source_preview
-    LIMIT 50
+    LIMIT 100
     """
     return query
+
+
+def _rank_evidence_key(record: dict) -> tuple:
+    """Fix 4: Sort evidence so complex functions appear before classes before imports."""
+    labels = record.get("node_labels", [])
+    complexity = record.get("complexity") or 0
+    if "Function" in labels:
+        return (0, -complexity)   # highest-complexity functions first
+    elif "Class" in labels:
+        return (1, 0)
+    else:  # Import
+        return (2, 0)
 
 
 def query_knowledge_graph(
@@ -295,11 +329,11 @@ def query_knowledge_graph(
 ) -> GraphEvidence:
     """
     Query the Neo4j knowledge graph to find evidence for a claim.
-    Uses expanded synonym-based matching for broader coverage.
+    Fix 1+6: uses alias map + specific_libraries for keyword expansion.
+    Fix 4: re-ranks results (functions > classes > imports) before returning.
     """
-    # Expand the topic into a list of related keywords
-    keywords = _expand_topic_keywords(claim.topic)
-    
+    keywords = _expand_topic_keywords(claim.topic, claim.specific_libraries)
+
     cypher_query = generate_cypher_for_claim(claim, repo_ids)
     try:
         results = query_graph(cypher_query, {
@@ -311,6 +345,9 @@ def query_knowledge_graph(
             cypher_query=cypher_query,
             raw_results=[{"error": str(e)}]
         )
+
+    # Fix 4: re-rank so best evidence reaches the LLM first
+    results.sort(key=_rank_evidence_key)
     
     # Parse results into evidence
     node_ids = []
@@ -377,28 +414,27 @@ async def resume_parser_node(state: VerificationState) -> VerificationState:
     
     system_prompt = """You are an expert resume analyzer. Extract ALL specific, verifiable claims from this resume.
 
-For each claim, provide ALL FOUR fields:
-1. **topic**: Specific technology, language, framework, or tool (e.g., "Python", "React", "PostgreSQL", "TensorFlow")
-2. **claim_text**: The exact claim from the resume (e.g., "Built a recommendation engine using collaborative filtering")
-3. **difficulty**: Claimed expertise level 1-5:
-   - 1: Basic familiarity / exposure
-   - 2: Can use with guidance
-   - 3: Proficient, independent work
-   - 4: Advanced, complex projects
-   - 5: Expert, leadership/architecture
+For each claim, provide ALL FIVE fields:
+1. **topic**: The skill/technology category (e.g., "PyTorch", "Computer Vision", "FastAPI")
+2. **claim_text**: The exact claim from the resume
+3. **difficulty**: Claimed expertise level 1-5 (1=basic, 5=expert/architect)
 4. **claim_type**: EXACTLY one of:
-   - "code_verifiable" — the skill uses a specific library, framework, language, algorithm, or API that appears as imports, function names, class names, or code patterns in a repository
-   - "not_code_verifiable" — methodology, soft skill, process, or concept that does NOT appear in source code. Examples: "Agile", "Scrum", "Kanban", "stakeholder management", "team leadership", "communication", "project management", "requirements gathering", "data storytelling", "Git workflow", "CI/CD pipeline management", "code review process", "mentoring", "presentations"
+   - "code_verifiable" — skill uses a specific library, framework, or API visible in source code
+   - "not_code_verifiable" — soft skill, methodology, or concept not in code (Agile, leadership, communication, etc.)
+5. **specific_libraries**: List of exact Python/JS import names that would prove this claim in code.
+   Examples: PyTorch → ["torch"], OpenCV → ["cv2"], scikit-learn → ["sklearn"],
+   HuggingFace → ["transformers"], PySpark → ["pyspark"], Streamlit → ["streamlit"].
+   Leave empty [] if not_code_verifiable or if no specific import name is known.
 
 IMPORTANT RULES:
-- Extract ONE claim per distinct technology/skill — if "Python" appears 5 times, extract the STRONGEST (highest difficulty) claim
+- Extract ONE claim per distinct technology/skill (keep highest difficulty if duplicated)
 - Maximum 20 claims total
-- Focus on claims a technical interviewer would ask about
+- For specific_libraries, use the ACTUAL Python import name, not the marketing name
 
 Return ONLY valid JSON:
 {
   "claims": [
-    {"topic": "...", "claim_text": "...", "difficulty": 3, "claim_type": "code_verifiable"},
+    {"topic": "...", "claim_text": "...", "difficulty": 3, "claim_type": "code_verifiable", "specific_libraries": ["torch"]},
     ...
   ]
 }"""
@@ -569,52 +605,85 @@ async def grader_node(state: VerificationState) -> VerificationState:
         # ── Node count bonus (capped at 10) ───────────────────────────────────
         node_bonus = min(len(evidence.node_ids) * 2, 10) if evidence.node_ids else 0
 
-        # ── Complexity bonus (threshold tightened to 1.0×) ───────────────────
-        complexity_bonus = 0
+        # ── Fix 5: Depth bonus replaces binary complexity bonus ───────────────
+        depth_bonus = 0
         complexity_analysis = ""
+        # Count using raw_results (one entry per matched node) — node_types is a set so
+        # counting per-type from it would always return 0 or 1.
+        function_node_count = sum(
+            1 for r in evidence.raw_results
+            if "Function" in r.get("node_labels", [])
+        )
+        import_node_count = sum(
+            1 for r in evidence.raw_results
+            if "Import" in r.get("node_labels", [])
+        )
+
+        if function_node_count >= 5:
+            depth_bonus += 10
+        elif function_node_count >= 2:
+            depth_bonus += 5
+
+        if import_node_count >= 3:
+            depth_bonus += 5
+        elif import_node_count >= 1:
+            depth_bonus += 2
+
         if evidence.complexity_scores:
             avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
-            claimed_difficulty = claim_dict.get("difficulty", 3)
-            complexity_thresholds = {1: 2, 2: 4, 3: 6, 4: 10, 5: 15}
-            expected_complexity = complexity_thresholds.get(claimed_difficulty, 5)
-            if avg_complexity >= expected_complexity:  # tightened from 0.7×
-                complexity_bonus = 20
-                complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) confirms claimed difficulty level {claimed_difficulty}/5."
+            max_complexity = max(evidence.complexity_scores)
+            if max_complexity >= 5 or avg_complexity >= 3:
+                depth_bonus += 5
+                complexity_analysis = (
+                    f"Non-trivial implementation detected "
+                    f"(avg complexity: {avg_complexity:.1f}, max: {max_complexity})."
+                )
             else:
-                complexity_analysis = f"Code complexity (avg: {avg_complexity:.1f}) is below expected ({expected_complexity}) for difficulty level {claimed_difficulty}/5."
+                complexity_analysis = (
+                    f"Implementation found but appears straightforward "
+                    f"(avg complexity: {avg_complexity:.1f})."
+                )
 
-        base_score = evidence_base + node_bonus + complexity_bonus
+        base_score = evidence_base + node_bonus + depth_bonus
 
-        # ── LLM semantic analysis (0-40 pts) — fires on any node evidence ─────
+        # ── Fix 3: LLM semantic analysis with richer context (0-40 pts) ───────
         llm_score = 0
         reasoning = ""
 
         if evidence.node_ids:
             try:
-                evidence_summary = "\n---\n".join(evidence.code_snippets[:12]) if evidence.code_snippets else \
+                snippet_parts = []
+                for raw_result in evidence.raw_results[:6]:
+                    node = raw_result.get("n", {})
+                    node_labels = raw_result.get("node_labels", [])
+                    source_preview = raw_result.get("source_preview") or ""
+                    node_name = node.get("name", node.get("module_name", ""))
+                    file_path = node.get("file_path", node.get("path", ""))
+                    label = node_labels[0] if node_labels else "Node"
+                    body = source_preview[:2000].strip() if source_preview else "(no source available)"
+                    snippet_parts.append(f"[{label}] {file_path}:{node_name}\n{body}")
+
+                evidence_summary = "\n\n---\n\n".join(snippet_parts) if snippet_parts else \
                     f"Evidence nodes found: {', '.join(evidence.node_ids[:10])}"
 
-                analysis_prompt = f"""You are a senior engineering interviewer verifying a resume claim against actual code.
+                analysis_prompt = f"""You are a senior engineering interviewer verifying a resume claim against actual code evidence.
 
-CALIBRATION:
-- Score 32-40: Strong evidence directly implementing the claimed technology at the stated difficulty
-- Score 15-31: Partial evidence — framework used but depth unclear, or only imports visible
-- Score 5-14: Weak evidence — keyword match in names only, no real implementation visible
-- Score 0-4: No semantic support — code is unrelated despite name overlap
+SCORING CALIBRATION:
+- 32-40: Direct, non-trivial implementation. Library imported AND meaningfully used in functions.
+- 15-31: Partial — library imported or framework present, but implementation depth is unclear.
+- 5-14:  Weak — keyword appears in file/function names only; no real implementation visible.
+- 0-4:   None — code is unrelated or only superficially matches.
 
 CLAIM TO VERIFY:
   Topic: {claim_dict.get('topic', '')}
+  Specific Libraries: {', '.join(claim_dict.get('specific_libraries', [])) or 'Not specified'}
   Claim: {claim_dict.get('claim_text', '')}
   Stated Difficulty: {claim_dict.get('difficulty', 3)}/5
 
-CODE EVIDENCE FROM REPOSITORY:
+CODE EVIDENCE (file path : name, then source):
 {evidence_summary}
 
-STATISTICS: {has_functions and len([t for t in evidence.node_types if t=='Function'])} functions, \
-{has_classes and len([t for t in evidence.node_types if t=='Class'])} classes, \
-{has_imports and len([t for t in evidence.node_types if t=='Import'])} imports
-
-Return JSON only: {{"score": <0-40>, "reasoning": "<2-3 sentence explanation>"}}"""
+Return ONLY JSON: {{"score": <0-40>, "reasoning": "<2-3 sentences citing specific files/functions>"}}"""
 
                 response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
                 analysis = parse_json_response(response.content)
@@ -626,12 +695,12 @@ Return JSON only: {{"score": <0-40>, "reasoning": "<2-3 sentence explanation>"}}
         else:
             reasoning = "No code evidence found in the repository for this claim."
 
-        # ── Final score (max 100) and status thresholds ───────────────────────
+        # ── Fix 5: Calibrated thresholds (was >=65/>=35) ─────────────────────
         final_score = min(base_score + llm_score, 100)
 
-        if final_score >= 65:
+        if final_score >= 60:
             status = "Verified"
-        elif final_score >= 35:
+        elif final_score >= 30:
             status = "Partially Verified"
         else:
             status = "Unverified"
@@ -648,13 +717,13 @@ Return JSON only: {{"score": <0-40>, "reasoning": "<2-3 sentence explanation>"}}
             score_breakdown={
                 "evidence_base": evidence_base,
                 "node_bonus": node_bonus,
-                "complexity": complexity_bonus,
+                "complexity": depth_bonus,
                 "llm": llm_score,
             },
         )
-        
+
         results.append(result.model_dump())
-    
+
     state["results"] = results
     return state
 
@@ -662,6 +731,7 @@ Return JSON only: {{"score": <0-40>, "reasoning": "<2-3 sentence explanation>"}}
 # =============================================================================
 # LangGraph Workflow
 # =============================================================================
+
 
 def create_verification_workflow():
     """

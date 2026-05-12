@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .db import query_graph
 from .llm import get_llm_model, parse_json_response
 from .agents import _expand_topic_keywords, build_repo_profile_map
+from .alias_map import LIBRARY_ALIAS_MAP
 from .storage import get_repo_info, get_all_repos
 
 
@@ -122,6 +123,17 @@ SPECIFIC_TECH_IMPORTS: dict = {
     "tree-sitter":     ["tree_sitter"],
     "drizzle":         ["drizzle-orm"],
     "trpc":            ["@trpc"],
+    # Fix D: additional aliases for common techs not in alias_map default list
+    "googleearthengine":   ["ee"],
+    "google earth engine": ["ee"],
+    "opencv":              ["cv2"],
+    "scikit-learn":        ["sklearn"],
+    "xgboost":             ["xgboost", "xgb"],
+    "folium":              ["folium"],
+    "apache spark":        ["pyspark"],
+    "apache kafka":        ["kafka"],
+    "arcgis":              ["arcgis", "arcpy"],
+    "huggingface":         ["transformers"],
     # Infrastructure techs that have no importable package — skip gracefully
     "cloud run":       [],
     "kubernetes":      [],
@@ -274,9 +286,15 @@ def match_project_to_repo(
         hit_count = 0
         matched_techs: list = []
         for tech in project.tech_stack:
-            aliases = SPECIFIC_TECH_IMPORTS.get(tech.lower(), [])
+            # Fix D part 2: fall back to LIBRARY_ALIAS_MAP for techs not in SPECIFIC_TECH_IMPORTS
+            aliases = SPECIFIC_TECH_IMPORTS.get(tech.lower(), None)
+            if aliases is None:
+                aliases = []
+                for ak, ap in LIBRARY_ALIAS_MAP.items():
+                    if tech.lower() == ak or ak in tech.lower() or tech.lower() in ak:
+                        aliases.extend(ap)
             if not aliases:
-                continue   # infrastructure tech — skip
+                continue   # infrastructure tech or no known import alias — skip
             if any(alias in imp for alias in aliases for imp in imports):
                 hit_count += 1
                 matched_techs.append(tech)
@@ -316,16 +334,23 @@ def check_tech_coverage(project: ProjectClaim, repo_id: str) -> list:
         toLower(n.name) CONTAINS kw
         OR (n:Import AND toLower(n.module_name) CONTAINS kw)
         OR (n:Function AND n.source_code IS NOT NULL
-            AND toLower(substring(n.source_code, 0, 800)) CONTAINS kw)
+            AND toLower(substring(n.source_code, 0, 8000)) CONTAINS kw)
+        OR (n:Function AND n.docstring IS NOT NULL
+            AND toLower(n.docstring) CONTAINS kw)
         OR (n.file_path IS NOT NULL AND toLower(n.file_path) CONTAINS kw)
       )
     RETURN n.name AS node_name, n.file_path AS file_path,
            COALESCE(n.module_name, n.name) AS display_name
-    LIMIT 20
+    LIMIT 60
     """
     results = []
     for tech in project.tech_stack:
+        # Fix A: use LIBRARY_ALIAS_MAP + SPECIFIC_TECH_IMPORTS for richer keyword expansion
         keywords = _expand_topic_keywords(tech)
+        for alias_key, alias_pkgs in LIBRARY_ALIAS_MAP.items():
+            if tech.lower() == alias_key or alias_key in tech.lower() or tech.lower() in alias_key:
+                keywords.extend(alias_pkgs)
+        keywords.extend(SPECIFIC_TECH_IMPORTS.get(tech.lower(), []))
         keywords = list(set(keywords + [tech.lower()] + tech.lower().split()))
         keywords = [k for k in keywords if len(k) >= 2]
         try:
@@ -391,6 +416,41 @@ async def assess_architecture(
     except Exception:
         dir_sample = []
 
+    # Fix E: Fetch actual function source code for richer LLM context
+    try:
+        all_keywords: list = []
+        for tech in project.tech_stack:
+            kws = _expand_topic_keywords(tech)
+            for alias_key, alias_pkgs in LIBRARY_ALIAS_MAP.items():
+                if tech.lower() == alias_key or alias_key in tech.lower():
+                    kws.extend(alias_pkgs)
+            all_keywords.extend(kws)
+        all_keywords = list(set(k for k in all_keywords if len(k) >= 2))
+
+        src_rows = query_graph("""
+            MATCH (fn:Function)
+            WHERE fn.repo_id = $rid
+              AND fn.source_code IS NOT NULL
+              AND ANY(kw IN $keywords WHERE
+                  toLower(substring(fn.source_code, 0, 8000)) CONTAINS kw
+                  OR toLower(fn.name) CONTAINS kw)
+            RETURN fn.name AS name, fn.file_path AS fp,
+                   fn.complexity_score AS complexity,
+                   substring(fn.source_code, 0, 1500) AS src
+            ORDER BY fn.complexity_score DESC
+            LIMIT 5
+        """, {"rid": repo_id, "keywords": all_keywords})
+
+        source_snippets: list = []
+        for r in src_rows:
+            name = r.get("name", "")
+            fp   = (r.get("fp") or "").split("/")[-1]
+            src  = (r.get("src") or "").strip()
+            if src:
+                source_snippets.append(f"[{fp}:{name}]\n{src}")
+    except Exception:
+        source_snippets = []
+
     evidence = (
         f"Tech found in repo: {', '.join(found_techs) or 'none'}\n"
         f"Tech NOT found: {', '.join(missing_techs) or 'none'}\n"
@@ -398,8 +458,10 @@ async def assess_architecture(
         f"Actual imports: {', '.join(imp_sample[:20]) or 'none'}\n"
         f"Class names: {', '.join(cls_sample[:12]) or 'none'}\n"
         f"Directory structure: {', '.join(dir_sample) or 'none'}\n"
-        f"Key functions: {', '.join(fn_sample[:12]) or 'none'}"
+        f"Key functions (names): {', '.join(fn_sample[:12]) or 'none'}"
     )
+    if source_snippets:
+        evidence += "\n\nIMPLEMENTATION CODE SAMPLES:\n" + "\n\n---\n\n".join(source_snippets)
 
     bullets = "\n".join(f"• {b}" for b in project.bullet_claims)
 
@@ -492,11 +554,11 @@ async def verify_project(
     tech_coverage_score = min(round((found_count / total_count) * 40), 40)
     coverage_pct  = int(found_count / total_count * 100)
 
-    # Short-circuit: < 25% coverage → skip LLM, force Unverified
-    if found_count / total_count < 0.25:
+    # Fix B: only short-circuit when truly no evidence (< 15%, was 25%)
+    if found_count / total_count < 0.15:
         hint = "Ingest the correct repository for this project to enable verification."
         overall = tech_coverage_score
-        status = "Unverified" if overall < 35 else "Partially Verified"
+        status = "Unverified" if overall < 28 else "Partially Verified"
         return ProjectVerificationResult(
             project_id=project.project_id,
             name=project.name,
@@ -526,9 +588,10 @@ async def verify_project(
     claim_support_score = _compute_claim_support_score(bullet_verdicts)
 
     overall = tech_coverage_score + architecture_score + claim_support_score
-    if overall >= 65:
+    # Fix C: recalibrated thresholds (was >= 65 / >= 35)
+    if overall >= 60:
         status = "Verified"
-    elif overall >= 35:
+    elif overall >= 28:
         status = "Partially Verified"
     else:
         status = "Unverified"

@@ -41,6 +41,11 @@ neo4j_plugins/
 /tmp/
 trueskill_*/
 
+# Evaluation scripts & test data (local only)
+Evaluations/
+ground_truth.json
+eval_results.json
+
 # Logs
 *.log
 

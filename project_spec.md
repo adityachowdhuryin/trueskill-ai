@@ -31,6 +31,7 @@
 |---|---|---|
 | **Ingestion Engine** | `ingest.py` | Clone repos, parse ASTs via tree-sitter, build Neo4j graph |
 | **Reasoning Core** | `agents.py` | LangGraph Parser → Auditor → Grader pipeline |
+| **Alias Map** | `alias_map.py` | 110+ library alias entries mapping marketing names to Python import names (PyTorch→torch, OpenCV→cv2, etc.) — prevents false negatives in code matching |
 | **Forensics** | `forensics.py` | Stylometric authorship & AI-code detection |
 | **ATS Scorer** | `ats.py` | Resume vs JD evaluation, HTML report generation |
 | **Coach Module** | `coach.py` | Gap analysis, bridge project generation, JD Skills Gap Heatmap, learning roadmap, conversational chat, HTML report export |
@@ -57,7 +58,7 @@
 ```
 (:File   { name, path, language, repo_id })
 (:Class  { name, line_start, line_end, file_path, repo_id, bases[] })
-(:Function { name, args[], complexity_score, line_start, line_end, file_path, repo_id, parent_class, calls[], source_code })
+(:Function { name, args[], complexity_score, line_start, line_end, file_path, repo_id, parent_class, calls[], source_code, docstring })
 (:Import { module_name, file_path, repo_id })
 ```
 
@@ -74,10 +75,12 @@
 **Resume Claim extraction:**
 ```python
 class ResumeClaim(BaseModel):
-    topic: str          # e.g. "Python", "Machine Learning"
-    claim_text: str     # Exact claim from resume
-    difficulty: int     # 1-5 expertise level
-    claim_type: str     # "code_verifiable" | "not_code_verifiable"
+    topic: str                   # e.g. "Python", "Machine Learning"
+    claim_text: str              # Exact claim from resume
+    difficulty: int              # 1-5 expertise level
+    claim_type: str              # "code_verifiable" | "not_code_verifiable"
+    specific_libraries: list[str]  # e.g. ["torch"] for PyTorch, ["cv2"] for OpenCV
+                                 # used to drive alias-aware Cypher keyword expansion
 ```
 
 **Verification result (per claim):**
@@ -92,7 +95,7 @@ class VerificationResult(BaseModel):
     evidence_node_ids: list[str]
     reasoning: str
     complexity_analysis: str
-    score_breakdown: dict   # {evidence_base: int, node_bonus: int, complexity: int, llm: int}
+    score_breakdown: dict   # {evidence_base, node_bonus, complexity (depth_bonus), llm}
                             # Sub-scores; max = 30+10+20+40 = 100
 ```
 
@@ -134,6 +137,8 @@ class FunctionNode:
     calls: list[str]
     source_code: str  # raw function body captured at parse time (capped 10KB)
                       # stored on Neo4j Function node for Code Drill-Down
+    docstring: str    # extracted via ast.get_docstring() at ingest time
+                      # stored as n.docstring on Neo4j Function node; searchable in Cypher
 ```
 
 **Graph evidence:**
@@ -267,7 +272,7 @@ START → Parser Node → Auditor Node → Grader Node → END
 2. **Auditor (Node B) — 3-Layer Scoped Verification:**
    - **Layer 1 — Claim Classification:** `claim_type == "not_code_verifiable"` (Agile, Scrum, soft skills, Git workflow, etc.) are flagged immediately and bypass graph search
    - **Layer 2 — Repo Routing:** `build_repo_profile_map()` profiles each ingested repo (languages, imports, function names). `route_claim_to_repos()` routes each claim to the most relevant subset. Falls back to all repos if no match found.
-   - **Layer 3 — Graph Search:** Cypher query searches `n.name`, `n.module_name`, `n.source_code` (first 1,500 chars), and `n.file_path` for keyword matches. Returns `source_preview` (500-char body) per Function/Class node.
+   - **Layer 3 — Graph Search:** Cypher query searches `n.name`, `n.module_name`, `n.source_code` (first **8,000** chars), `n.docstring`, and `n.file_path` for keyword matches. Keywords expanded via `LIBRARY_ALIAS_MAP` (110+ entries) + `specific_libraries` from Parser. Returns up to 100 nodes, re-ranked: complex functions → classes → imports.
 
 3. **Grader (Node C):** Evidence + LLM analysis → `VerificationResult` (0–100 score)
    - Not Code-Verifiable claims → status `"Not Code-Verifiable"`, score 0, excluded from stats
@@ -276,9 +281,14 @@ START → Parser Node → Auditor Node → Grader Node → END
 **Scoring formula (max 100):**
 - **evidence_base:** +0 (no nodes) / +15 (imports only) / +30 (function or class nodes) — graduated by node type quality
 - **node_bonus:** +2 per node, capped at +10
-- **complexity_bonus:** +20 if avg cyclomatic complexity ≥ expected threshold (1.0× of difficulty-mapped value)
-- **llm_score:** 0–40 from LLM semantic analysis (calibrated rubric: 32–40 strong / 15–31 partial / 5–14 weak / 0–4 no support)
-- **Thresholds:** Verified ≥ 65 · Partially Verified ≥ 35 · Unverified < 35
+- **depth_bonus:** 0–20 pts — based on matched function count (≥5: +10, ≥2: +5), import diversity (≥3: +5, ≥1: +2), cyclomatic complexity (max≥5 or avg≥3: +5). Replaces binary `complexity_bonus`.
+- **llm_score:** 0–40 from LLM semantic analysis — 6 evidence snippets × 2,000 chars each with `[Label] filepath:name` headers (calibrated rubric: 32–40 strong / 15–31 partial / 5–14 weak / 0–4 no support)
+- **Thresholds:** Verified ≥ 60 · Partially Verified ≥ 30 · Unverified < 30
+
+**Library Alias Map** (`alias_map.py`) — 110+ entries mapping marketing skill names to actual Python import names:
+- Prevents false negatives where resumes say "PyTorch" but code has `import torch`
+- Used in both Skills Auditor and Projects tech coverage check
+- Parser now extracts `specific_libraries` per claim to supplement alias expansion
 
 **Topic synonym expansion** (`TOPIC_SYNONYMS` map) covers 22+ tech domains for broader graph matching, including modern AI/LLM terms: `llm`, `langchain`, `rag`, `vector database`, `transformer`, `reinforcement learning`, `generative ai`.
 

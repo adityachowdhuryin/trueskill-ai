@@ -65,9 +65,10 @@ class FunctionNode:
     line_end: int
     file_path: str
     repo_id: str
-    parent_class: Optional[str] = None  # For methods inside classes
-    calls: list[str] = field(default_factory=list)  # Function names this function calls
-    source_code: str = ""  # Raw source text of the function body (capped at 10KB)
+    parent_class: Optional[str] = None
+    calls: list[str] = field(default_factory=list)
+    source_code: str = ""
+    docstring: str = ""  # Fix 7: first docstring for keyword search in Cypher
 
 
 @dataclass
@@ -430,9 +431,20 @@ def _parse_python_file(
                 args = _extract_function_args(node, source_code)
                 complexity = _calculate_cyclomatic_complexity(node, source_code)
                 calls = _extract_function_calls(node, source_code)
-                # Capture raw source text for code drill-down (capped at 10KB)
                 source_text = source_code[node.start_byte:node.end_byte].decode(errors="replace")[:10_000]
-                
+
+                # Fix 7: extract first docstring from function body
+                docstring = ""
+                body = node.child_by_field_name("body")
+                if body:
+                    for child in body.children:
+                        if child.type == "expression_statement":
+                            inner = child.children[0] if child.children else None
+                            if inner and inner.type == "string":
+                                raw = source_code[inner.start_byte:inner.end_byte].decode(errors="replace")
+                                docstring = raw.strip('"\' \n').strip('"""').strip("'''")[:500]
+                                break
+
                 functions.append(FunctionNode(
                     name=func_name,
                     args=args,
@@ -444,8 +456,9 @@ def _parse_python_file(
                     parent_class=parent_class,
                     calls=calls,
                     source_code=source_text,
+                    docstring=docstring,
                 ))
-                return  # Don't recurse into function body for nested functions (for simplicity)
+                return
         
         elif node.type == "import_statement":
             # import module, module2
@@ -865,6 +878,7 @@ def insert_into_neo4j(graph_data: GraphData) -> dict[str, Any]:
             "parent_class": fn.parent_class,
             "repo_id": repo_id,
             "source_code": fn.source_code,
+            "docstring": fn.docstring,  # Fix 7
         })
 
     for batch in _batch_list(func_rows):
@@ -879,7 +893,8 @@ def insert_into_neo4j(graph_data: GraphData) -> dict[str, Any]:
                 fn.line_end = row.line_end,
                 fn.file_path = row.file_path,
                 fn.parent_class = row.parent_class,
-                fn.source_code = row.source_code
+                fn.source_code = row.source_code,
+                fn.docstring = row.docstring
         """, {"rows": batch})
         stats["functions"] += len(batch)
 

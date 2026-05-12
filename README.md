@@ -14,7 +14,8 @@ trueskill-ai/
 │   ├── app/
 │   │   ├── api.py                   # All API routes (35+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
-│   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
+│   │   ├── alias_map.py             # Library alias map: marketing names → import names (PyTorch→torch, OpenCV→cv2, etc.)
+│   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages, docstring extraction)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring & HTML report
 │   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
@@ -232,17 +233,17 @@ npm run dev
 
 ### Verification Pipeline
 The core LangGraph workflow runs three sequential agents:
-1. **Parser** — Extracts structured technical claims from resume PDF. Classifies each claim as `code_verifiable` or `not_code_verifiable` (e.g. Agile, Scrum, soft skills). Deduplicates by topic (keeps highest-difficulty claim per unique topic). Hard cap at 20 claims.
+1. **Parser** — Extracts structured technical claims from resume PDF. Classifies each claim as `code_verifiable` or `not_code_verifiable` (e.g. Agile, leadership, communication, etc.). Extracts a `specific_libraries` list per claim (e.g. `PyTorch → ["torch"]`, `OpenCV → ["cv2"]`) to drive precise Cypher matching. Deduplicates by topic (keeps highest-difficulty claim per unique topic). Hard cap at 20 claims.
 2. **Auditor** — 3-layer scoped verification:
    - **Layer 1:** Skips `not_code_verifiable` claims immediately (no graph search needed)
-   - **Layer 2:** Routes each claim to the most relevant ingested repos via language/import profiling; falls back to all repos if no match
-   - **Layer 3:** Cypher query searches `n.name`, `n.source_code` (first 1,500 chars), and `n.file_path` for keyword matches — not just node names
+   - **Layer 2:** Routes each claim to the most relevant ingested repos via language/import profiling; falls back to all repos if no match found
+   - **Layer 3:** Cypher query searches `n.name`, `n.module_name`, `n.source_code` (first **8,000** chars), `n.docstring`, and `n.file_path` for keyword matches. Keywords are expanded via `LIBRARY_ALIAS_MAP` (110+ aliases) so `"PyTorch"` finds `import torch`, `"OpenCV"` finds `import cv2`, etc. Returns up to 100 nodes, re-ranked so complex functions appear first.
 3. **Grader** — Scores each claim 0–100 using a calibrated rubric:
    - `evidence_base`: 0 (none) / +15 (imports only) / +30 (function or class nodes)
    - `node_bonus`: +2 per node, capped at +10
-   - `complexity_bonus`: +20 if avg cyclomatic complexity meets difficulty threshold (1.0× multiplier)
-   - `llm_score`: 0–40 from LLM semantic analysis with 4-tier calibration rubric
-   - **Verified** ≥ 65 · **Partially Verified** ≥ 35 · **Unverified** < 35
+   - `depth_bonus`: 0–20 pts based on function count (≥5 fns: +10, ≥2: +5), import diversity (≥3: +5, ≥1: +2), and cyclomatic complexity (max≥5 or avg≥3: +5)
+   - `llm_score`: 0–40 from LLM semantic analysis with 6 code snippets × 2,000 chars each (including file paths)
+   - **Verified** ≥ 60 · **Partially Verified** ≥ 30 · **Unverified** < 30
    - `Not Code-Verifiable` and `Repo Not Available` claims score 0 and are excluded from stats
 
 Results stream back to the frontend via **Server-Sent Events (SSE)**.
@@ -251,6 +252,7 @@ Results stream back to the frontend via **Server-Sent Events (SSE)**.
 - Shallow-clones GitHub repos (depth=1, LFS-safe)
 - Parses **6 languages**: Python, JavaScript, TypeScript, Go, Java, Rust via tree-sitter
 - Extracts `File`, `Class`, `Function`, `Import` nodes + relationships into Neo4j AuraDB
+- Captures **docstrings** from Python functions (via `ast.get_docstring`) and stores them as `n.docstring` on Function nodes — searchable at query time
 - Computes **cyclomatic complexity** for every function
 
 ### 3D Knowledge Graph
@@ -290,11 +292,12 @@ The ✨ **Explain** button sends rich structural context to Groq Llama 3.3 70B a
 
 ### Project Verification Section
 The **Projects tab** in the dashboard verifies resume project claims against ingested GitHub repos:
-- **Tech Stack Coverage (40 pts)** — checks each claimed technology against code evidence nodes
-- **Architecture Assessment (35 pts)** — LLM assesses architecture patterns, design decisions, and code quality
+- **Tech Stack Coverage (40 pts)** — checks each claimed technology against code evidence nodes using `LIBRARY_ALIAS_MAP` + `SPECIFIC_TECH_IMPORTS` for alias-aware matching (e.g. `GoogleEarthEngine → ee`, `OpenCV → cv2`). Cypher searches 8,000 chars of source code + docstrings per node.
+- **Architecture Assessment (35 pts)** — LLM receives function names, class names, imports, directory structure **and actual function source code** (top 5 most complex functions × 1,500 chars each) for evidence-grounded bullet assessment
 - **Claim Support (25 pts)** — evaluates each resume bullet against found code evidence
-- **Bullet Verdicts** — per-bullet supported/unsupported with missing evidence hints
-- **Match Confidence** — Jaccard + substring containment matching to map projects → repos
+- **Bullet Verdicts** — per-bullet supported/unsupported with missing evidence hints and specific file/function citations
+- **Match Confidence** — 5-layer matching: URL → name Jaccard+substring → import overlap (alias-aware) → language tiebreaker → None
+- **Thresholds:** Verified ≥ 60 · Partially Verified ≥ 28 · Unverified < 28
 - **Repo Override** — manual repo dropdown to re-verify against a different ingested repo
 
 #### 5 AI Features inside each Project card
@@ -338,9 +341,9 @@ Inside each expanded `SkillCard`, a **4-bar transparent score breakdown panel** 
 |-----|-----|--------|
 | Evidence Presence (graduated by type) | 30 | Indigo |
 | Node Bonus | 10 | Indigo |
-| Complexity Match | 20 | Amber |
+| Depth Bonus (fn count + import diversity + complexity) | 20 | Amber |
 | AI Reasoning Quality | 40 | Violet |
-The grader (`agents.py`) now returns a `score_breakdown` dict alongside every `VerificationResult`.
+The grader (`agents.py`) returns a `score_breakdown` dict with keys `evidence_base`, `node_bonus`, `complexity` (depth_bonus), `llm` alongside every `VerificationResult`.
 
 A **confidence tier badge** is displayed next to the score bar based on evidence node count:
 | Count | Tier | Colour |
