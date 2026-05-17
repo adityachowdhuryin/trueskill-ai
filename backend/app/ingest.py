@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -29,6 +30,9 @@ import tree_sitter_python as tspython
 from tree_sitter import Language, Parser, Node
 
 from .db import neo4j_driver
+
+# Thread pool for parallel file parsing (I/O + CPU bound; 8 workers is optimal)
+_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="trueskill_parse")
 
 
 # =============================================================================
@@ -177,69 +181,95 @@ def cleanup_repo(repo_path: str) -> None:
 
 
 # =============================================================================
-# Tree-Sitter Parser Setup (Improvement #11 — multi-language)
+# Tree-Sitter Parser Setup — Module-level singletons (Opt 6)
 # =============================================================================
 
+# Parsers are initialized ONCE at module import time and reused across all calls.
+# Each Parser object is stateless after construction — safe for concurrent use.
+
+_PYTHON_PARSER: Optional[Parser] = None
+_JS_PARSER: Optional[Parser] = None
+_TS_PARSER: Optional[Parser] = None
+_GO_PARSER: Optional[Parser] = None
+_JAVA_PARSER: Optional[Parser] = None
+_RUST_PARSER: Optional[Parser] = None
+
+
 def _get_python_parser() -> Parser:
-    """Initialize and return a tree-sitter parser for Python."""
-    PY_LANGUAGE = Language(tspython.language())
-    parser = Parser(PY_LANGUAGE)
-    return parser
+    global _PYTHON_PARSER
+    if _PYTHON_PARSER is None:
+        _PYTHON_PARSER = Parser(Language(tspython.language()))
+    return _PYTHON_PARSER
 
 
 def _get_js_parser() -> Optional[Parser]:
-    """
-    Initialize and return a tree-sitter parser for JavaScript.
-    Returns None if tree-sitter-javascript is not installed.
-    """
-    try:
-        import tree_sitter_javascript as tsjavascript
-        JS_LANGUAGE = Language(tsjavascript.language())
-        parser = Parser(JS_LANGUAGE)
-        return parser
-    except ImportError:
-        return None
+    global _JS_PARSER
+    if _JS_PARSER is None:
+        try:
+            import tree_sitter_javascript as tsjavascript
+            _JS_PARSER = Parser(Language(tsjavascript.language()))
+        except ImportError:
+            pass
+    return _JS_PARSER
 
 
 def _get_ts_parser() -> Optional[Parser]:
-    """
-    Initialize and return a tree-sitter parser for TypeScript.
-    Returns None if tree-sitter-typescript is not installed.
-    """
-    try:
-        import tree_sitter_typescript as tstypescript
-        TS_LANGUAGE = Language(tstypescript.language_typescript())
-        parser = Parser(TS_LANGUAGE)
-        return parser
-    except ImportError:
-        return None
+    global _TS_PARSER
+    if _TS_PARSER is None:
+        try:
+            import tree_sitter_typescript as tstypescript
+            _TS_PARSER = Parser(Language(tstypescript.language_typescript()))
+        except ImportError:
+            pass
+    return _TS_PARSER
 
 
 def _get_go_parser() -> Optional[Parser]:
-    """Initialize tree-sitter for Go."""
-    try:
-        import tree_sitter_go as tsgo
-        return Parser(Language(tsgo.language()))
-    except ImportError:
-        return None
+    global _GO_PARSER
+    if _GO_PARSER is None:
+        try:
+            import tree_sitter_go as tsgo
+            _GO_PARSER = Parser(Language(tsgo.language()))
+        except ImportError:
+            pass
+    return _GO_PARSER
 
 
 def _get_java_parser() -> Optional[Parser]:
-    """Initialize tree-sitter for Java."""
-    try:
-        import tree_sitter_java as tsjava
-        return Parser(Language(tsjava.language()))
-    except ImportError:
-        return None
+    global _JAVA_PARSER
+    if _JAVA_PARSER is None:
+        try:
+            import tree_sitter_java as tsjava
+            _JAVA_PARSER = Parser(Language(tsjava.language()))
+        except ImportError:
+            pass
+    return _JAVA_PARSER
 
 
 def _get_rust_parser() -> Optional[Parser]:
-    """Initialize tree-sitter for Rust."""
-    try:
-        import tree_sitter_rust as tsrust
-        return Parser(Language(tsrust.language()))
-    except ImportError:
-        return None
+    global _RUST_PARSER
+    if _RUST_PARSER is None:
+        try:
+            import tree_sitter_rust as tsrust
+            _RUST_PARSER = Parser(Language(tsrust.language()))
+        except ImportError:
+            pass
+    return _RUST_PARSER
+
+
+# Eagerly warm all parsers at import time (amortizes first-call cost)
+def _warm_parsers():
+    _get_python_parser()
+    _get_js_parser()
+    _get_ts_parser()
+    _get_go_parser()
+    _get_java_parser()
+    _get_rust_parser()
+
+try:
+    _warm_parsers()
+except Exception:
+    pass  # Never crash on import
 
 
 # Language to file extension mapping (Improvement #11)
@@ -704,87 +734,107 @@ def _parse_generic_file(
 # Main Parsing Function
 # =============================================================================
 
+def _parse_one_file(
+    file_path_full: str,
+    relative_path: str,
+    language: str,
+    repo_id: str,
+) -> tuple["FileNode", list, list, list]:
+    """
+    Parse one source file and return (FileNode, classes, functions, imports).
+    Designed to run in a thread pool.
+    """
+    file_node = FileNode(name=Path(file_path_full).name, path=relative_path,
+                         language=language, repo_id=repo_id)
+    try:
+        if language == "python":
+            classes, functions, imports = _parse_python_file(
+                file_path_full, relative_path, repo_id, _get_python_parser())
+        elif language == "javascript":
+            parser = _get_js_parser()
+            if parser:
+                classes, functions, imports = _parse_js_ts_file(
+                    file_path_full, relative_path, repo_id, parser)
+            else:
+                return file_node, [], [], []
+        elif language == "typescript":
+            parser = _get_ts_parser()
+            if parser:
+                classes, functions, imports = _parse_js_ts_file(
+                    file_path_full, relative_path, repo_id, parser)
+            else:
+                return file_node, [], [], []
+        elif language == "go":
+            parser = _get_go_parser()
+            if parser:
+                classes, functions, imports = _parse_generic_file(
+                    file_path_full, relative_path, repo_id, parser)
+            else:
+                return file_node, [], [], []
+        elif language == "java":
+            parser = _get_java_parser()
+            if parser:
+                classes, functions, imports = _parse_generic_file(
+                    file_path_full, relative_path, repo_id, parser)
+            else:
+                return file_node, [], [], []
+        elif language == "rust":
+            parser = _get_rust_parser()
+            if parser:
+                classes, functions, imports = _parse_generic_file(
+                    file_path_full, relative_path, repo_id, parser)
+            else:
+                return file_node, [], [], []
+        else:
+            return file_node, [], [], []
+    except Exception as e:
+        print(f"⚠ Parse error in {relative_path}: {e}")
+        return file_node, [], [], []
+    return file_node, classes, functions, imports
+
+
 def parse_codebase(repo_path: str, repo_id: str) -> GraphData:
     """
     Parse an entire codebase and extract graph data.
-    Supports Python, JavaScript, and TypeScript.
-    
-    Args:
-        repo_path: Path to the cloned repository
-        repo_id: Unique identifier for the repository
-        
-    Returns:
-        GraphData containing all extracted nodes
+    Opt bonus: files are parsed in parallel using a thread pool (8 workers).
+    Parsers are module-level singletons — no re-initialization per run.
     """
     graph_data = GraphData(repo_id=repo_id)
-    python_parser = _get_python_parser()
-    js_parser = _get_js_parser()
-    ts_parser = _get_ts_parser()
-    go_parser = _get_go_parser()
-    java_parser = _get_java_parser()
-    rust_parser = _get_rust_parser()
-    
     repo_path_obj = Path(repo_path)
-    
+
     # Directories to skip
-    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox", "dist", "build", ".next", "target", "vendor"}
-    
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv",
+                 ".tox", "dist", "build", ".next", "target", "vendor"}
+
+    # Collect all parseable files first
+    files_to_parse: list[tuple[str, str, str]] = []
     for root, dirs, files in os.walk(repo_path_obj):
-        # Skip excluded directories
         dirs[:] = [d for d in dirs if d not in skip_dirs]
-        
         for file_name in files:
             file_path_full = os.path.join(root, file_name)
             relative_path = os.path.relpath(file_path_full, repo_path_obj)
-            
             language = _detect_language(file_path_full)
-            if language is None:
-                continue  # Skip unsupported file types
-            
-            # Create File node
-            graph_data.files.append(FileNode(
-                name=file_name,
-                path=relative_path,
-                language=language,
-                repo_id=repo_id
-            ))
-            
-            # Parse based on language
-            if language == "python":
-                classes, functions, imports = _parse_python_file(
-                    file_path_full, relative_path, repo_id, python_parser
-                )
-            elif language == "javascript" and js_parser:
-                classes, functions, imports = _parse_js_ts_file(
-                    file_path_full, relative_path, repo_id, js_parser
-                )
-            elif language == "typescript" and ts_parser:
-                classes, functions, imports = _parse_js_ts_file(
-                    file_path_full, relative_path, repo_id, ts_parser
-                )
-            elif language == "go" and go_parser:
-                classes, functions, imports = _parse_generic_file(
-                    file_path_full, relative_path, repo_id, go_parser
-                )
-            elif language == "java" and java_parser:
-                classes, functions, imports = _parse_generic_file(
-                    file_path_full, relative_path, repo_id, java_parser
-                )
-            elif language == "rust" and rust_parser:
-                classes, functions, imports = _parse_generic_file(
-                    file_path_full, relative_path, repo_id, rust_parser
-                )
-            else:
-                continue
+            if language:
+                files_to_parse.append((file_path_full, relative_path, language))
 
+    # Parse all files concurrently
+    futures = [
+        _PARSE_EXECUTOR.submit(_parse_one_file, fp, rp, lang, repo_id)
+        for fp, rp, lang in files_to_parse
+    ]
+    for future in as_completed(futures):
+        try:
+            file_node, classes, functions, imports = future.result()
+            graph_data.files.append(file_node)
             graph_data.classes.extend(classes)
             graph_data.functions.extend(functions)
             graph_data.imports.extend(imports)
-    
+        except Exception as e:
+            print(f"⚠ Worker error during parse: {e}")
+
     print(f"✓ Parsed codebase: {len(graph_data.files)} files, "
           f"{len(graph_data.classes)} classes, {len(graph_data.functions)} functions, "
           f"{len(graph_data.imports)} imports")
-    
     return graph_data
 
 
@@ -1069,21 +1119,23 @@ def extract_file_dates(repo_path: str) -> dict[str, dict[str, str]]:
 
 
 def _store_file_dates(repo_id: str, file_dates: dict[str, dict[str, str]]) -> None:
-    """Store first_seen and last_modified on File nodes in Neo4j."""
+    """Opt 5: UNWIND-based batch update instead of one session.run() per file."""
     if not file_dates:
         return
+    rows = [
+        {"path": path, "first_seen": dates["first_seen"], "last_modified": dates["last_modified"]}
+        for path, dates in file_dates.items()
+    ]
     try:
-        with neo4j_driver.get_session() as session:
-            for path, dates in file_dates.items():
-                session.run(
-                    """
-                    MATCH (f:File {repo_id: $repo_id, path: $path})
-                    SET f.first_seen = $first_seen, f.last_modified = $last_modified
-                    """,
-                    {"repo_id": repo_id, "path": path,
-                     "first_seen": dates["first_seen"],
-                     "last_modified": dates["last_modified"]}
-                )
+        for batch in _batch_list(rows, 500):
+            neo4j_driver.execute_write(
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo_id: $repo_id, path: row.path})
+                SET f.first_seen = row.first_seen, f.last_modified = row.last_modified
+                """,
+                {"repo_id": repo_id, "rows": batch}
+            )
     except Exception as e:
         print(f"⚠ Could not store file dates: {e}")
 

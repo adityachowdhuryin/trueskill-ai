@@ -14,6 +14,8 @@ Thresholds: Verified ≥ 65 · Partially Verified ≥ 35 · Unverified < 35
 """
 
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -23,6 +25,12 @@ from .llm import get_llm_model, parse_json_response
 from .agents import _expand_topic_keywords, build_repo_profile_map
 from .alias_map import LIBRARY_ALIAS_MAP
 from .storage import get_repo_info, get_all_repos
+
+# Thread pool for concurrent Neo4j tech-coverage queries
+_TECH_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="trueskill_tech")
+
+# Semaphore: max concurrent project architecture LLM calls
+_ARCH_SEM = asyncio.Semaphore(6)
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -326,7 +334,8 @@ def match_project_to_repo(
 
 # ─── Step 3: Tech stack coverage via Cypher ───────────────────────────────────
 
-def check_tech_coverage(project: ProjectClaim, repo_id: str) -> list:
+def _check_one_tech(repo_id: str, tech: str) -> "TechCoverageItem":
+    """Check a single tech in Neo4j — designed to run in thread pool."""
     CYPHER = """
     MATCH (n)
     WHERE n.repo_id = $repo_id
@@ -343,28 +352,41 @@ def check_tech_coverage(project: ProjectClaim, repo_id: str) -> list:
            COALESCE(n.module_name, n.name) AS display_name
     LIMIT 60
     """
-    results = []
-    for tech in project.tech_stack:
-        # Fix A: use LIBRARY_ALIAS_MAP + SPECIFIC_TECH_IMPORTS for richer keyword expansion
-        keywords = _expand_topic_keywords(tech)
-        for alias_key, alias_pkgs in LIBRARY_ALIAS_MAP.items():
-            if tech.lower() == alias_key or alias_key in tech.lower() or tech.lower() in alias_key:
-                keywords.extend(alias_pkgs)
-        keywords.extend(SPECIFIC_TECH_IMPORTS.get(tech.lower(), []))
-        keywords = list(set(keywords + [tech.lower()] + tech.lower().split()))
-        keywords = [k for k in keywords if len(k) >= 2]
-        try:
-            rows = query_graph(CYPHER, {"repo_id": repo_id, "keywords": keywords})
-            found = len(rows) > 0
-            node_ids = []
-            for row in rows[:6]:
-                name = row.get("node_name") or row.get("display_name", "")
-                fp   = row.get("file_path", "")
-                node_ids.append(f"{fp}:{name}" if fp else name)
-            results.append(TechCoverageItem(tech=tech, found=found, evidence_node_ids=node_ids))
-        except Exception:
-            results.append(TechCoverageItem(tech=tech, found=False))
-    return results
+    # Fix A: use LIBRARY_ALIAS_MAP + SPECIFIC_TECH_IMPORTS for richer keyword expansion
+    keywords = _expand_topic_keywords(tech)
+    for alias_key, alias_pkgs in LIBRARY_ALIAS_MAP.items():
+        if tech.lower() == alias_key or alias_key in tech.lower() or tech.lower() in alias_key:
+            keywords.extend(alias_pkgs)
+    keywords.extend(SPECIFIC_TECH_IMPORTS.get(tech.lower(), []))
+    keywords = list(set(keywords + [tech.lower()] + tech.lower().split()))
+    keywords = [k for k in keywords if len(k) >= 2]
+    try:
+        rows = query_graph(CYPHER, {"repo_id": repo_id, "keywords": keywords})
+        found = len(rows) > 0
+        node_ids = []
+        for row in rows[:6]:
+            name = row.get("node_name") or row.get("display_name", "")
+            fp   = row.get("file_path", "")
+            node_ids.append(f"{fp}:{name}" if fp else name)
+        return TechCoverageItem(tech=tech, found=found, evidence_node_ids=node_ids)
+    except Exception:
+        return TechCoverageItem(tech=tech, found=False)
+
+
+def check_tech_coverage(project: "ProjectClaim", repo_id: str) -> list:
+    """
+    Opt 4: all tech queries fire concurrently in _TECH_EXECUTOR (thread pool).
+    Results are in the same order as project.tech_stack — logic unchanged.
+    """
+    if not project.tech_stack:
+        return []
+    from concurrent.futures import as_completed
+    futures = [
+        _TECH_EXECUTOR.submit(_check_one_tech, repo_id, tech)
+        for tech in project.tech_stack
+    ]
+    # Wait for all (preserving order via result() on each future in sequence)
+    return [f.result() for f in futures]
 
 
 # ─── Step 4: Architecture assessment (calibrated LLM) ────────────────────────
@@ -548,7 +570,8 @@ async def verify_project(
     match_confidence: float,
     match_reason: str,
 ) -> ProjectVerificationResult:
-    tech_coverage = check_tech_coverage(project, repo_id)
+    """Verify one project. Opt 2: assess_architecture call guarded by _ARCH_SEM."""
+    tech_coverage = check_tech_coverage(project, repo_id)   # already parallelised (Opt 4)
     found_count   = sum(1 for t in tech_coverage if t.found)
     total_count   = max(len(tech_coverage), 1)
     tech_coverage_score = min(round((found_count / total_count) * 40), 40)
@@ -581,7 +604,8 @@ async def verify_project(
             all_evidence_node_ids=[nid for t in tech_coverage if t.found for nid in t.evidence_node_ids],
         )
 
-    arch = await assess_architecture(project, tech_coverage, repo_id, coverage_pct)
+    async with _ARCH_SEM:  # Opt 2: guard concurrent LLM calls
+        arch = await assess_architecture(project, tech_coverage, repo_id, coverage_pct)
     architecture_score  = arch["architecture_score"]
     reasoning           = arch["reasoning"]
     bullet_verdicts     = arch["bullet_verdicts"]
@@ -675,13 +699,13 @@ async def analyze_projects(resume_text: str, repo_ids: list) -> dict:
 
     projects = await parse_project_claims(resume_text)
 
-    results = []
-    for project in projects:
+    # ── Opt 2: Build verification tasks for all matched projects, run concurrently ──
+    async def _verify_one(project: ProjectClaim) -> dict:
         matched_id, confidence, reason = match_project_to_repo(
             project, repo_profile_map, repo_url_map, repo_meta)
 
         if matched_id is None:
-            results.append(ProjectVerificationResult(
+            return ProjectVerificationResult(
                 project_id=project.project_id,
                 name=project.name,
                 tech_stack=project.tech_stack,
@@ -694,16 +718,18 @@ async def analyze_projects(resume_text: str, repo_ids: list) -> dict:
                     claim=b, supported=False,
                     missing_evidence_hint="Ingest the project's GitHub repository first."
                 ).model_dump() for b in project.bullet_claims],
-            ).model_dump())
-        else:
-            meta = repo_meta.get(matched_id, {})
-            result = await verify_project(
-                project, matched_id,
-                meta.get("name", matched_id[:8]),
-                meta.get("url", ""),
-                confidence, reason,
-            )
-            results.append(result.model_dump())
+            ).model_dump()
+
+        meta = repo_meta.get(matched_id, {})
+        result = await verify_project(
+            project, matched_id,
+            meta.get("name", matched_id[:8]),
+            meta.get("url", ""),
+            confidence, reason,
+        )
+        return result.model_dump()
+
+    results = list(await asyncio.gather(*[_verify_one(p) for p in projects]))
 
     verified   = sum(1 for r in results if r["status"] == "Verified")
     partial    = sum(1 for r in results if r["status"] == "Partially Verified")

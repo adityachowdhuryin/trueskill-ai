@@ -9,6 +9,8 @@ Workflow (from project_spec.md):
 """
 
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, TypedDict, Optional, Union
 from dataclasses import dataclass
 
@@ -20,6 +22,13 @@ from pydantic import BaseModel, Field
 from .db import query_graph
 from .llm import get_llm_model, parse_json_response
 from .alias_map import LIBRARY_ALIAS_MAP
+
+# ── Concurrency controls ──────────────────────────────────────────────────────
+# Thread pool for running synchronous Neo4j calls concurrently inside async fns
+_DB_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="trueskill_db")
+
+# Semaphore: max concurrent Groq LLM calls (primary + backup key → 8 is safe)
+_GRADER_SEM = asyncio.Semaphore(8)
 
 
 # =============================================================================
@@ -190,40 +199,61 @@ _LANG_HINTS: dict[str, set[str]] = {
 }
 
 
+def _fetch_one_repo_profile(repo_id: str) -> tuple[str, dict]:
+    """Fetch language/import/name profile for ONE repo — runs in thread pool."""
+    try:
+        # Single combined query: 1 round-trip instead of 3
+        combined = query_graph(
+            """
+            MATCH (n) WHERE n.repo_id = $rid
+            WITH n
+            RETURN
+              CASE WHEN n:File AND n.language IS NOT NULL THEN 'lang:' + toLower(n.language) END AS lang_tag,
+              CASE WHEN n:Import THEN 'imp:' + toLower(n.module_name) END AS imp_tag,
+              CASE WHEN (n:Function OR n:Class) AND n.name IS NOT NULL THEN 'nm:' + toLower(n.name) END AS nm_tag
+            LIMIT 200
+            """,
+            {"rid": repo_id}
+        )
+        languages: set[str] = set()
+        imports: set[str] = set()
+        names: set[str] = set()
+        for r in combined:
+            if r.get("lang_tag"):
+                languages.add(r["lang_tag"][5:])  # strip 'lang:'
+            if r.get("imp_tag"):
+                imports.add(r["imp_tag"][4:])     # strip 'imp:'
+            if r.get("nm_tag"):
+                names.add(r["nm_tag"][3:])        # strip 'nm:'
+        return repo_id, {"languages": languages, "imports": imports, "names": names}
+    except Exception:
+        return repo_id, {"languages": set(), "imports": set(), "names": set()}
+
+
 def build_repo_profile_map(repo_ids: list[str]) -> dict[str, dict]:
     """
     Query Neo4j for each repo's language and import profile.
-    Used to route claims to the most relevant repos.
+    Sync version — used from sync callers (project_verifier).
     """
-    profile_map: dict[str, dict] = {}
-    for repo_id in repo_ids:
-        try:
-            lang_results = query_graph(
-                "MATCH (f:File) WHERE f.repo_id = $rid AND f.language IS NOT NULL "
-                "RETURN DISTINCT toLower(f.language) AS lang",
-                {"rid": repo_id}
-            )
-            languages: set[str] = {r["lang"] for r in lang_results if r.get("lang")}
+    import concurrent.futures
+    if len(repo_ids) <= 1:
+        return dict([_fetch_one_repo_profile(rid) for rid in repo_ids])
+    with ThreadPoolExecutor(max_workers=min(len(repo_ids), 8)) as ex:
+        return dict(ex.map(_fetch_one_repo_profile, repo_ids))
 
-            import_results = query_graph(
-                "MATCH (i:Import) WHERE i.repo_id = $rid "
-                "RETURN DISTINCT toLower(i.module_name) AS mod LIMIT 50",
-                {"rid": repo_id}
-            )
-            imports: set[str] = {r["mod"] for r in import_results if r.get("mod")}
 
-            name_results = query_graph(
-                "MATCH (n) WHERE n.repo_id = $rid AND n.name IS NOT NULL "
-                "AND (n:Function OR n:Class) "
-                "RETURN DISTINCT toLower(n.name) AS nm LIMIT 60",
-                {"rid": repo_id}
-            )
-            names: set[str] = {r["nm"] for r in name_results if r.get("nm")}
-
-            profile_map[repo_id] = {"languages": languages, "imports": imports, "names": names}
-        except Exception:
-            profile_map[repo_id] = {"languages": set(), "imports": set(), "names": set()}
-    return profile_map
+async def build_repo_profile_map_async(repo_ids: list[str]) -> dict[str, dict]:
+    """
+    Async version — fetches all repo profiles concurrently in the DB thread pool.
+    Used from graph_auditor_node.
+    """
+    loop = asyncio.get_event_loop()
+    tasks = [
+        loop.run_in_executor(_DB_EXECUTOR, _fetch_one_repo_profile, rid)
+        for rid in repo_ids
+    ]
+    results = await asyncio.gather(*tasks)
+    return dict(results)
 
 
 def route_claim_to_repos(
@@ -489,25 +519,24 @@ Return the claims as JSON."""
 async def graph_auditor_node(state: VerificationState) -> VerificationState:
     """
     Query the knowledge graph for evidence supporting each claim.
-    Applies claim-type filtering (Layer 1) and repo routing (Layer 2).
+    Opt 8: all Neo4j evidence queries run concurrently in the DB thread pool.
     """
     claims = state["claims"]
     repo_ids = state.get("repo_ids") or [state["repo_id"]]
-    evidence_map: dict[str, dict] = {}
+    loop = asyncio.get_event_loop()
 
-    # Build repo profile map once for all routing decisions
-    repo_profile_map = build_repo_profile_map(repo_ids)
+    # Build repo profile map concurrently (Opt 3)
+    repo_profile_map = await build_repo_profile_map_async(repo_ids)
 
-    for claim_dict in claims:
+    async def _fetch_evidence(claim_dict: dict) -> tuple[str, dict]:
         claim_id = claim_dict.get("id", f"claim_{claims.index(claim_dict)}")
 
         # Layer 1 — skip not-code-verifiable claims immediately
         if claim_dict.get("claim_type") == "not_code_verifiable":
             claim_dict["skip_reason"] = "not_code_verifiable"
-            evidence_map[claim_id] = GraphEvidence().model_dump()
-            continue
+            return claim_id, GraphEvidence().model_dump()
 
-        # Layer 2 — route claim to relevant repos (falls back to all if no match)
+        # Layer 2 — route claim to relevant repos
         target_repos, was_fallback = route_claim_to_repos(claim_dict, repo_profile_map)
         if not target_repos:
             target_repos = repo_ids
@@ -517,16 +546,20 @@ async def graph_auditor_node(state: VerificationState) -> VerificationState:
         claim = ResumeClaim(**{k: v for k, v in claim_dict.items() if k in valid_fields})
 
         try:
-            evidence = query_knowledge_graph(claim, target_repos)
-            # If routing fell back to all repos AND still no evidence found → mark it
+            # Run sync Neo4j query in thread pool so all claims fire concurrently
+            evidence = await loop.run_in_executor(
+                _DB_EXECUTOR, query_knowledge_graph, claim, target_repos
+            )
             if was_fallback and not evidence.node_ids:
                 claim_dict["skip_reason"] = "repo_not_available"
-            evidence_map[claim_id] = evidence.model_dump()
+            return claim_id, evidence.model_dump()
         except Exception as e:
             state["errors"].append(f"Auditor error for {claim_id}: {str(e)}")
-            evidence_map[claim_id] = GraphEvidence().model_dump()
+            return claim_id, GraphEvidence().model_dump()
 
-    state["evidence_map"] = evidence_map
+    # Fire all evidence fetches concurrently
+    pairs = await asyncio.gather(*[_fetch_evidence(c) for c in claims])
+    state["evidence_map"] = dict(pairs)
     return state
 
 
@@ -534,123 +567,102 @@ async def graph_auditor_node(state: VerificationState) -> VerificationState:
 # Node C: Grader
 # =============================================================================
 
-async def grader_node(state: VerificationState) -> VerificationState:
+async def _grade_one_claim(
+    i: int,
+    claim_dict: dict,
+    evidence_dict: dict,
+    llm: Any,
+    semaphore: asyncio.Semaphore,
+) -> dict:
     """
-    Grade each claim based on the evidence found.
-    
-    Scoring criteria:
-    - Evidence exists: +30 points base
-    - Number of matching nodes: +5 per node (max 20)
-    - Complexity matches difficulty: +20 if aligned
-    - Code patterns match claim: +30 from LLM analysis
-    
-    Input: claims + evidence_map
-    Output: results (list of VerificationResult)
+    Grade a single claim. Runs concurrently for all claims via asyncio.gather.
+    Scoring logic is 100% identical to the old sequential version.
     """
-    claims  = state["claims"]
-    evidence_map = state["evidence_map"]
-    results: list[dict] = []
+    # ── Handle skipped claims (no LLM needed) ────────────────────────────────
+    skip_reason = claim_dict.get("skip_reason")
+    if skip_reason == "not_code_verifiable":
+        return VerificationResult(
+            claim_id=claim_dict.get("id", f"claim_{i}"),
+            topic=claim_dict.get("topic", ""),
+            claim_text=claim_dict.get("claim_text", ""),
+            status="Not Code-Verifiable",
+            score=0,
+            evidence_node_ids=[],
+            reasoning="This claim describes a methodology, soft skill, or domain concept that does not manifest directly in source code and cannot be verified via code analysis.",
+            complexity_analysis="",
+            score_breakdown={},
+        ).model_dump()
 
-    llm = get_llm_model(temperature=0.1)
+    if skip_reason == "repo_not_available":
+        return VerificationResult(
+            claim_id=claim_dict.get("id", f"claim_{i}"),
+            topic=claim_dict.get("topic", ""),
+            claim_text=claim_dict.get("claim_text", ""),
+            status="Repo Not Available",
+            score=0,
+            evidence_node_ids=[],
+            reasoning="No ingested repository covers this technology area. Ingest a relevant repository to verify this claim.",
+            complexity_analysis="",
+            score_breakdown={},
+        ).model_dump()
 
-    for i, claim_dict in enumerate(claims):
-        # Handle Layer-1 / Layer-2 skipped claims first
-        skip_reason = claim_dict.get("skip_reason")
-        if skip_reason == "not_code_verifiable":
-            results.append(VerificationResult(
-                claim_id=claim_dict.get("id", f"claim_{i}"),
-                topic=claim_dict.get("topic", ""),
-                claim_text=claim_dict.get("claim_text", ""),
-                status="Not Code-Verifiable",
-                score=0,
-                evidence_node_ids=[],
-                reasoning="This claim describes a methodology, soft skill, or domain concept that does not manifest directly in source code and cannot be verified via code analysis.",
-                complexity_analysis="",
-                score_breakdown={},
-            ).model_dump())
-            continue
-        if skip_reason == "repo_not_available":
-            results.append(VerificationResult(
-                claim_id=claim_dict.get("id", f"claim_{i}"),
-                topic=claim_dict.get("topic", ""),
-                claim_text=claim_dict.get("claim_text", ""),
-                status="Repo Not Available",
-                score=0,
-                evidence_node_ids=[],
-                reasoning="No ingested repository covers this technology area. Ingest a relevant repository to verify this claim.",
-                complexity_analysis="",
-                score_breakdown={},
-            ).model_dump())
-            continue
+    claim_id = claim_dict.get("id", f"claim_{i}")
+    evidence = GraphEvidence(**evidence_dict) if evidence_dict else GraphEvidence()
 
+    # ── Evidence base score ───────────────────────────────────────────────────
+    has_functions = any(t == "Function" for t in evidence.node_types)
+    has_classes   = any(t == "Class"    for t in evidence.node_types)
+    has_imports   = any(t == "Import"   for t in evidence.node_types)
 
-        claim_id = claim_dict.get("id", f"claim_{i}")
-        evidence_dict = evidence_map.get(claim_id, {})
-        evidence = GraphEvidence(**evidence_dict) if evidence_dict else GraphEvidence()
+    if has_functions or has_classes:
+        evidence_base = 30
+    elif has_imports:
+        evidence_base = 15
+    else:
+        evidence_base = 0
 
-        # ── Graduated evidence_base by node type quality ──────────────────────
-        # Import nodes (library used) = 15 pts
-        # Function/Class nodes (actual implementation) = 30 pts
-        has_functions = any(t == "Function" for t in evidence.node_types)
-        has_classes   = any(t == "Class"    for t in evidence.node_types)
-        has_imports   = any(t == "Import"   for t in evidence.node_types)
+    # ── Node count bonus (capped at 10) ───────────────────────────────────────
+    node_bonus = min(len(evidence.node_ids) * 2, 10) if evidence.node_ids else 0
 
-        if has_functions or has_classes:
-            evidence_base = 30
-        elif has_imports:
-            evidence_base = 15
+    # ── Depth bonus ───────────────────────────────────────────────────────────
+    depth_bonus = 0
+    complexity_analysis = ""
+    function_node_count = sum(1 for r in evidence.raw_results if "Function" in r.get("node_labels", []))
+    import_node_count   = sum(1 for r in evidence.raw_results if "Import"   in r.get("node_labels", []))
+
+    if function_node_count >= 5:
+        depth_bonus += 10
+    elif function_node_count >= 2:
+        depth_bonus += 5
+
+    if import_node_count >= 3:
+        depth_bonus += 5
+    elif import_node_count >= 1:
+        depth_bonus += 2
+
+    if evidence.complexity_scores:
+        avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
+        max_complexity = max(evidence.complexity_scores)
+        if max_complexity >= 5 or avg_complexity >= 3:
+            depth_bonus += 5
+            complexity_analysis = (
+                f"Non-trivial implementation detected "
+                f"(avg complexity: {avg_complexity:.1f}, max: {max_complexity})."
+            )
         else:
-            evidence_base = 0
+            complexity_analysis = (
+                f"Implementation found but appears straightforward "
+                f"(avg complexity: {avg_complexity:.1f})."
+            )
 
-        # ── Node count bonus (capped at 10) ───────────────────────────────────
-        node_bonus = min(len(evidence.node_ids) * 2, 10) if evidence.node_ids else 0
+    base_score = evidence_base + node_bonus + depth_bonus
 
-        # ── Fix 5: Depth bonus replaces binary complexity bonus ───────────────
-        depth_bonus = 0
-        complexity_analysis = ""
-        # Count using raw_results (one entry per matched node) — node_types is a set so
-        # counting per-type from it would always return 0 or 1.
-        function_node_count = sum(
-            1 for r in evidence.raw_results
-            if "Function" in r.get("node_labels", [])
-        )
-        import_node_count = sum(
-            1 for r in evidence.raw_results
-            if "Import" in r.get("node_labels", [])
-        )
+    # ── LLM semantic analysis (0-40 pts) — guarded by semaphore ─────────────
+    llm_score = 0
+    reasoning = ""
 
-        if function_node_count >= 5:
-            depth_bonus += 10
-        elif function_node_count >= 2:
-            depth_bonus += 5
-
-        if import_node_count >= 3:
-            depth_bonus += 5
-        elif import_node_count >= 1:
-            depth_bonus += 2
-
-        if evidence.complexity_scores:
-            avg_complexity = sum(evidence.complexity_scores) / len(evidence.complexity_scores)
-            max_complexity = max(evidence.complexity_scores)
-            if max_complexity >= 5 or avg_complexity >= 3:
-                depth_bonus += 5
-                complexity_analysis = (
-                    f"Non-trivial implementation detected "
-                    f"(avg complexity: {avg_complexity:.1f}, max: {max_complexity})."
-                )
-            else:
-                complexity_analysis = (
-                    f"Implementation found but appears straightforward "
-                    f"(avg complexity: {avg_complexity:.1f})."
-                )
-
-        base_score = evidence_base + node_bonus + depth_bonus
-
-        # ── Fix 3: LLM semantic analysis with richer context (0-40 pts) ───────
-        llm_score = 0
-        reasoning = ""
-
-        if evidence.node_ids:
+    if evidence.node_ids:
+        async with semaphore:
             try:
                 snippet_parts = []
                 for raw_result in evidence.raw_results[:6]:
@@ -692,39 +704,65 @@ Return ONLY JSON: {{"score": <0-40>, "reasoning": "<2-3 sentences citing specifi
 
             except Exception as e:
                 reasoning = f"Analysis error: {str(e)}"
-        else:
-            reasoning = "No code evidence found in the repository for this claim."
+    else:
+        reasoning = "No code evidence found in the repository for this claim."
 
-        # ── Fix 5: Calibrated thresholds (was >=65/>=35) ─────────────────────
-        final_score = min(base_score + llm_score, 100)
+    # ── Final score & status ──────────────────────────────────────────────────
+    final_score = min(base_score + llm_score, 100)
+    if final_score >= 60:
+        status = "Verified"
+    elif final_score >= 30:
+        status = "Partially Verified"
+    else:
+        status = "Unverified"
 
-        if final_score >= 60:
-            status = "Verified"
-        elif final_score >= 30:
-            status = "Partially Verified"
-        else:
-            status = "Unverified"
+    return VerificationResult(
+        claim_id=claim_id,
+        topic=claim_dict.get("topic", ""),
+        claim_text=claim_dict.get("claim_text", ""),
+        status=status,
+        score=final_score,
+        evidence_node_ids=evidence.node_ids,
+        reasoning=reasoning,
+        complexity_analysis=complexity_analysis,
+        score_breakdown={
+            "evidence_base": evidence_base,
+            "node_bonus": node_bonus,
+            "complexity": depth_bonus,
+            "llm": llm_score,
+        },
+    ).model_dump()
 
-        result = VerificationResult(
-            claim_id=claim_id,
-            topic=claim_dict.get("topic", ""),
-            claim_text=claim_dict.get("claim_text", ""),
-            status=status,
-            score=final_score,
-            evidence_node_ids=evidence.node_ids,
-            reasoning=reasoning,
-            complexity_analysis=complexity_analysis,
-            score_breakdown={
-                "evidence_base": evidence_base,
-                "node_bonus": node_bonus,
-                "complexity": depth_bonus,
-                "llm": llm_score,
-            },
+
+async def grader_node(state: VerificationState) -> VerificationState:
+    """
+    Grade each claim based on evidence. Opt 1: all LLM calls run concurrently
+    behind a semaphore of 8 (safe with primary + backup Groq key).
+
+    Input: claims + evidence_map
+    Output: results (list of VerificationResult)
+    """
+    claims  = state["claims"]
+    evidence_map = state["evidence_map"]
+
+    llm = get_llm_model(temperature=0.1)
+
+    # Re-use the module-level semaphore so that grader + coach calls share budget
+    sem = _GRADER_SEM
+
+    tasks = [
+        _grade_one_claim(
+            i,
+            claim_dict,
+            evidence_map.get(claim_dict.get("id", f"claim_{i}"), {}),
+            llm,
+            sem,
         )
+        for i, claim_dict in enumerate(claims)
+    ]
 
-        results.append(result.model_dump())
-
-    state["results"] = results
+    results = await asyncio.gather(*tasks)
+    state["results"] = list(results)
     return state
 
 

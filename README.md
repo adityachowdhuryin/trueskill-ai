@@ -2,7 +2,7 @@
 
 Automated Competency Verification System using GraphRAG (Graph-based Retrieval Augmented Generation).
 
-A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis — using cyclomatic complexity scoring, coding stylometry, and a **Neo4j AuraDB** knowledge graph.
+A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis — using cyclomatic complexity scoring, coding stylometry, and a **Neo4j AuraDB** knowledge graph. Includes **Alex**, a proactive AI career co-pilot with streaming chat, cross-session memory, live screen awareness, and agentic tool-calling.
 
 ---
 
@@ -12,26 +12,31 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 trueskill-ai/
 ├── backend/                         # FastAPI Python backend
 │   ├── app/
-│   │   ├── api.py                   # All API routes (35+ endpoints)
+│   │   ├── api.py                   # All API routes (40+ endpoints)
 │   │   ├── agents.py                # LangGraph verification workflow (Parser → Auditor → Grader)
-│   │   ├── alias_map.py             # Library alias map: marketing names → import names (PyTorch→torch, OpenCV→cv2, etc.)
-│   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages, docstring extraction)
+│   │   ├── alias_map.py             # Library alias map (110+ entries: PyTorch→torch, OpenCV→cv2, etc.)
+│   │   ├── ingest.py                # GitHub repo cloning & AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring & HTML report
 │   │   ├── benchmarks.py            # LLM-generated role skill benchmarks
-│   │   ├── interview.py             # AI interview question generator (skill-scoped)
-│   │   ├── coach.py                 # Gap analysis, bridge projects, heatmap, roadmap, chat & HTML export
+│   │   ├── interview.py             # AI interview question generator
+│   │   ├── coach.py                 # Gap analysis, bridge projects, heatmap, roadmap,
+│   │   │                            #   streaming chat (Alex), cross-session memory, agentic actions
+│   │   ├── jd_fetcher.py            # Fetch & parse live JD URLs
 │   │   ├── challenge.py             # Adversarial LLM claim challenger (Devil's Advocate)
-│   │   ├── project_verifier.py      # Project verification pipeline (tech coverage, arch score, bullet verdicts)
-│   │   ├── project_features.py      # Project-scoped LLM features (interview, challenge, bullet explain)
+│   │   ├── project_verifier.py      # Project verification (tech coverage, arch score, bullet verdicts)
+│   │   ├── project_features.py      # Project-scoped LLM features
 │   │   ├── job_finder.py            # Jooble job search & Apollo.io hiring manager lookup
-│   │   ├── resume_optimizer.py      # LLM-driven keyword rewriting & email drafting
+│   │   ├── resume_optimizer.py      # LLM keyword rewriting & email drafting
 │   │   ├── report.py                # HTML verification report generator
 │   │   ├── storage.py               # SQLite persistence (analyses + share tokens)
 │   │   ├── db.py                    # Neo4j AuraDB driver & query helpers
-│   │   ├── graph_explain.py         # AI architectural summary (8-section structured JSON via Groq)
-│   │   ├── function_explain.py      # Per-function AI explanation with complexity & suggestion
+│   │   ├── graph_explain.py         # AI architectural summary (8-section JSON via Groq)
+│   │   ├── function_explain.py      # Per-function AI explanation
 │   │   └── llm.py                   # Shared LLM client (Groq Llama 3.3 70B) + backup key rotation
+│   ├── data/                        # Local data storage (git-ignored)
+│   │   ├── memories.json            # Alex cross-session memory (30-day expiry per user)
+│   │   └── feedback.jsonl           # 👍/👎 reaction log (newline-delimited JSON)
 │   ├── main.py                      # FastAPI entry point
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -45,30 +50,38 @@ trueskill-ai/
 │       │   ├── resume-toolkit/      # 4-step AI Resume Toolkit
 │       │   └── profile/[id]/        # Public shareable verified profile page
 │       └── components/
-│           ├── GraphVisualizer.tsx  # 3D force-graph: bloom, fog, hover-focus, path finder, AI summary, evidence highlighting
+│           ├── TrueSkillAssistant.tsx   # Alex — AI career coach floating panel (full feature set)
+│           ├── MockInterview.tsx        # Live AI mock interview session
+│           ├── TailoredResume.tsx       # Resume tailoring result panel
+│           ├── SalaryIntelligenceCard.tsx # Salary intelligence result card
+│           ├── ApplicationKit.tsx       # Application kit generator (cover letter, LinkedIn, email)
+│           ├── JdUrlInput.tsx           # URL-based JD import
+│           ├── MatchingJobsPanel.tsx    # Matching jobs from JD analysis
+│           ├── GraphVisualizer.tsx      # 3D force-graph: bloom, focus, AI summary, evidence highlighting
 │           ├── GraphFullscreenModal.tsx
-│           ├── ErrorBoundary.tsx    # React error boundary for graph & heavy components
-│           ├── ATSScorePanel.tsx    # ATS evaluation results panel
-│           ├── SkillCard.tsx        # Per-claim card: score bar, evidence, "Show in Graph", interview prep, code drill-down, devil's advocate
-│           ├── ProjectCard.tsx      # Per-project card: tech coverage, arch score, bullet verdicts + 5 AI features
-│           ├── ProjectSummaryBar.tsx # Project verification summary banner with score rings & status counts
-│           ├── CodeViewer.tsx       # Source code modal with inline syntax highlighting
-│           ├── SkillRadar.tsx       # Radar chart with LLM-generated benchmarks
-│           ├── ContributionHeatmap.tsx # GitHub-style commit heatmap
-│           ├── VerifiedBadge.tsx    # Shareable public profile badge
-│           ├── ResumeOptimizer.tsx  # ATS keyword rewriting UI
-│           ├── EmailComposer.tsx    # Personalized outreach email UI
-│           ├── JobCard.tsx          # Job posting card
-│           ├── SkillTimeline.tsx    # Language timeline chart
-│           ├── Navbar.tsx           # Scroll-aware shared navbar
-│           ├── Skeletons.tsx        # Loading skeletons
+│           ├── ErrorBoundary.tsx        # React error boundary for graph & heavy components
+│           ├── ATSScorePanel.tsx        # ATS evaluation results panel
+│           ├── SkillCard.tsx            # Per-claim card: score bar, evidence, interview prep, devil's advocate
+│           ├── ProjectCard.tsx          # Per-project card: tech coverage, arch score, bullet verdicts + 5 AI features
+│           ├── ProjectSummaryBar.tsx    # Project verification summary banner
+│           ├── CodeViewer.tsx           # Source code modal with inline syntax highlighting
+│           ├── SkillRadar.tsx           # Radar chart with LLM-generated benchmarks
+│           ├── ContributionHeatmap.tsx  # GitHub-style commit heatmap
+│           ├── VerifiedBadge.tsx        # Shareable public profile badge
+│           ├── ResumeOptimizer.tsx      # ATS keyword rewriting UI
+│           ├── EmailComposer.tsx        # Personalized outreach email UI
+│           ├── JobCard.tsx              # Job posting card
+│           ├── SkillTimeline.tsx        # Language timeline chart
+│           ├── Navbar.tsx               # Scroll-aware shared navbar
+│           ├── Skeletons.tsx            # Loading skeletons
 │           ├── AnimatedCounter.tsx
-│           ├── SkillsGapHeatmap.tsx # JD Skills Gap Heatmap
-│           ├── LearningRoadmap.tsx  # Week-by-week learning roadmap with task checkboxes
-│           ├── CoachChat.tsx        # Conversational AI coach chat panel
-│           └── VerificationSummaryBar.tsx # Animated summary dashboard (donut chart, stat cards, filter)
-├── docker-compose.yml               # (Legacy) local Neo4j container config
+│           ├── SkillsGapHeatmap.tsx     # JD Skills Gap Heatmap
+│           ├── LearningRoadmap.tsx      # Week-by-week learning roadmap with task checkboxes
+│           ├── CoachChat.tsx            # Legacy conversational coach chat panel
+│           └── VerificationSummaryBar.tsx # Animated summary dashboard (donut chart, stat cards)
+├── docker-compose.yml               # Local Neo4j container config (legacy — AuraDB preferred)
 ├── start_all.py                     # One-command dev stack launcher
+├── project_spec.md                  # Full technical specification
 └── README.md
 ```
 
@@ -77,8 +90,8 @@ trueskill-ai/
 ## Quick Start
 
 ### Prerequisites
-- Node.js 20+ (for frontend)
-- Python 3.9+ (for backend)
+- Node.js 20+
+- Python 3.9+
 - A **Neo4j AuraDB** free-tier instance — [console.neo4j.io](https://console.neo4j.io)
 
 ### Option 1 — One-Command Launch (Recommended)
@@ -87,8 +100,8 @@ trueskill-ai/
 python start_all.py
 ```
 
-This script automatically:
-1. Verifies your AuraDB configuration in `backend/.env`
+Automatically:
+1. Verifies AuraDB configuration in `backend/.env`
 2. Creates a Python virtualenv and installs backend deps
 3. Starts FastAPI with hot-reload on `:8000`
 4. Starts Next.js dev server on `:3000`
@@ -103,7 +116,7 @@ cd backend
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in your AuraDB credentials + API keys
+cp .env.example .env   # fill in your credentials
 uvicorn main:app --reload
 ```
 
@@ -124,84 +137,150 @@ npm run dev
 
 ---
 
+## Key Features
+
+### Alex — AI Career Co-Pilot
+Alex is a proactive, intelligent career coach embedded as a floating panel in the dashboard:
+
+- **Streaming chat** — tokens stream immediately with no truncation; internal command blocks (`<!-- -->`) are stripped cleanly from the final reply
+- **Capability Welcome Screen** — 7 interactive capability cards shown on first open, each with a clickable example question. Cards are context-aware (locked when no analysis has been run yet)
+- **Smart Rotating Suggestions** — 5 categories × 5 chips cycling through all capability areas after each exchange (Career Coach → Skills → ATS → Projects → Strategy). LLM-generated suggestions take priority when available
+- **Agentic Tool-Calling** — Alex can trigger 5 career workflows inline: Mock Interview, Resume Tailoring, Salary Intelligence, Application Kit, ATS Score Run
+- **Live Screen Awareness** — `focused_on` context tracks which dashboard tab is active; Alex knows what you're looking at
+- **Cross-Session Memory** — LLM-generated session summary persisted per GitHub username (30-day expiry). Loaded on mount via `GET /api/coach/memory/{key}` and saved via `sendBeacon` on page unload
+- **Voice Input** — Web Speech API (Mic button; pulse animation while recording; auto-hides in unsupported browsers)
+- **Reactions** — 👍/👎 buttons appear on hover over any Alex message; reactions logged to `feedback.jsonl`
+- **Expand toggle** — Normal (400×560) ↔ Expanded (680×740) with smooth transition
+- **In-chat search** — Ctrl+F toggles search; highlights matching messages
+- **Export chat** — Downloads full conversation as a `.md` file
+- **Clear conversation** — With confirmation dialog
+
+### Verification Pipeline
+Three-agent LangGraph workflow:
+1. **Parser** — Extracts `ResumeClaim` list from PDF; classifies as code_verifiable/not_code_verifiable; deduplicates by topic; cap of 20 claims
+2. **Auditor** — 3-layer scoped search: claim classification → repo routing → Cypher with LIBRARY_ALIAS_MAP (110+ entries) + docstring search
+3. **Grader** — 0–100 score: evidence_base (+30 max) + node_bonus (+10 max) + depth_bonus (+20 max) + llm_score (+40 max)
+   - Verified ≥ 60 · Partially Verified ≥ 30 · Unverified < 30
+
+### Career Coaching Suite
+- **Bridge Project Generation** — N projects targeting specific skill gaps
+- **JD Skills Gap Heatmap** — Triangulates JD requirements vs code score vs ATS resume presence
+- **Week-by-Week Learning Roadmap** — Realistic task distribution with localStorage checkbox persistence
+- **Mock Interview** — Live AI interview calibrated to verified skill gaps and target JD
+- **Resume Tailoring** — LLM-powered bullet rewrites matched to JD (no overclaims)
+- **Salary Intelligence** — Market range + negotiation talking points from JD
+- **Application Kit** — Cover letter, LinkedIn message, cold email in one click
+- **JD URL Import** — Paste a job URL instead of copying the full JD text
+
+### Project Verification
+Three-dimension scoring per project:
+- **Tech Coverage (40%)** — alias-aware evidence search for each claimed technology
+- **Architecture Assessment (35%)** — LLM analysis of actual function/class structure
+- **Claim Support (25%)** — per-bullet verdict with evidence citations
+
+5 on-demand AI features per project card: View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive.
+
+### 3D Knowledge Graph
+- **Bloom post-processing** — cinematic neon glow
+- **Neighborhood Focus Mode** — hover any node, non-adjacent nodes dim
+- **AI Graph Summary** — 8-section architectural analysis (tech stack, modules, hotspots, suggestions)
+- **Evidence Highlighting** — Show-in-Graph jumps to 3D graph with node highlighted amber
+- **Path Finder** — shortest dependency path between two nodes
+- **Code Drill-Down** — view raw function source in a modal
+- Multi-repo: comma-separated repo IDs for combined view (up to 25,000 nodes)
+
+### Verification Results Dashboard
+- **Animated SVG donut chart** — per-segment glow, avg score in centre, click-to-filter
+- **Evidence Strength Meter** — 4-bar animated score breakdown per SkillCard
+- **AI Claim Challenger** — Devil's Advocate adversarial counter-argument (≤180 words)
+- **Score Delta Badges** — ↑/↓ vs previous run, persisted in localStorage
+
+### AI Resume Toolkit (`/resume-toolkit`)
+4-step workflow: Job Search → ATS Optimization → Hiring Manager Lookup → Outreach Email
+
+---
+
 ## API Endpoints
 
-### Core Verification Pipeline
+### Core Pipeline
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/ingest` | Clone GitHub repo & build Neo4j knowledge graph |
 | `POST` | `/api/extract-profile` | Extract GitHub username from PDF + fetch repo list |
 | `POST` | `/api/analyze` | Run agent workflow (SSE streaming response) |
 | `POST` | `/api/analyze/multi` | Run analysis across multiple repos (merged result) |
-| `GET`  | `/api/graph/{repo_id}?limit=5000` | Nodes & edges for 3D graph — supports comma-separated repo IDs for multi-repo |
+| `GET`  | `/api/graph/{repo_id}?limit=5000` | Nodes & edges for 3D graph — comma-separated IDs for multi-repo |
 | `GET`  | `/api/skill-timeline/{repo_id}` | File timeline grouped by language |
 | `GET`  | `/api/forensics/{repo_id}` | Authorship & stylometry data |
+| `GET`  | `/api/repos/ingested` | List all ingested repos (id, name, url) |
 
 ### AI Graph Intelligence
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/graph/explain` | 8-section AI architectural summary: tech stack, modules, hotspot risk, improvement suggestions (Groq Llama 3.3 70B) |
-| `POST` | `/api/function/explain` | Per-function AI explanation with complexity verdict, purpose, and refactor suggestions |
+| `POST` | `/api/graph/explain` | 8-section AI architectural summary via Groq |
+| `POST` | `/api/function/explain` | Per-function AI explanation |
 
 ### Saved Analyses & Sharing
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/analyses` | Save an analysis result |
+| `POST` | `/api/analyses` | Save an analysis |
 | `GET`  | `/api/analyses` | List all saved analyses |
-| `GET`  | `/api/analyses/{id}` | Get a specific saved analysis |
+| `GET`  | `/api/analyses/{id}` | Get a specific analysis |
 | `GET`  | `/api/compare?ids=...` | Compare multiple analyses |
 | `POST` | `/api/analyses/{id}/share` | Generate a public share token |
 | `GET`  | `/api/profile/{token}` | Retrieve public profile (no auth) |
 
-### Benchmarks & Interview Prep
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/benchmarks/generate` | LLM-generates role benchmark scores for a given skill topic list |
-| `POST` | `/api/interview-questions` | Generates personalised interview questions for a verified skill |
-
-### Evidence Code Drill-Down
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch raw source code for a Function node — returns `source_code`, `name`, `file_path`, `line_start/end`, `complexity_score`, `args` |
-
 ### Career Coach
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/coach` | Generate N bridge projects for skill gaps (configurable 1–5) |
-| `POST` | `/api/coach/heatmap` | JD Skills Gap Heatmap — triangulates JD requirements vs code score vs ATS resume match |
-| `POST` | `/api/coach/roadmap` | Week-by-week learning roadmap from bridge projects + available hours/week |
-| `POST` | `/api/coach/chat` | Conversational AI coaching — context-aware follow-up Q&A |
-| `POST` | `/api/coach/export` | Download self-contained HTML Career Coach report |
+| `POST` | `/api/coach` | Generate bridge projects for skill gaps |
+| `POST` | `/api/coach/heatmap` | JD Skills Gap Heatmap |
+| `POST` | `/api/coach/roadmap` | Week-by-week learning roadmap |
+| `POST` | `/api/coach/chat/stream` | **Alex streaming SSE chat** |
+| `POST` | `/api/coach/export` | Download HTML Career Coach report |
+| `POST` | `/api/coach/memory/save` | Generate & persist session memory |
+| `GET`  | `/api/coach/memory/{key}` | Retrieve session memory |
+| `POST` | `/api/coach/feedback` | Log 👍/👎 reaction |
+| `POST` | `/api/coach/fetch-jd` | Fetch & parse JD from URL |
+| `POST` | `/api/coach/tailor-resume` | Tailor resume bullets to JD |
+| `POST` | `/api/coach/salary-intelligence` | Market salary range from JD |
+| `POST` | `/api/coach/application-kit` | Cover letter + LinkedIn + cold email |
+| `POST` | `/api/coach/extract-resume-text` | Extract text from resume PDF |
 
-### Verification Results Enhancements
+### Mock Interview
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/challenge-claim` | Devil's Advocate — LLM argues the *opposite* verdict for a skill claim (rate-limited) |
+| `POST` | `/api/interview-questions` | Generate skill-scoped interview questions |
+| `POST` | `/api/mock-interview` | Start a mock interview session |
+| `POST` | `/api/mock-interview/grade` | Grade a mock interview answer |
 
 ### Project Verification
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/analyze/projects` | Verify all resume projects against ingested repos (tech coverage, arch score, bullet verdicts) |
-| `POST` | `/api/analyze/projects/single` | Re-verify a single project against a specific repo |
-| `POST` | `/api/projects/interview-questions` | Generate 6 project-scoped interview questions using evidence nodes |
-| `POST` | `/api/projects/challenge` | Devil's Advocate challenge for the full project verdict |
-| `POST` | `/api/projects/architecture-snapshot` | On-demand deep architectural analysis of a matched repo |
-| `POST` | `/api/projects/explain-missing-bullet` | Explain why a bullet claim is unverified & what code would prove it |
+| `POST` | `/api/analyze/projects` | Verify all projects against ingested repos |
+| `POST` | `/api/analyze/projects/single` | Re-verify a single project |
+| `POST` | `/api/projects/interview-questions` | Project-scoped interview questions |
+| `POST` | `/api/projects/challenge` | Devil's Advocate for project verdict |
+| `POST` | `/api/projects/architecture-snapshot` | Deep architectural analysis |
+| `POST` | `/api/projects/explain-missing-bullet` | Explain unverified bullet |
 
-### ATS Tools
+### Verification Enhancements & ATS
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/ats-score` | Full ATS evaluation of resume vs job description |
-| `POST` | `/api/ats-report` | Download self-contained HTML ATS report |
+| `POST` | `/api/challenge-claim` | Devil's Advocate for skill claim |
+| `GET`  | `/api/node-code/{repo_id}/{node_id}` | Fetch function source code |
+| `POST` | `/api/benchmarks/generate` | LLM role benchmark scores |
+| `POST` | `/api/ats-score` | Full ATS evaluation |
+| `POST` | `/api/ats-report` | Download HTML ATS report |
 | `POST` | `/api/export-report` | Download HTML verification report |
 
 ### AI Resume Toolkit
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/resume-toolkit/find-jobs` | Infer role from resume, search Jooble |
-| `POST` | `/api/resume-toolkit/optimize-keywords` | ATS keyword rewriting via LLM |
-| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io lookup → people/match (free) → pattern fallback |
-| `POST` | `/api/resume-toolkit/draft-email` | Draft personalized outreach email |
+| `POST` | `/api/resume-toolkit/find-jobs` | Job search from PDF |
+| `POST` | `/api/resume-toolkit/optimize-keywords` | ATS keyword rewriting |
+| `POST` | `/api/resume-toolkit/find-hiring-manager` | Apollo.io → email pattern |
+| `POST` | `/api/resume-toolkit/draft-email` | Personalized outreach email |
 
 ### Health
 | Method | Endpoint | Description |
@@ -224,204 +303,9 @@ npm run dev
 | **AST Parsing** | tree-sitter (Python, JS, TS, Go, Java, Rust) |
 | **Graph Database** | Neo4j AuraDB (cloud) |
 | **Relational Storage** | SQLite (`trueskill_analyses.db`) |
+| **Local Data** | JSON flat-files (`backend/data/`) |
 | **HTTP Client** | httpx (async) |
 | **PDF Extraction** | PyPDF2 |
-
----
-
-## Key Features
-
-### Verification Pipeline
-The core LangGraph workflow runs three sequential agents:
-1. **Parser** — Extracts structured technical claims from resume PDF. Classifies each claim as `code_verifiable` or `not_code_verifiable` (e.g. Agile, leadership, communication, etc.). Extracts a `specific_libraries` list per claim (e.g. `PyTorch → ["torch"]`, `OpenCV → ["cv2"]`) to drive precise Cypher matching. Deduplicates by topic (keeps highest-difficulty claim per unique topic). Hard cap at 20 claims.
-2. **Auditor** — 3-layer scoped verification:
-   - **Layer 1:** Skips `not_code_verifiable` claims immediately (no graph search needed)
-   - **Layer 2:** Routes each claim to the most relevant ingested repos via language/import profiling; falls back to all repos if no match found
-   - **Layer 3:** Cypher query searches `n.name`, `n.module_name`, `n.source_code` (first **8,000** chars), `n.docstring`, and `n.file_path` for keyword matches. Keywords are expanded via `LIBRARY_ALIAS_MAP` (110+ aliases) so `"PyTorch"` finds `import torch`, `"OpenCV"` finds `import cv2`, etc. Returns up to 100 nodes, re-ranked so complex functions appear first.
-3. **Grader** — Scores each claim 0–100 using a calibrated rubric:
-   - `evidence_base`: 0 (none) / +15 (imports only) / +30 (function or class nodes)
-   - `node_bonus`: +2 per node, capped at +10
-   - `depth_bonus`: 0–20 pts based on function count (≥5 fns: +10, ≥2: +5), import diversity (≥3: +5, ≥1: +2), and cyclomatic complexity (max≥5 or avg≥3: +5)
-   - `llm_score`: 0–40 from LLM semantic analysis with 6 code snippets × 2,000 chars each (including file paths)
-   - **Verified** ≥ 60 · **Partially Verified** ≥ 30 · **Unverified** < 30
-   - `Not Code-Verifiable` and `Repo Not Available` claims score 0 and are excluded from stats
-
-Results stream back to the frontend via **Server-Sent Events (SSE)**.
-
-### Ingestion Engine
-- Shallow-clones GitHub repos (depth=1, LFS-safe)
-- Parses **6 languages**: Python, JavaScript, TypeScript, Go, Java, Rust via tree-sitter
-- Extracts `File`, `Class`, `Function`, `Import` nodes + relationships into Neo4j AuraDB
-- Captures **docstrings** from Python functions (via `ast.get_docstring`) and stores them as `n.docstring` on Function nodes — searchable at query time
-- Computes **cyclomatic complexity** for every function
-
-### 3D Knowledge Graph
-
-The `/api/graph/{repo_id}` endpoint supports large repositories:
-- **Default limit**: 5,000 nodes (configurable up to 25,000 via `?limit=N`)
-- **Sampling priority**: Files → Classes → Functions (top complexity first) → Imports
-- **Multi-repo**: Pass comma-separated IDs for a combined view
-- **Server-side edge filtering**: Only edges between sampled nodes are returned
-
-#### 3D Graph Visual & UX Features
-| Feature | Description |
-|---------|-------------|
-| **Bloom Post-Processing** | `UnrealBloomPass` — cinematic neon glow on all nodes and link particles |
-| **Neighborhood Focus Mode** | Hover any node → non-adjacent nodes dim to 6% opacity via direct Three.js material mutation |
-| **AI Graph Summary** | ✨ **Explain** button → 8-section AI architectural analysis: tech stack inference, module breakdown, hotspot risk callout, improvement suggestions (collapsible UI) |
-| **Evidence Node Highlighting** | 📍 **Show in Graph** on any evidence row in SkillCard → tab switches to 3D Graph with that node highlighted amber; all others dimmed |
-| **Function Explain** | Click any `Function` node → NodeInfoPanel → **✨ Explain** button → AI explanation of purpose, complexity verdict, refactor suggestions |
-| **Path Finder** | Select start/end nodes to find the shortest dependency path between them |
-| **Analytics Panel** | Top hub nodes, isolated nodes, node type breakdown |
-| **Code Drill-Down** | Click a `Function` node → "👁 View Source Code" → opens `CodeViewer` modal |
-| **Physics Tweaks** | d3-force charge strength set to -180 for better node spacing |
-| **Reset Camera** | `fgRef.zoomToFit(600)` snaps back to overview |
-| **Atmospheric Fog** | `THREE.FogExp2` makes distant nodes fade into the dark background |
-| **Screenshot Export** | Saves `knowledge-graph.png` from the WebGL canvas |
-| **First-load Fix** | Dimension measurement deferred via `requestAnimationFrame` so ForceGraph3D always initializes at correct container size |
-
-### AI Graph Summary (`graph_explain.py`)
-The ✨ **Explain** button sends rich structural context to Groq Llama 3.3 70B and receives a structured 8-section JSON response rendered as a collapsible panel:
-- **Tech Stack** — inferred from file names, imports, and node types (indigo pills)
-- **Overview** — 3–4 sentence architectural summary
-- **Key Observations** — 5 specific bullets naming actual files/functions (expandable)
-- **⚠ Hotspot Risk** — orange callout identifying highest-risk maintenance areas
-- **Module Breakdown** — logical subsystem grouping with key file tags (collapsed by default)
-- **Improvement Suggestions** — 3 numbered actionable refactoring recommendations (collapsed by default)
-- **Complexity Verdict** — architecture style badge + complexity rating
-
-### Project Verification Section
-The **Projects tab** in the dashboard verifies resume project claims against ingested GitHub repos:
-- **Tech Stack Coverage (40 pts)** — checks each claimed technology against code evidence nodes using `LIBRARY_ALIAS_MAP` + `SPECIFIC_TECH_IMPORTS` for alias-aware matching (e.g. `GoogleEarthEngine → ee`, `OpenCV → cv2`). Cypher searches 8,000 chars of source code + docstrings per node.
-- **Architecture Assessment (35 pts)** — LLM receives function names, class names, imports, directory structure **and actual function source code** (top 5 most complex functions × 1,500 chars each) for evidence-grounded bullet assessment
-- **Claim Support (25 pts)** — evaluates each resume bullet against found code evidence
-- **Bullet Verdicts** — per-bullet supported/unsupported with missing evidence hints and specific file/function citations
-- **Match Confidence** — 5-layer matching: URL → name Jaccard+substring → import overlap (alias-aware) → language tiebreaker → None
-- **Thresholds:** Verified ≥ 60 · Partially Verified ≥ 28 · Unverified < 28
-- **Repo Override** — manual repo dropdown to re-verify against a different ingested repo
-
-#### 5 AI Features inside each Project card
-| Feature | Description |
-|---|---|
-| **👁 View Code** | Click any tech evidence node ID → opens `CodeViewer` modal with full source |
-| **🏗️ Architecture Snapshot** | On-demand deep architectural analysis: style badge, module breakdown, ⚡ hotspot callout, improvement suggestions |
-| **✨ Interview Prep** | 6 project-scoped questions covering architecture decisions, tech choices, and bullet claim specifics |
-| **🔴 Devil's Advocate** | Adversarial challenge targeting the full project verdict — references scores, unsupported bullets, and match confidence |
-| **💡 Bullet Deep-Dive** | On each unsupported bullet: explains *why* it's hard to verify and *what code* would prove it |
-
-### LLM Key Rotation (Reliability)
-`llm.py` uses a `_FallbackChatGroq` wrapper that automatically retries with `GROQ_API_KEY_BACKUP` on 429 rate-limit errors. All call sites benefit transparently without any changes.
-
-### Stylometric Forensics
-The `forensics.py` module detects AI-generated or copy-pasted code via:
-- Variable naming convention analysis (snake_case / camelCase / PascalCase)
-- Shannon entropy of style consistency
-- Git commit pattern analysis (bulk single-commit additions flag)
-- Overall authenticity score (0–100) with verdict: Authentic / Suspicious / Highly Suspicious
-
-### AI Resume Toolkit (4-Step Workflow)
-A self-contained page (`/resume-toolkit`) that guides users through:
-1. **Job Search** — Upload PDF → LLM infers role/location → Jooble job listings
-2. **ATS Optimization** — Resume vs JD keyword analysis → LLM rewrites Skills/Summary
-3. **Hiring Manager Lookup** — Apollo.io paid search → free-tier `/people/match` → email pattern fallback
-4. **Outreach Email** — LLM drafts a personalized cold email for the role
-
-### Verification Results Features
-The dashboard Skills tab now includes 4 high-impact enhancements:
-
-#### Verification Summary Dashboard (`VerificationSummaryBar.tsx`)
-A premium analytics banner pinned above the filter toolbar:
-- **Animated donut chart** — multi-segment SVG with colour-matched glow (emerald/amber/rose-red per segment) and avg score in the centre (assessed claims only)
-- **4 stat cards** — Verified / Partial / Unverified / Not Assessed counts; clicking any card instantly filters the skill list. Each card shows a **% badge** relative to the assessed-only denominator
-- **Context-aware filter count** — shows "N assessed skills" (excluding not-assessed) when no filter active; shows "Showing N skills" when filtered
-
-#### Evidence Strength Meter
-Inside each expanded `SkillCard`, a **4-bar transparent score breakdown panel** shows the sub-scores that make up the final 0–100 score:
-| Bar | Max | Colour |
-|-----|-----|--------|
-| Evidence Presence (graduated by type) | 30 | Indigo |
-| Node Bonus | 10 | Indigo |
-| Depth Bonus (fn count + import diversity + complexity) | 20 | Amber |
-| AI Reasoning Quality | 40 | Violet |
-The grader (`agents.py`) returns a `score_breakdown` dict with keys `evidence_base`, `node_bonus`, `complexity` (depth_bonus), `llm` alongside every `VerificationResult`.
-
-A **confidence tier badge** is displayed next to the score bar based on evidence node count:
-| Count | Tier | Colour |
-|-------|------|--------|
-| 1–3 nodes | Low confidence | Amber |
-| 4–10 nodes | Medium confidence | Indigo |
-| 11+ nodes | High confidence | Emerald |
-
-#### AI Claim Challenger / Devil's Advocate
-- A **"🔴 Challenge This Verdict"** button at the bottom of each expanded SkillCard
-- Calls `POST /api/challenge-claim` → `challenge.py` sends an adversarial system prompt to Groq Llama 3.3 70B, instructing it to argue the opposite verdict
-- Returns a ≤180-word sceptical counter-argument rendered in a red-tinted callout box
-- **Hidden for 0-score/no-evidence cards** (and Not Assessed cards) to avoid unhelpful or tautological output
-- Result is cached per card; clicking again toggles visibility
-
-#### Score Delta / Re-run History
-- On the **second and subsequent analysis runs**, each SkillCard shows a **delta badge** next to its score bar: `↑+12` (emerald) or `↓-5` (red)
-- Score history is persisted in `localStorage` keyed by skill topic — survives browser restarts
-- Pairs naturally with the Career Coach: complete a roadmap item → re-run → see score go up
-
-### Skills Verification Section
-The dashboard Skills tab is a premium credential report panel:
-- **Sorted display:** Verified → Partially Verified → Unverified, then score descending
-- **Filter toolbar:** Instant search by skill name, status dropdown, Expand All / Collapse All
-- **Animated score bar:** Fills 0→score on mount, color-coded green/amber/red
-- **Parsed evidence nodes:** `path/file.py:function_name` rendered as file-type badges (PY/TS/JS)
-- **📍 Show in Graph:** Hover any evidence row → click to jump to 3D Graph with that node highlighted
-- **Evidence Code Drill-Down:** Hover any evidence row → `👁 View` → opens `CodeViewer` modal
-- **AI Interview Prep:** 5 personalised questions per skill with collapsible hints and Copy All button
-
-### Career Coach (Enhanced)
-The Career Coach section transforms skill gap analysis into a full professional development tool:
-
-#### JD Skills Gap Heatmap (`SkillsGapHeatmap.tsx`)
-A sortable table that **triangulates three signals simultaneously** — the only feature in the app to do so:
-| Column | Source |
-|--------|--------|
-| **JD Requirement** | Extracted from pasted job description by LLM |
-| **In Resume?** | From ATS `keyword_matches` (if ATS already run) — no extra LLM call |
-| **Code Score** | From verified code analysis (0–100) |
-| **Gap Severity** | Critical / Moderate / Minor / None based on code score |
-| **Tip** | 1-line actionable recommendation |
-
-Sort by any column. Color-coded severity badges and animated score bars.
-
-#### Week-by-Week Learning Roadmap (`LearningRoadmap.tsx`)
-- Select available hours/week (5 / 10 / 20 / 40h presets)
-- LLM distributes bridge projects across a realistic weekly schedule
-- Each week card: focus skill, 3–4 concrete tasks, milestone badge
-- **Task checkboxes persist to `localStorage`** — survive page refresh
-- Progress bar shows overall completion %
-
-#### Conversational Coach Chat (`CoachChat.tsx`)
-- Context-aware AI Q&A seeded with bridge projects, gap summary, and verified skills
-- Pre-loaded suggested questions: "What should I focus on first?", "Can I finish this in 2 weeks?", etc.
-- Typing indicator + message thread with timestamps
-- Chat messages persist to `sessionStorage`
-
-#### Export Coach Report
-- One-click download of a self-contained HTML report (no external deps)
-- Sections: Gap Summary → Skills Gap Heatmap → Bridge Projects → Learning Roadmap
-- Same pattern as existing ATS HTML report
-
-### Shareable Verified Profile
-After running an analysis:
-1. Click **Share Profile** → backend generates a random URL-safe token stored in SQLite
-2. A public profile URL (`/profile/<token>`) is copied to clipboard
-3. The `/profile/[id]` page shows the full verified credential report — no login required
-4. Share tokens survive server restarts (persisted in SQLite)
-
-### Skill Radar + Benchmarking
-The Radar tab compares verified skill scores against LLM-generated role benchmarks:
-- Sends the candidate's **exact verified topic names** to `POST /api/benchmarks/generate`
-- LLM returns a score for each topic for the selected role (e.g. "ML Engineer")
-- Both traces use the same topic list → no alignment zeros possible
-
-### Candidate Comparison
-The `/compare` page loads two or more saved analyses side-by-side for HR-style screening.
 
 ---
 

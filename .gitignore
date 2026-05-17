@@ -59,3 +59,6 @@ Neo4j-*.txt
 
 # Local SQLite dev database (auto-created on first run)
 backend/trueskill_analyses.db
+
+# Alex session memory & feedback log (user data — local only)
+backend/data/

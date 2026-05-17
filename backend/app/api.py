@@ -1332,6 +1332,15 @@ class CoachChatRequestModel(BaseModel):
     context_data: dict = {}   # {verified_skills, bridge_projects, gap_summary, roadmap, job_description}
     # Full conversation history for multi-turn memory
     history: list[dict] = []  # [{role: "user"|"assistant", content: str}, ...]
+    # Extended session context — merged into context_data before LLM call
+    ats_report: Optional[dict] = None
+    forensics: Optional[dict] = None
+    project_results: Optional[list] = None
+    graph_metadata: Optional[dict] = None
+    current_tab: Optional[str] = None
+    candidate_name: Optional[str] = None
+    focused_on: Optional[dict] = None          # {type, label, data} — live screen awareness
+    previous_session_notes: Optional[str] = None  # cross-session memory
 
 
 @router.post("/coach/chat")
@@ -1349,9 +1358,22 @@ async def coach_chat_endpoint(request: CoachChatRequestModel, req: Request):
         if not request.message.strip():
             raise HTTPException(status_code=400, detail="message cannot be empty")
 
+        # Merge extended fields into context_data dict
+        merged_context = {
+            **request.context_data,
+            "ats_report": request.ats_report,
+            "forensics": request.forensics,
+            "project_results": request.project_results,
+            "graph_metadata": request.graph_metadata,
+            "current_tab": request.current_tab,
+            "candidate_name": request.candidate_name,
+            "focused_on": request.focused_on,
+            "previous_session_notes": request.previous_session_notes,
+        }
+
         reply, suggestions = await coach_chat(
             message=request.message,
-            context_data=request.context_data,
+            context_data=merged_context,
             history=request.history,
         )
         return {"reply": reply, "suggestions": suggestions}
@@ -1376,10 +1398,23 @@ async def coach_chat_stream_endpoint(request: CoachChatRequestModel, req: Reques
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="message cannot be empty")
 
+    # Merge extended fields into context_data dict
+    merged_context = {
+        **request.context_data,
+        "ats_report": request.ats_report,
+        "forensics": request.forensics,
+        "project_results": request.project_results,
+        "graph_metadata": request.graph_metadata,
+        "current_tab": request.current_tab,
+        "candidate_name": request.candidate_name,
+        "focused_on": request.focused_on,
+        "previous_session_notes": request.previous_session_notes,
+    }
+
     return StreamingResponse(
         stream_coach_chat(
             message=request.message,
-            context_data=request.context_data,
+            context_data=merged_context,
             history=request.history,
         ),
         media_type="text/event-stream",
@@ -1388,6 +1423,33 @@ async def coach_chat_stream_endpoint(request: CoachChatRequestModel, req: Reques
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# -----------------------------------------------------------------------------
+# Coach — Proactive Insights (auto-fired after analysis completes)
+# -----------------------------------------------------------------------------
+
+class InsightsRequest(BaseModel):
+    context_data: dict = {}
+
+
+@router.post("/coach/insights")
+async def generate_insights_endpoint(request: InsightsRequest, req: Request):
+    """
+    POST /api/coach/insights
+    Returns a short proactive insight string (not streaming) to be injected
+    as an auto assistant message right after the first analysis run.
+    """
+    from .coach import generate_insights
+
+    check_rate_limit(req.client.host if req.client else "unknown", "coach")
+
+    try:
+        insight = await generate_insights(request.context_data)
+        return {"insight": insight}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Insights failed: {str(e)}")
+
 
 
 # =============================================================================
@@ -2125,3 +2187,425 @@ async def generate_interview_questions_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Interview question generation failed: {str(e)}")
 
+
+
+# =============================================================================
+# JD URL Fetcher Endpoint
+# =============================================================================
+
+class FetchJdRequest(BaseModel):
+    url: str
+
+
+@router.post("/coach/fetch-jd")
+async def fetch_jd_from_url_endpoint(request: FetchJdRequest, req: Request):
+    """
+    POST /api/coach/fetch-jd
+    Fetches and cleans a job description from a URL.
+    Supports Greenhouse, Lever, Indeed, Ashby, Workday, and generic fallback.
+    LinkedIn returns a graceful error prompting copy-paste.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "fetch-jd")
+    if not request.url.strip():
+        raise HTTPException(status_code=400, detail="URL cannot be empty")
+    try:
+        from .jd_fetcher import fetch_jd_from_url, JDFetchError
+        result = await fetch_jd_from_url(request.url)
+        return result
+    except Exception as exc:
+        # Import here to avoid circular import check before module exists
+        try:
+            from .jd_fetcher import JDFetchError
+            if isinstance(exc, JDFetchError):
+                raise HTTPException(status_code=422, detail=str(exc))
+        except ImportError:
+            pass
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+# =============================================================================
+# Mock Interview Endpoints
+# =============================================================================
+
+class MockInterviewQuestionsRequest(BaseModel):
+    verified_skills: list[dict]
+    job_description: str
+    gap_summary: str = ""
+    num_questions: int = 6
+
+
+class GradeAnswerRequest(BaseModel):
+    question: dict
+    answer: str
+    verified_skills: list[dict]
+
+
+@router.post("/coach/mock-interview/questions")
+async def generate_mock_interview_questions_endpoint(
+    request: MockInterviewQuestionsRequest, req: Request
+):
+    """
+    POST /api/coach/mock-interview/questions
+    Generates calibrated mock interview questions based on the candidate's
+    verified skills and the target JD.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "mock-interview")
+    try:
+        from .coach import generate_mock_interview_questions, VerifiedSkill
+        skills = [VerifiedSkill(**s) for s in request.verified_skills]
+        questions = await generate_mock_interview_questions(
+            verified_skills=skills,
+            job_description=request.job_description,
+            gap_summary=request.gap_summary,
+            num_questions=request.num_questions,
+        )
+        return {"questions": [q.model_dump() for q in questions]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Mock interview generation failed: {str(e)}")
+
+
+@router.post("/coach/mock-interview/grade")
+async def grade_interview_answer_endpoint(
+    request: GradeAnswerRequest, req: Request
+):
+    """
+    POST /api/coach/mock-interview/grade
+    Grades one interview answer against the candidate's verified skill evidence.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "mock-interview-grade")
+    if not request.answer.strip():
+        raise HTTPException(status_code=400, detail="Answer cannot be empty")
+    try:
+        from .coach import grade_interview_answer, VerifiedSkill
+        skills = [VerifiedSkill(**s) for s in request.verified_skills]
+        feedback = await grade_interview_answer(
+            question=request.question,
+            answer=request.answer,
+            verified_skills=skills,
+        )
+        return feedback.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Answer grading failed: {str(e)}")
+
+
+# =============================================================================
+# Resume Tailoring Endpoint
+# =============================================================================
+
+class TailorResumeRequest(BaseModel):
+    resume_text: str
+    verified_skills: list[dict]
+    job_description: str
+
+
+@router.post("/coach/tailor-resume")
+async def tailor_resume_endpoint(request: TailorResumeRequest, req: Request):
+    """
+    POST /api/coach/tailor-resume
+    Rewrites resume bullets to match the JD while staying truthful.
+    Flags bullets that reference Unverified skills (overclaims).
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "tailor-resume")
+    if not request.resume_text.strip():
+        raise HTTPException(status_code=400, detail="resume_text cannot be empty")
+    if not request.job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+    try:
+        from .coach import generate_tailored_resume, VerifiedSkill
+        skills = [VerifiedSkill(**s) for s in request.verified_skills]
+        result = await generate_tailored_resume(
+            resume_text=request.resume_text,
+            verified_skills=skills,
+            job_description=request.job_description,
+        )
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Resume tailoring failed: {str(e)}")
+
+
+# =============================================================================
+# Salary Intelligence Endpoint
+# =============================================================================
+
+class SalaryIntelligenceRequest(BaseModel):
+    job_description: str
+    verified_skills: list[dict]
+    location: str = ""
+
+
+@router.post("/coach/salary-intelligence")
+async def salary_intelligence_endpoint(
+    request: SalaryIntelligenceRequest, req: Request
+):
+    """
+    POST /api/coach/salary-intelligence
+    Estimates a salary range from JD signals + candidate's verified skill depth.
+    Returns negotiation talking points grounded in actual code evidence.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "salary-intelligence")
+    if not request.job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+    try:
+        from .coach import generate_salary_intelligence, VerifiedSkill
+        skills = [VerifiedSkill(**s) for s in request.verified_skills]
+        result = await generate_salary_intelligence(
+            job_description=request.job_description,
+            verified_skills=skills,
+            location=request.location,
+        )
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Salary intelligence failed: {str(e)}")
+
+
+# =============================================================================
+# Application Kit Endpoint
+# =============================================================================
+
+class ApplicationKitRequest(BaseModel):
+    candidate_name: str = ""
+    verified_skills: list[dict]
+    job_description: str
+    gap_summary: str = ""
+    company_name: str = ""
+    role_title: str = ""
+    hiring_manager_name: str = ""
+
+
+@router.post("/coach/application-kit")
+async def generate_application_kit_endpoint(
+    request: ApplicationKitRequest, req: Request
+):
+    """
+    POST /api/coach/application-kit
+    Generates a complete application kit: cover letter, LinkedIn outreach message,
+    and cold email — all grounded in verified skill scores.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "application-kit")
+    if not request.job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+    try:
+        from .coach import generate_application_kit, VerifiedSkill
+        skills = [VerifiedSkill(**s) for s in request.verified_skills]
+        result = await generate_application_kit(
+            candidate_name=request.candidate_name,
+            verified_skills=skills,
+            job_description=request.job_description,
+            gap_summary=request.gap_summary,
+            company_name=request.company_name,
+            role_title=request.role_title,
+            hiring_manager_name=request.hiring_manager_name,
+        )
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Application kit generation failed: {str(e)}")
+
+
+# =============================================================================
+# Resume Text Extraction Endpoint (lightweight — no GitHub lookup)
+# =============================================================================
+
+@router.post("/extract-resume-text")
+async def extract_resume_text_endpoint(
+    req: Request,
+    pdf_file: UploadFile = File(...),
+):
+    """
+    POST /api/extract-resume-text
+    Extracts raw text from a resume PDF.
+    Used by Resume Tailoring and Job Finder features.
+    Returns { text: str, word_count: int }
+    """
+    from PyPDF2 import PdfReader
+    from io import BytesIO
+
+    check_rate_limit(req.client.host if req.client else "unknown", "extract-resume-text")
+
+    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        pdf_content = await pdf_file.read()
+        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF too large. Maximum size is {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB."
+            )
+
+        reader = PdfReader(BytesIO(pdf_content))
+        text = ""
+        for page in reader.pages:
+            text += (page.extract_text() or "") + "\n"
+
+        text = text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        return {"text": text[:10000], "word_count": len(text.split())}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
+
+
+# =============================================================================
+# Job Finder — Text-based Search (for Coach tab MatchingJobsPanel)
+# =============================================================================
+
+class JobSearchByTextRequest(BaseModel):
+    resume_text: str
+    location_override: str = ""
+    num_results: int = 6
+
+
+@router.post("/job-finder/search")
+async def job_search_by_text_endpoint(request: JobSearchByTextRequest, req: Request):
+    """
+    POST /api/job-finder/search
+    Accepts { resume_text, location_override? }.
+    Infers role + location from resume text via LLM, then searches Jooble.
+    Used by MatchingJobsPanel in the Career Coach tab.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "job-finder-search")
+
+    if not request.resume_text.strip():
+        raise HTTPException(status_code=400, detail="resume_text cannot be empty")
+
+    try:
+        from .job_finder import extract_role_location, search_jobs
+        profile = await extract_role_location(request.resume_text)
+        location = request.location_override.strip() or profile.location
+        jobs = await search_jobs(
+            role=profile.role,
+            location=location,
+            num_results=request.num_results,
+        )
+        return {
+            "profile": profile.model_dump(),
+            "jobs": [j.model_dump() for j in jobs],
+            "total": len(jobs),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Job search failed: {str(e)}")
+
+
+# =============================================================================
+# Coach — Cross-Session Memory (30-day expiry)
+# =============================================================================
+
+class MemorySaveRequest(BaseModel):
+    session_key: str
+    context_data: dict = {}
+    history: list[dict] = []
+
+
+@router.post("/coach/memory/save")
+async def save_session_memory(request: MemorySaveRequest, req: Request):
+    """
+    POST /api/coach/memory/save
+    Generates a concise session summary and persists it keyed by session_key.
+    Entries older than 30 days are automatically pruned.
+    """
+    from .coach import generate_session_memory, _ensure_data_dir, _MEMORY_FILE
+    from datetime import datetime, timezone, timedelta
+    import json
+
+    check_rate_limit(req.client.host if req.client else "unknown", "memory-save")
+    _ensure_data_dir()
+
+    try:
+        memory_text = await generate_session_memory(request.context_data, request.history)
+        if not memory_text:
+            return {"saved": False, "reason": "empty_history"}
+
+        # Load existing store
+        try:
+            store: dict = json.loads(_MEMORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            store = {}
+
+        # Prune entries older than 30 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        store = {
+            k: v for k, v in store.items()
+            if isinstance(v, dict) and v.get("saved_at", "") > cutoff
+        }
+
+        # Save new entry
+        store[request.session_key] = {
+            "text": memory_text,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _MEMORY_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"saved": True, "memory": memory_text}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Memory save failed: {str(e)}")
+
+
+@router.get("/coach/memory/{session_key}")
+async def get_session_memory(session_key: str, req: Request):
+    """
+    GET /api/coach/memory/{session_key}
+    Returns the stored memory for a session key if it exists and is not expired.
+    """
+    from .coach import _ensure_data_dir, _MEMORY_FILE
+    from datetime import datetime, timezone, timedelta
+    import json
+
+    _ensure_data_dir()
+    try:
+        store: dict = json.loads(_MEMORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"memory": None}
+
+    entry = store.get(session_key)
+    if not entry or not isinstance(entry, dict):
+        return {"memory": None}
+
+    # Check 30-day expiry
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    if entry.get("saved_at", "") < cutoff:
+        return {"memory": None}
+
+    return {"memory": entry["text"], "saved_at": entry["saved_at"]}
+
+
+# =============================================================================
+# Coach — Reaction Feedback Logging
+# =============================================================================
+
+class FeedbackRequest(BaseModel):
+    session_key: str = ""
+    message_content: str
+    reaction: str  # "up" or "down"
+    context_hint: str = ""  # optional: what tab user was on, etc.
+
+
+@router.post("/coach/feedback")
+async def log_feedback(request: FeedbackRequest, req: Request):
+    """
+    POST /api/coach/feedback
+    Logs 👍/👎 reactions on Alex messages to feedback.jsonl for future analysis.
+    """
+    from .coach import _ensure_data_dir, _FEEDBACK_FILE
+    from datetime import datetime, timezone
+    import json
+
+    _ensure_data_dir()
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_key": request.session_key,
+            "reaction": request.reaction,
+            "context_hint": request.context_hint,
+            "message_preview": request.message_content[:300],
+        }
+        with open(_FEEDBACK_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return {"logged": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Feedback log failed: {str(e)}")

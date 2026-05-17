@@ -39,9 +39,18 @@ const GraphFullscreenModal = dynamic(() => import("@/components/GraphFullscreenM
 const ATSScorePanel = dynamic(() => import("@/components/ATSScorePanel"), { ssr: false });
 
 // Dynamically import Career Coach sub-components
-const SkillsGapHeatmap = dynamic(() => import("@/components/SkillsGapHeatmap"), { ssr: false });
-const LearningRoadmap  = dynamic(() => import("@/components/LearningRoadmap"),  { ssr: false });
-const CoachChat        = dynamic(() => import("@/components/CoachChat"),         { ssr: false });
+const SkillsGapHeatmap  = dynamic(() => import("@/components/SkillsGapHeatmap"),  { ssr: false });
+const LearningRoadmap   = dynamic(() => import("@/components/LearningRoadmap"),   { ssr: false });
+const CoachChat         = dynamic(() => import("@/components/CoachChat"),          { ssr: false });
+const TrueSkillAssistant = dynamic(() => import("@/components/TrueSkillAssistant"), { ssr: false });
+
+// New Career Coach feature components
+const JdUrlInput            = dynamic(() => import("@/components/JdUrlInput"),            { ssr: false });
+const MockInterview         = dynamic(() => import("@/components/MockInterview"),          { ssr: false });
+const TailoredResume        = dynamic(() => import("@/components/TailoredResume"),         { ssr: false });
+const SalaryIntelligenceCard = dynamic(() => import("@/components/SalaryIntelligenceCard"), { ssr: false });
+const ApplicationKit        = dynamic(() => import("@/components/ApplicationKit"),         { ssr: false });
+const MatchingJobsPanel     = dynamic(() => import("@/components/MatchingJobsPanel"),      { ssr: false });
 
 // Dynamically import Verification Results enhancements
 const VerificationSummaryBar = dynamic(() => import("@/components/VerificationSummaryBar"), { ssr: false });
@@ -193,6 +202,9 @@ interface ChatMessage {
     content: string;
     timestamp: number;
     streaming?: boolean;
+    isProactive?: boolean;
+    reaction?: "up" | "down" | null;
+    actionPrompt?: { label: string; description: string; action: string };
 }
 interface ContextStatus {
     skills: boolean;
@@ -201,10 +213,19 @@ interface ContextStatus {
     ats: boolean;
 }
 
+type ChatAction =
+    | { type: "switchTab"; tab: string }
+    | { type: "highlightNodes"; nodeIds: string[] }
+    | { type: "startMockInterview" }
+    | { type: "tailorResume" }
+    | { type: "showSalary" }
+    | { type: "generateApplicationKit" }
+    | { type: "runAtsScore" };
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type ViewMode = "cards" | "graph";
-type ResultTab = "skills" | "radar" | "activity" | "graph" | "projects";
+type ResultTab = "skills" | "radar" | "activity" | "graph" | "projects" | "coach";
 
 interface ProjectSummary {
     total: number;
@@ -298,6 +319,7 @@ export default function DashboardPage() {
     const [agentMessages, setAgentMessages] = useState<string[]>([]);
     const [pdfFile, setPdfFile] = useState<File | null>(null);
     const [pdfFileName, setPdfFileName] = useState<string | null>(null); // persisted across navigations
+    const [extractedText, setExtractedText] = useState<string | null>(null); // resume text from PDF
     const [isIngesting, setIsIngesting] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
@@ -311,6 +333,7 @@ export default function DashboardPage() {
     const [graphRepoId, setGraphRepoId] = useState<string | null>(null);
 
     const [coachFocused, setCoachFocused] = useState(false);
+    const [assistantOpen, setAssistantOpen] = useState(false);
 
     // Auto-detect extraction state
     const [extractedRepos, setExtractedRepos] = useState<GitHubRepo[]>([]);
@@ -373,6 +396,17 @@ export default function DashboardPage() {
         "Best free resources for my top gap skill?",
     ]);
     const [isExportingCoach, setIsExportingCoach] = useState(false);
+    const [focusedContext, setFocusedContext] = useState<{ type: string | null; label: string; data?: Record<string, unknown> }>({ type: "tab", label: "skills" });
+    const [previousSessionNotes, setPreviousSessionNotes] = useState<string>("");
+
+    // ── New Feature States ────────────────────────────────────────────────────
+    // Feature: Mock Interview
+    const [showMockInterview, setShowMockInterview] = useState(false);
+    // Feature: Resume Tailoring
+    const [showTailoredResume, setShowTailoredResume] = useState(false);
+    // Feature: Application Kit
+    const [showApplicationKit, setShowApplicationKit] = useState(false);
+    // Feature: Salary Intelligence — auto-rendered as card, no toggle needed
 
     // ATS Score state
     const [atsReport, setAtsReport] = useState<ATSReport | null>(null);
@@ -598,6 +632,39 @@ export default function DashboardPage() {
         }
     }, [analysisResult, savedAnalysisId, githubUsername, extractedRepos, selectedRepos, multiRepoIds]);
 
+    // ── Chat Action handler (tab switching, graph highlighting) ───────────────
+    const handleChatAction = useCallback((actions: ChatAction[]) => {
+        for (const action of actions) {
+            if (action.type === "switchTab") {
+                setResultTab(action.tab as ResultTab);
+                setFocusedContext({ type: "tab", label: action.tab });
+            }
+            if (action.type === "highlightNodes") {
+                setGraphHighlightIds(action.nodeIds);
+                setResultTab("graph");
+            }
+            if (action.type === "startMockInterview") {
+                setShowMockInterview(true); setShowTailoredResume(false); setShowApplicationKit(false);
+                setAssistantOpen(false);
+            }
+            if (action.type === "tailorResume") {
+                setShowTailoredResume(true); setShowMockInterview(false); setShowApplicationKit(false);
+                setAssistantOpen(false);
+            }
+            if (action.type === "showSalary") {
+                setResultTab("coach");
+            }
+            if (action.type === "generateApplicationKit") {
+                setShowApplicationKit(true); setShowMockInterview(false); setShowTailoredResume(false);
+                setAssistantOpen(false);
+            }
+            if (action.type === "runAtsScore") {
+                handleGetATSScore();
+            }
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     // Toggle repo selection for multi-repo
     const toggleRepoSelection = useCallback((url: string) => {
         setSelectedRepos(prev => {
@@ -610,6 +677,46 @@ export default function DashboardPage() {
             return next;
         });
     }, []);
+
+    // ── Load cross-session memory when username is known ─────────────────────
+    useEffect(() => {
+        if (!githubUsername) return;
+        fetch(`${API_BASE_URL}/api/coach/memory/${encodeURIComponent(githubUsername)}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d?.memory) setPreviousSessionNotes(d.memory); })
+            .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [githubUsername]);
+
+    // ── Track tab focus for live screen awareness ─────────────────────────────
+    const handleTabChange = (tab: ResultTab) => {
+        setResultTab(tab);
+        setFocusedContext({ type: "tab", label: tab });
+    };
+
+    // ── Save cross-session memory on page unload ──────────────────────────────
+    useEffect(() => {
+        const handleUnload = () => {
+            if (!githubUsername || chatMessages.length < 2) return;
+            // Use keepalive so the fetch completes even as the page closes
+            const contextData = analysisResult ? {
+                verified_skills: analysisResult.verification_results?.map((v: { topic: string; score: number; status: string }) => ({
+                    topic: v.topic, score: v.score, status: v.status
+                })) ?? [],
+                job_description: "",
+            } : {};
+            const history = chatMessages.map(m => ({ role: m.role, content: m.content }));
+            try {
+                navigator.sendBeacon(
+                    `${API_BASE_URL}/api/coach/memory/save`,
+                    new Blob([JSON.stringify({ session_key: githubUsername, context_data: contextData, history })], { type: "application/json" })
+                );
+            } catch { /* non-blocking */ }
+        };
+        window.addEventListener("beforeunload", handleUnload);
+        return () => window.removeEventListener("beforeunload", handleUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [githubUsername, chatMessages, analysisResult]);
 
     // ── Fetch ingested repo registry on mount (for override dropdown) ─────────
     useEffect(() => {
@@ -737,26 +844,33 @@ export default function DashboardPage() {
             // are correctly scoped and edges are validated server-side (no dangling refs).
             setGraphRepoId(ids.join(","));
 
-            // Step 3: Run multi-repo analysis
+            // Step 3: Run multi-repo skills analysis AND project verification in parallel
             setIsAnalyzing(true);
+            setIsAnalyzingProjects(true);
             setAgentStatus(`Analyzing ${ids.length} repo${ids.length > 1 ? "s" : ""}...`);
-            setAgentMessages(prev => [...prev, `🔍 Running multi-repo analysis on ${ids.length} repo${ids.length > 1 ? "s" : ""}...`]);
+            setAgentMessages(prev => [...prev, `🔍 Running skills + project analysis in parallel on ${ids.length} repo${ids.length > 1 ? "s" : ""}...`]);
 
-            const formData = new FormData();
-            formData.append("pdf_file", pdfFile);
-            formData.append("repo_ids", JSON.stringify(ids));
+            // Build form data (shared payload — create separate objects for each fetch)
+            const skillsForm = new FormData();
+            skillsForm.append("pdf_file", pdfFile);
+            skillsForm.append("repo_ids", JSON.stringify(ids));
 
-            const analyzeRes = await fetch(`${API_BASE_URL}/api/analyze/multi`, {
-                method: "POST",
-                body: formData,
-            });
+            const projectsForm = new FormData();
+            projectsForm.append("pdf_file", pdfFile);
+            projectsForm.append("repo_ids", JSON.stringify(ids));
 
-            if (!analyzeRes.ok) {
-                const e = await analyzeRes.json().catch(() => ({}));
+            // Fire both requests at the same time — Opt 7
+            const [skillsRes, projectsRes] = await Promise.all([
+                fetch(`${API_BASE_URL}/api/analyze/multi`, { method: "POST", body: skillsForm }),
+                fetch(`${API_BASE_URL}/api/analyze/projects`, { method: "POST", body: projectsForm }),
+            ]);
+
+            // --- Handle skills result ---
+            if (!skillsRes.ok) {
+                const e = await skillsRes.json().catch(() => ({}));
                 throw new Error(e.detail || "Multi-repo analysis failed");
             }
-
-            const result = await analyzeRes.json();
+            const result = await skillsRes.json();
             // Feature 4 — snapshot current scores before overwriting
             if (analysisResult?.verification_results?.length) {
                 const snap: Record<string, number> = {};
@@ -765,16 +879,31 @@ export default function DashboardPage() {
                 try { localStorage.setItem(PREV_SCORES_KEY, JSON.stringify(snap)); } catch { /* quota */ }
             }
             setAnalysisResult(result);
-            setAgentMessages(prev => [...prev, `✨ Analysis complete! ${result.verification_results?.length ?? 0} skills verified across ${ids.length} repo${ids.length > 1 ? "s" : ""}.`]);
+            setAgentMessages(prev => [...prev, `✨ Skills analysis complete! ${result.verification_results?.length ?? 0} skills verified across ${ids.length} repo${ids.length > 1 ? "s" : ""}.`]);
             setAgentStatus(null);
+            setIsAnalyzing(false);
+
+            // --- Handle projects result ---
+            if (projectsRes.ok) {
+                const projectData = await projectsRes.json();
+                setProjectResults(projectData.projects ?? []);
+                setProjectSummary(projectData.summary ?? null);
+                setAgentMessages(prev => [...prev, `📁 Project verification complete! ${projectData.projects?.length ?? 0} projects verified.`]);
+            } else {
+                // Non-fatal: projects failed but skills succeeded
+                const e = await projectsRes.json().catch(() => ({}));
+                setProjectError(e.detail || "Project verification failed");
+            }
+            setIsAnalyzingProjects(false);
 
         } catch (err) {
             setError(err instanceof Error ? err.message : "Analysis failed");
         } finally {
             setIsIngesting(false);
             setIsAnalyzing(false);
+            setIsAnalyzingProjects(false);
         }
-    }, [selectedRepos, pdfFile, fetchGraphData]);
+    }, [selectedRepos, pdfFile, fetchGraphData, analysisResult]);
 
     // ── Project Verification ────────────────────────────────────────────────────
     const handleVerifyProjects = useCallback(async () => {
@@ -859,21 +988,22 @@ export default function DashboardPage() {
             setGithubUsername(null);
             setExtractionError(null);
 
+            // Run GitHub profile extraction + resume text extraction in parallel
+            const profileFormData = new FormData();
+            profileFormData.append("pdf_file", file);
+
+            const textFormData = new FormData();
+            textFormData.append("pdf_file", file);
+
+            const [profileResult, textResult] = await Promise.allSettled([
+                fetch(`${API_BASE_URL}/api/extract-profile`, { method: "POST", body: profileFormData }),
+                fetch(`${API_BASE_URL}/api/extract-resume-text`, { method: "POST", body: textFormData }),
+            ]);
+
+            // Handle profile result
             try {
-                const formData = new FormData();
-                formData.append("pdf_file", file);
-
-                const response = await fetch(`${API_BASE_URL}/api/extract-profile`, {
-                    method: "POST",
-                    body: formData,
-                });
-
-                if (!response.ok) {
-                    const errData = await response.json().catch(() => ({}));
-                    setExtractionError(errData.detail || "Could not auto-detect GitHub profile.");
-                    setIsManualMode(true);
-                } else {
-                    const data = await response.json();
+                if (profileResult.status === "fulfilled" && profileResult.value.ok) {
+                    const data = await profileResult.value.json();
                     setGithubUsername(data.username);
                     if (data.repos && data.repos.length > 0) {
                         setExtractedRepos(data.repos);
@@ -882,13 +1012,30 @@ export default function DashboardPage() {
                         setExtractionError("GitHub profile found, but no public repositories available.");
                         setIsManualMode(true);
                     }
+                } else {
+                    const errData = profileResult.status === "fulfilled"
+                        ? await profileResult.value.json().catch(() => ({}))
+                        : {};
+                    setExtractionError(errData.detail || "Could not auto-detect GitHub profile.");
+                    setIsManualMode(true);
                 }
-            } catch (err) {
+            } catch {
                 setExtractionError("Failed to connect to extraction service.");
                 setIsManualMode(true);
             } finally {
                 setIsExtracting(false);
             }
+
+            // Handle resume text result (silently — non-blocking)
+            try {
+                if (textResult.status === "fulfilled" && textResult.value.ok) {
+                    const textData = await textResult.value.json();
+                    setExtractedText(textData.text ?? null);
+                }
+            } catch {
+                // Non-critical — resume tailoring will still work via the ATS score text
+            }
+
         } else {
             setError("Please upload a valid PDF file");
         }
@@ -1064,8 +1211,9 @@ export default function DashboardPage() {
         }
     };
 
-    const handleGenerateActionPlan = async () => {
-        if (!jobDescription.trim()) {
+    const handleGenerateActionPlan = async (jdOverride?: string) => {
+        const jd = jdOverride ?? jobDescription;
+        if (!jd.trim()) {
             setCoachError("Please enter a job description");
             return;
         }
@@ -1090,7 +1238,7 @@ export default function DashboardPage() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     verified_skills: verifiedSkills,
-                    job_description: jobDescription,
+                    job_description: jd,
                     num_projects: numProjects,
                 }),
             });
@@ -1172,7 +1320,7 @@ export default function DashboardPage() {
         setChatMessages(prev => [...prev, userMsg]);
         setIsChatLoading(true);
 
-        // Build structured context (not raw JSON string)
+        // Build full session context — all data Alex has access to
         const context_data = {
             verified_skills: analysisResult?.verification_results?.map(r => ({
                 topic: r.topic, score: r.score, status: r.status,
@@ -1194,7 +1342,31 @@ export default function DashboardPage() {
             const response = await fetch(`${API_BASE_URL}/api/coach/chat/stream`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ message, context_data, history }),
+                body: JSON.stringify({
+                    message, context_data, history,
+                    // Extended context fields
+                    ats_report: atsReport ?? null,
+                    forensics: analysisResult?.forensics ?? null,
+                    project_results: projectResults?.map(p => ({
+                        name: p.name,
+                        status: p.status,
+                        overall_score: p.overall_score,
+                        tech_found_count: p.tech_found_count ?? p.tech_coverage?.filter(t => t.found).length ?? 0,
+                        tech_total_count: p.tech_total_count ?? p.tech_coverage?.length ?? 0,
+                        bullet_verdicts: p.bullet_verdicts ?? [],
+                    })) ?? null,
+                    graph_metadata: graphMeta ? {
+                        node_count: (graphMeta as Record<string, unknown>).node_count ?? graphNodes.length,
+                        edge_count: (graphMeta as Record<string, unknown>).edge_count ?? graphLinks.length,
+                        type_counts: (graphMeta as Record<string, unknown>).type_counts ?? {},
+                        top_complex: (graphMeta as Record<string, unknown>).top_complex ?? [],
+                        architecture_style: graphSummary?.architecture_style ?? "",
+                    } : null,
+                    current_tab: resultTab,
+                    candidate_name: githubUsername ?? "Candidate",
+                    focused_on: focusedContext.type ? focusedContext : null,
+                    previous_session_notes: previousSessionNotes || null,
+                }),
             });
 
             if (!response.ok || !response.body) throw new Error("Stream failed");
@@ -1222,29 +1394,33 @@ export default function DashboardPage() {
                             accumulated += parsed.token;
                             setChatMessages(prev => {
                                 const next = [...prev];
-                                next[next.length - 1] = {
-                                    ...next[next.length - 1],
-                                    content: accumulated,
-                                    streaming: true,
-                                };
+                                next[next.length - 1] = { ...next[next.length - 1], content: accumulated, streaming: true };
                                 return next;
                             });
                         }
 
                         if (parsed.done) {
-                            // Finalise message (remove streaming flag)
-                            setChatMessages(prev => {
-                                const next = [...prev];
-                                next[next.length - 1] = {
-                                    ...next[next.length - 1],
-                                    content: accumulated,
-                                    streaming: false,
-                                };
-                                return next;
-                            });
-                            if (Array.isArray(parsed.suggestions)) {
-                                setChatSuggestions(parsed.suggestions);
+                            // Use backend-cleaned final_text (strips all <!-- --> blocks)
+                            const finalContent = parsed.final_text ?? accumulated.replace(/<!--[\s\S]*?-->/g, "").trim();
+                            // Execute action commands from done payload
+                            if (Array.isArray(parsed.actions) && parsed.actions.length > 0) {
+                                handleChatAction(parsed.actions as ChatAction[]);
                             }
+                            // Append action prompt bubble if present
+                            if (parsed.action_prompt) {
+                                setChatMessages(prev => {
+                                    const next = [...prev];
+                                    next[next.length - 1] = { ...next[next.length - 1], content: finalContent, streaming: false, actionPrompt: parsed.action_prompt };
+                                    return next;
+                                });
+                            } else {
+                                setChatMessages(prev => {
+                                    const next = [...prev];
+                                    next[next.length - 1] = { ...next[next.length - 1], content: finalContent, streaming: false };
+                                    return next;
+                                });
+                            }
+                            if (Array.isArray(parsed.suggestions)) setChatSuggestions(parsed.suggestions);
                         }
                     } catch { /* ignore parse errors */ }
                 }
@@ -1253,20 +1429,59 @@ export default function DashboardPage() {
             console.error("Coach chat stream error:", err);
             setChatMessages(prev => {
                 const next = [...prev];
-                next[next.length - 1] = {
-                    ...next[next.length - 1],
-                    content: "Sorry, I couldn't process that. Please try again.",
-                    streaming: false,
-                };
+                next[next.length - 1] = { ...next[next.length - 1], content: "Sorry, I couldn't process that. Please try again.", streaming: false };
                 return next;
             });
         } finally {
             setIsChatLoading(false);
-            setChatMessages(prev =>
-                prev.map(m => ({ ...m, streaming: false }))
-            );
+            setChatMessages(prev => prev.map(m => ({ ...m, streaming: false })));
         }
-    }, [chatMessages, bridgeProjects, gapSummary, jobDescription, roadmap, analysisResult]);
+    }, [chatMessages, bridgeProjects, gapSummary, jobDescription, roadmap, analysisResult,
+        atsReport, projectResults, graphMeta, graphNodes.length, graphLinks.length,
+        graphSummary, resultTab, githubUsername, handleChatAction]);
+
+    // ── Proactive insights — auto-fire once after first analysis completes ─────
+    const proactiveInsightsFired = useRef(false);
+    useEffect(() => {
+        if (!analysisResult || proactiveInsightsFired.current) return;
+        proactiveInsightsFired.current = true;
+        // Small delay so results render first, then open Alex
+        setTimeout(async () => {
+            setAssistantOpen(true);
+            setIsChatLoading(true);
+            const proactiveMsg: ChatMessage = {
+                role: "assistant", content: "", timestamp: Date.now(),
+                streaming: true, isProactive: true,
+            };
+            setChatMessages([proactiveMsg]);
+            try {
+                const context_data = {
+                    verified_skills: analysisResult.verification_results?.map(r => ({
+                        topic: r.topic, score: r.score, status: r.status,
+                    })) ?? [],
+                    forensics: analysisResult.forensics ?? null,
+                    candidate_name: githubUsername ?? "Candidate",
+                    ats_report: atsReport ?? null,
+                    project_results: projectResults ?? null,
+                };
+                const res = await fetch(`${API_BASE_URL}/api/coach/insights`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ context_data }),
+                });
+                const { insight } = await res.json();
+                setChatMessages([{
+                    role: "assistant", content: insight,
+                    timestamp: Date.now(), streaming: false, isProactive: true,
+                }]);
+            } catch {
+                setChatMessages([]);
+            } finally {
+                setIsChatLoading(false);
+            }
+        }, 1200);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [analysisResult]);
 
     // ── Coach Report Export handler ──────────────────────────────────────────
     const handleExportCoachReport = useCallback(async () => {
@@ -1887,7 +2102,7 @@ export default function DashboardPage() {
                                     key={tab.id}
                                     id={`tab-${tab.id}`}
                                     onClick={() => {
-                                        setResultTab(tab.id);
+                                        handleTabChange(tab.id);
                                         // Clear graph highlights when navigating away manually
                                         if (tab.id !== "graph") setGraphHighlightIds([]);
                                     }}
@@ -2395,15 +2610,26 @@ export default function DashboardPage() {
                             <label className="block text-sm font-medium text-slate-700 mb-2">
                                 Target Job Description
                             </label>
+
+                            {/* URL import row */}
+                            <JdUrlInput
+                                apiBase={API_BASE_URL}
+                                disabled={isGeneratingPlan}
+                                onFetched={(text) => {
+                                    setJobDescription(text);
+                                    setCoachError(null);
+                                }}
+                            />
+
                             <div className="relative">
                                 <textarea
                                     id="job-description-input"
-                                    placeholder="Paste the job description you're targeting here..."
+                                    placeholder="Or paste the job description here..."
                                     value={jobDescription}
                                     onChange={(e) => setJobDescription(e.target.value)}
                                     onFocus={() => setCoachFocused(true)}
                                     onBlur={() => setCoachFocused(false)}
-                                    className={`w-full h-40 px-4 py-3 border rounded-xl text-sm focus:outline-none resize-none transition-all duration-300 ${
+                                    className={`w-full h-36 px-4 py-3 border rounded-xl text-sm focus:outline-none resize-none transition-all duration-300 ${
                                         coachFocused
                                             ? "border-violet-400 shadow-[0_0_0_3px_rgba(139,92,246,0.15),0_0_20px_rgba(139,92,246,0.1)]"
                                             : "border-slate-300 hover:border-slate-400"
@@ -2423,11 +2649,11 @@ export default function DashboardPage() {
                                 <p className="mt-1 text-sm text-red-600">{atsError}</p>
                             )}
 
-                            {/* Action buttons row */}
-                            <div className="mt-4 flex flex-wrap items-center gap-3">
+                            {/* Primary action buttons row */}
+                            <div className="mt-3 flex flex-wrap items-center gap-3">
                                 <button
                                     id="generate-plan-btn"
-                                    onClick={handleGenerateActionPlan}
+                                    onClick={() => handleGenerateActionPlan()}
                                     disabled={isGeneratingPlan || !jobDescription.trim()}
                                     className="relative overflow-hidden px-6 py-2.5 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all duration-200 hover:scale-105 hover:shadow-lg hover:shadow-violet-200"
                                 >
@@ -2510,6 +2736,147 @@ export default function DashboardPage() {
                                     </button>
                                 )}
                             </div>
+
+                            {/* ── High-Impact Feature Buttons ─────────────────── */}
+                            {analysisResult && jobDescription && (
+                                <div className="mt-4 pt-4 border-t border-slate-100">
+                                    <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide mb-3">More Tools</p>
+                                    <div className="flex flex-wrap gap-2">
+                                        {/* Mock Interview */}
+                                        <button
+                                            id="mock-interview-btn"
+                                            onClick={() => { setShowMockInterview(true); setShowTailoredResume(false); setShowApplicationKit(false); }}
+                                            className="flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-all hover:scale-105"
+                                            style={{
+                                                background: showMockInterview ? "#7c3aed" : "rgba(124,58,237,0.08)",
+                                                border: "1px solid rgba(124,58,237,0.3)",
+                                                color: showMockInterview ? "white" : "#7c3aed",
+                                            }}
+                                        >
+                                            🎙 Mock Interview
+                                        </button>
+
+                                        {/* Resume Tailoring */}
+                                        <button
+                                            id="tailor-resume-btn"
+                                            onClick={() => { setShowTailoredResume(true); setShowMockInterview(false); setShowApplicationKit(false); }}
+                                            disabled={!pdfFile}
+                                            title={!pdfFile ? "Upload a PDF resume first" : ""}
+                                            className="flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            style={{
+                                                background: showTailoredResume ? "#0f172a" : "rgba(15,23,42,0.06)",
+                                                border: "1px solid rgba(15,23,42,0.2)",
+                                                color: showTailoredResume ? "white" : "#0f172a",
+                                            }}
+                                        >
+                                            ✍️ Tailor Resume
+                                        </button>
+
+                                        {/* Application Kit */}
+                                        <button
+                                            id="application-kit-btn"
+                                            onClick={() => { setShowApplicationKit(true); setShowMockInterview(false); setShowTailoredResume(false); }}
+                                            className="flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-all hover:scale-105"
+                                            style={{
+                                                background: showApplicationKit ? "#1e293b" : "rgba(30,41,59,0.06)",
+                                                border: "1px solid rgba(30,41,59,0.2)",
+                                                color: showApplicationKit ? "white" : "#1e293b",
+                                            }}
+                                        >
+                                            📦 Application Kit
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ── Salary Intelligence Card ─────────────────────── */}
+                            {jobDescription && analysisResult && (
+                                <div className="mt-4">
+                                    <SalaryIntelligenceCard
+                                        apiBase={API_BASE_URL}
+                                        jobDescription={jobDescription}
+                                        verifiedSkills={analysisResult.verification_results.map(v => ({
+                                            topic: v.topic,
+                                            score: v.score,
+                                            status: v.status,
+                                        }))}
+                                    />
+                                </div>
+                            )}
+
+                            {/* ── Matching Jobs Panel ───────────────────────────── */}
+                            {analysisResult && (
+                                <div className="mt-4">
+                                    <MatchingJobsPanel
+                                        apiBase={API_BASE_URL}
+                                        verifiedSkills={analysisResult.verification_results.map(v => ({
+                                            topic: v.topic,
+                                            score: v.score,
+                                            status: v.status,
+                                        }))}
+                                        resumeText={extractedText ?? ""}
+                                        jobDescription={jobDescription}
+                                        onUseAsTarget={(_url, jdText) => {
+                                            if (jdText) {
+                                                setJobDescription(jdText);
+                                                setCoachError(null);
+                                                // Auto-trigger plan generation after state settles
+                                                setTimeout(() => handleGenerateActionPlan(jdText), 100);
+                                            }
+                                        }}
+                                    />
+                                </div>
+                            )}
+
+                            {/* ── Feature Panels (Modal-style) ──────────────────── */}
+                            {showMockInterview && analysisResult && (
+                                <div className="mt-4">
+                                    <MockInterview
+                                        apiBase={API_BASE_URL}
+                                        verifiedSkills={analysisResult.verification_results.map(v => ({
+                                            topic: v.topic,
+                                            score: v.score,
+                                            status: v.status,
+                                        }))}
+                                        jobDescription={jobDescription}
+                                        gapSummary={gapSummary ?? ""}
+                                        onClose={() => setShowMockInterview(false)}
+                                    />
+                                </div>
+                            )}
+
+                            {showTailoredResume && analysisResult && pdfFile && (
+                                <div className="mt-4">
+                                    <TailoredResume
+                                        apiBase={API_BASE_URL}
+                                        resumeText={extractedText ?? ""}
+                                        verifiedSkills={analysisResult.verification_results.map(v => ({
+                                            topic: v.topic,
+                                            score: v.score,
+                                            status: v.status,
+                                        }))}
+                                        jobDescription={jobDescription}
+                                        onClose={() => setShowTailoredResume(false)}
+                                    />
+                                </div>
+                            )}
+
+                            {showApplicationKit && analysisResult && (
+                                <div className="mt-4">
+                                    <ApplicationKit
+                                        apiBase={API_BASE_URL}
+                                        candidateName={githubUsername ?? ""}
+                                        verifiedSkills={analysisResult.verification_results.map(v => ({
+                                            topic: v.topic,
+                                            score: v.score,
+                                            status: v.status,
+                                        }))}
+                                        jobDescription={jobDescription}
+                                        gapSummary={gapSummary ?? ""}
+                                        onClose={() => setShowApplicationKit(false)}
+                                    />
+                                </div>
+                            )}
                         </div>
 
                         {/* Bridge Projects Carousel */}
@@ -2681,20 +3048,39 @@ export default function DashboardPage() {
                             bridgeProjectsAvailable={bridgeProjects.length > 0}
                         />
 
-                        {/* Conversational Coach Chat */}
-                        <CoachChat
-                            messages={chatMessages}
-                            isLoading={isChatLoading}
-                            onSend={handleCoachChat}
-                            disabled={!analysisResult && bridgeProjects.length === 0}
-                            suggestions={chatSuggestions}
-                            contextStatus={{
-                                skills: (analysisResult?.verification_results?.length ?? 0) > 0,
-                                bridge_projects: bridgeProjects.length > 0,
-                                roadmap: !!roadmap,
-                                ats: !!atsReport,
-                            }}
-                        />
+                        {/* Conversational Coach Chat — opens global Alex widget */}
+                        <div style={{
+                            background: "linear-gradient(135deg, rgba(99,102,241,0.04), rgba(124,58,237,0.03))",
+                            borderRadius: 16, border: "1px solid rgba(99,102,241,0.12)",
+                            padding: "20px 24px", textAlign: "center",
+                        }}>
+                            <div style={{ padding: 12, background: "linear-gradient(135deg, rgba(99,102,241,0.1), rgba(124,58,237,0.08))", borderRadius: 14, display: "inline-flex", marginBottom: 12 }}>
+                                <MessageSquare size={22} style={{ color: "#6366f1" }} />
+                            </div>
+                            <p style={{ fontSize: 15, fontWeight: 700, color: "#1e293b", marginBottom: 6 }}>Ask Alex, your AI assistant</p>
+                            <p style={{ fontSize: 13, color: "#64748b", marginBottom: 14, lineHeight: 1.5 }}>
+                                Alex knows your full session: verified skills, ATS score, project results, and graph data.
+                                Ask anything about your results, gaps, or next steps.
+                            </p>
+                            <button
+                                id="coach-open-alex-btn"
+                                onClick={() => setAssistantOpen(true)}
+                                style={{
+                                    padding: "10px 22px", borderRadius: 12, border: "none", cursor: "pointer",
+                                    background: "linear-gradient(135deg, #6366f1, #7c3aed)",
+                                    color: "white", fontSize: 14, fontWeight: 600,
+                                    boxShadow: "0 4px 14px rgba(99,102,241,0.35)",
+                                    display: "inline-flex", alignItems: "center", gap: 8,
+                                }}
+                            >
+                                <MessageSquare size={15} /> Open Alex
+                                {chatMessages.length > 0 && (
+                                    <span style={{ background: "rgba(255,255,255,0.25)", borderRadius: 20, padding: "1px 7px", fontSize: 11 }}>
+                                        {chatMessages.length} messages
+                                    </span>
+                                )}
+                            </button>
+                        </div>
                     </div>
 
                     {/* ATS Score Panel — shown below the two-column grid when report is ready */}
@@ -2710,7 +3096,6 @@ export default function DashboardPage() {
                 </div>
             </main>
 
-            {/* Fullscreen Knowledge Graph Portal */}
             {isGraphFullscreen && (
                 <GraphFullscreenModal
                     nodes={graphNodes}
@@ -2722,6 +3107,27 @@ export default function DashboardPage() {
                     repoIds={multiRepoIds.length > 0 ? multiRepoIds : (analysisResult?.repo_id ? [analysisResult.repo_id] : [])}
                 />
             )}
+
+            {/* Global Alex floating assistant — persists across all tabs */}
+            <TrueSkillAssistant
+                messages={chatMessages}
+                isLoading={isChatLoading}
+                onSend={handleCoachChat}
+                suggestions={chatSuggestions}
+                onAction={handleChatAction}
+                onClear={() => setChatMessages([])}
+                candidateName={githubUsername ?? undefined}
+                apiBase={API_BASE_URL}
+                isOpen={assistantOpen}
+                onOpenChange={setAssistantOpen}
+                contextStatus={{
+                    skills: (analysisResult?.verification_results?.length ?? 0) > 0,
+                    ats: !!atsReport,
+                    projects: (projectResults?.length ?? 0) > 0,
+                    graph: graphNodes.length > 0,
+                    roadmap: !!roadmap,
+                }}
+            />
         </div>
     );
 }
