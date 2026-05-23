@@ -8,6 +8,7 @@ import {
     Building2, Eye, Check, ClipboardCopy,
 } from "lucide-react";
 import CodeViewer from "./CodeViewer";
+import ProjectDeepDive from "./ProjectDeepDive";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -157,6 +158,8 @@ export default function ProjectCard({
     // Bullet Explain
     const [bulletExplain, setBulletExplain]       = useState<Record<number, string>>({});
     const [bulletLoading, setBulletLoading]       = useState<Record<number, boolean>>({});
+    // Project Deep Dive
+    const [showDeepDive, setShowDeepDive]         = useState(false);
 
     useEffect(() => {
         if (forceExpanded !== undefined) setExpanded(forceExpanded);
@@ -665,6 +668,29 @@ export default function ProjectCard({
                             )}
                         </div>
                     )}
+
+                    {/* ── Project Deep Dive ── */}
+                    <div className="space-y-2">
+                        <button
+                            id={`project-deep-dive-toggle-${result.project_id}`}
+                            onClick={() => setShowDeepDive(v => !v)}
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold w-full justify-center transition-all duration-200 hover:scale-[1.01] active:scale-95"
+                            style={{
+                                background: showDeepDive
+                                    ? "linear-gradient(135deg,#06b6d4,#0284c7)"
+                                    : "linear-gradient(135deg,rgba(6,182,212,0.06),rgba(2,132,199,0.06))",
+                                border: "1.5px solid rgba(6,182,212,0.35)",
+                                color: showDeepDive ? "white" : "#0891b2",
+                                boxShadow: showDeepDive ? "0 4px 14px rgba(6,182,212,0.28)" : "none",
+                            }}
+                        >
+                            <BarChart2 className="w-3.5 h-3.5" />
+                            {showDeepDive ? "Hide Deep Dive" : "🔬 Project Deep Dive"}
+                        </button>
+                        {showDeepDive && (
+                            <ProjectDeepDive result={result} />
+                        )}
+                    </div>
 
                     {/* Repo Not Ingested CTA */}
                     {isNotIngested && (

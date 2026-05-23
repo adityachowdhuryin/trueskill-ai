@@ -2,7 +2,7 @@
 
 Automated Competency Verification System using GraphRAG (Graph-based Retrieval Augmented Generation).
 
-A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis using cyclomatic complexity scoring, coding stylometry, and a **Neo4j AuraDB** knowledge graph. Includes **Alex** — a proactive AI career co-pilot with streaming chat, cross-session memory, live screen awareness, agentic tool-calling, and persistent capability discovery.
+A multi-agent system that cross-references PDF resume claims against actual GitHub repository code analysis using cyclomatic complexity scoring, coding stylometry, and a **Neo4j AuraDB** knowledge graph. Includes **Alex** — a proactive AI career co-pilot with streaming chat, cross-session memory, live screen awareness, agentic tool-calling, and persistent capability discovery. Includes **Project Deep Dive** — a premium 5-tab AI analysis panel for every verified project.
 
 ---
 
@@ -12,7 +12,7 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 trueskill-ai/
 ├── backend/
 │   ├── app/
-│   │   ├── api.py                   # All API routes (50+ endpoints)
+│   │   ├── api.py                   # All API routes (55+ endpoints)
 │   │   ├── agents.py                # LangGraph: Parser → Auditor → Grader
 │   │   ├── alias_map.py             # 110+ library alias mappings (PyTorch→torch, etc.)
 │   │   ├── ingest.py                # GitHub repo clone + AST parsing (6 languages)
@@ -27,14 +27,15 @@ trueskill-ai/
 │   │   ├── challenge.py             # Devil's Advocate adversarial LLM
 │   │   ├── project_verifier.py      # Project verification (tech coverage, arch, bullet verdicts)
 │   │   ├── project_features.py      # Per-project AI features (interview, challenge, bullet explain)
+│   │   ├── project_deep_dive.py     # 5-function Project Deep Dive AI engine
 │   │   ├── job_finder.py            # Jooble job search + Apollo.io hiring manager lookup
 │   │   ├── resume_optimizer.py      # LLM keyword rewriting + email drafting
 │   │   ├── report.py                # HTML verification report generator
 │   │   ├── storage.py               # SQLite: analyses + share tokens
 │   │   ├── db.py                    # Neo4j AuraDB driver + query helpers
-│   │   ├── graph_explain.py         # 8-section AI architectural summary (Groq)
+│   │   ├── graph_explain.py         # 8-section AI architectural summary
 │   │   ├── function_explain.py      # Per-function AI explanation
-│   │   └── llm.py                   # Shared Groq Llama 3.3 70B client + backup key rotation
+│   │   └── llm.py                   # Shared LLM client: Nemotron primary + Groq fallback chain
 │   ├── data/                        # Local data (git-ignored)
 │   │   ├── memories.json            # Alex cross-session memory (30-day expiry)
 │   │   └── feedback.jsonl           # 👍/👎 reaction log
@@ -63,7 +64,8 @@ trueskill-ai/
 │           ├── ErrorBoundary.tsx
 │           ├── ATSScorePanel.tsx
 │           ├── SkillCard.tsx
-│           ├── ProjectCard.tsx
+│           ├── ProjectCard.tsx          # Tech coverage bars, bullet verdicts, 6 AI features
+│           ├── ProjectDeepDive.tsx      # 5-tab Deep Dive panel (Score Card, Summary, Tech Debt, Skills, Pitch)
 │           ├── ProjectSummaryBar.tsx
 │           ├── CodeViewer.tsx
 │           ├── SkillRadar.tsx
@@ -176,7 +178,20 @@ Three-dimension scoring per project card:
 - **Architecture Assessment (35%)** — LLM analysis of actual function/class structure + source code
 - **Claim Support (25%)** — per-bullet verdict with evidence citations and missing hints
 
-5 per-card AI features: View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive.
+**6 per-card AI features:** View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive, **🔬 Project Deep Dive**.
+
+### 🔬 Project Deep Dive
+Premium 5-tab AI analysis panel that expands inside every ProjectCard:
+
+| Tab | Description |
+|---|---|
+| **Score Card** | 10-dimension rating (0–10 each, 0–100 aggregate) with animated bars, SVG score ring, Strengths & Growth Areas. Uses Neo4j complexity stats + verification data. Disabled for uningested repos. |
+| **Summary** | AI-generated What/How/Why breakdown. Fetches the GitHub README directly; shows "README used ✓" badge. Falls back to Neo4j docstrings. Works for all projects. |
+| **Tech Debt** | Complexity hotspots (cyclomatic complexity per function), health score bar, quick wins, refactor priority, and positive signals from graph stats. Requires ingested repo. |
+| **Skill Signals** | Identifies 4–7 demonstrable skills with Strong / Medium / Weak evidence badges, proof points, and interview angles. Works for all projects. |
+| **Pitch** | One-click recruiter-ready 3-sentence pitch + LinkedIn version + tagline. Copy-to-clipboard buttons. Works for all projects. |
+
+All tabs are lazy-loaded (fetch only on first click). Data is never re-fetched within the same session.
 
 ### 3D Knowledge Graph
 Built with react-force-graph-3d + Three.js:
@@ -264,6 +279,15 @@ Also includes free-text job search via `POST /api/job-finder/search`.
 | `POST` | `/api/projects/architecture-snapshot` | Deep architectural analysis |
 | `POST` | `/api/projects/explain-missing-bullet` | Explain unverified bullet + what code would prove it |
 
+### Project Deep Dive
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/projects/deep-dive/scorecard` | 10-dimension project scorecard (0–100 aggregate) |
+| `POST` | `/api/projects/deep-dive/summary` | What/How/Why project summary (README or docstrings) |
+| `POST` | `/api/projects/deep-dive/tech-debt` | Tech debt radar: hotspots, health score, quick wins |
+| `POST` | `/api/projects/deep-dive/skill-signals` | Evidence-backed skill signals (Strong/Medium/Weak) |
+| `POST` | `/api/projects/deep-dive/recruiter-pitch` | 3-sentence pitch + LinkedIn version + tagline |
+
 ### Benchmarks, Interview Prep & ATS
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -302,7 +326,8 @@ Also includes free-text job search via `POST /api/job-finder/search`.
 | Charts | Recharts |
 | Backend | Python 3.9+, FastAPI, Pydantic v2 |
 | AI Orchestration | LangChain, LangGraph |
-| LLM | Groq — Llama 3.3 70B (`langchain_groq`) |
+| LLM — Primary | NVIDIA Nemotron-3-Super-120B via OpenRouter (`nvidia/nemotron-3-super-120b-a12b:free`) |
+| LLM — Fallback | Groq Llama 3.3 70B (`langchain_groq`) — auto-used on rate limit |
 | AST Parsing | tree-sitter (Python, JS, TS, Go, Java, Rust) |
 | Graph Database | Neo4j AuraDB (cloud) |
 | Relational Storage | SQLite (`trueskill_analyses.db`) |
@@ -321,11 +346,14 @@ NEO4J_USERNAME=<username>
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=<database-name>
 
-# Groq (required)
-GROQ_API_KEY=your_key_here
-GROQ_API_KEY_BACKUP=your_backup_key   # auto-used on 429 errors
+# LLM — Primary via OpenRouter (required)
+OPENROUTER_API_KEY=your_key_here
 
-# GitHub (optional — avoids rate limits)
+# LLM — Groq fallback (activated on rate limit)
+GROQ_API_KEY=your_key_here
+GROQ_API_KEY_BACKUP=your_backup_key
+
+# GitHub (optional — avoids rate limits on README fetch + heatmap)
 GITHUB_TOKEN=your_token
 
 # Optional integrations

@@ -226,9 +226,21 @@ const SUGGESTION_BANK = [
 ];
 
 // ─── Capability Welcome Screen ────────────────────────────────────────────────
-function CapabilityWelcomeScreen({ hasData, onSend }: { hasData: boolean; onSend: (q: string) => void }) {
+function CapabilityWelcomeScreen({ hasData, onSend, onClose }: { hasData: boolean; onSend: (q: string) => void; onClose?: () => void }) {
     return (
-        <div style={{ width: "100%", padding: "2px 0 8px" }}>
+        <div style={{ width: "100%", padding: "2px 0 8px", position: "relative" }}>
+            {onClose && (
+                <button
+                    onClick={onClose}
+                    title="Close capabilities"
+                    style={{
+                        position: "absolute", top: 0, right: 0,
+                        background: "none", border: "none", cursor: "pointer",
+                        color: "#94a3b8", padding: "4px 6px", borderRadius: 8,
+                        fontSize: 16, lineHeight: 1, zIndex: 1,
+                    }}
+                >×</button>
+            )}
             {/* Header */}
             <div style={{ textAlign: "center", marginBottom: 10 }}>
                 <div style={{ fontSize: 24, marginBottom: 3 }}>👋</div>
@@ -263,7 +275,7 @@ function CapabilityWelcomeScreen({ hasData, onSend }: { hasData: boolean; onSend
                                 </div>
                                 <p style={{ fontSize: 10.5, color: "#64748b", margin: "0 0 4px", lineHeight: 1.35 }}>{cap.desc}</p>
                                 <button
-                                    onClick={() => { if (!locked) onSend(cap.example); }}
+                                    onClick={() => { if (!locked) { onSend(cap.example); onClose?.(); } }}
                                     disabled={locked}
                                     style={{
                                         padding: "2px 8px", borderRadius: 20, fontSize: 10, fontWeight: 600,
@@ -306,6 +318,7 @@ export default function TrueSkillAssistant({
     isOpen, onOpenChange, disabled = false,
 }: Props) {
     const [input, setInput] = useState("");
+    const [showCapabilities, setShowCapabilities] = useState(false);
     const [hoveredMsg, setHoveredMsg] = useState<number | null>(null);
     const [unreadCount, setUnreadCount] = useState(0);
     const [isExpanded, setIsExpanded] = useState(false);
@@ -320,6 +333,8 @@ export default function TrueSkillAssistant({
     const inputRef = useRef<HTMLInputElement>(null);
     const recognitionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const prevMsgLen = useRef(messages.length);
+    // Tracks whether the user has manually typed and sent a message (vs auto-insight)
+    const hasUserSentMessage = useRef(false);
 
     // Panel dimensions
     const PW = isExpanded ? 680 : 400;
@@ -331,13 +346,16 @@ export default function TrueSkillAssistant({
         [messages]
     );
 
-    // Effective suggestions: use rotating bank when LLM suggestions aren't customised
+    // Effective suggestions: always use rotating bank until user has had a real back-and-forth.
+    // Proactive auto-insight messages don't count as "real" exchanges for suggestion purposes.
     const effectiveSuggestions = useMemo(() => {
+        const hasRealExchange = messages.some(m => m.role === "user");
+        if (!hasRealExchange) return SUGGESTION_BANK[suggestionRound % SUGGESTION_BANK.length];
         const isDefault = suggestions.length === 0 ||
             suggestions.every(s => DEFAULT_SUGGESTIONS.includes(s));
         if (isDefault) return SUGGESTION_BANK[suggestionRound % SUGGESTION_BANK.length];
         return suggestions;
-    }, [suggestions, suggestionRound]);
+    }, [suggestions, suggestionRound, messages]);
 
     // 3 follow-up chips during conversation (welcome screen covers discovery on empty chat)
     const chipCount = 3;
@@ -452,6 +470,8 @@ export default function TrueSkillAssistant({
     const handleSend = useCallback((msg?: string) => {
         const text = (msg ?? input).trim();
         if (!text || isLoading) return;
+        hasUserSentMessage.current = true;
+        setShowCapabilities(false);
         setInput("");
         onSend(text);
     }, [input, isLoading, onSend]);
@@ -507,7 +527,24 @@ export default function TrueSkillAssistant({
                                 </span>
                             </div>
                         </div>
-                        <div style={{ display: "flex", gap: 4 }}>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                            {/* Capabilities toggle — always visible */}
+                            <button
+                                onClick={() => setShowCapabilities(s => !s)}
+                                title={showCapabilities ? "Hide capabilities" : "What can Alex do?"}
+                                style={{
+                                    background: showCapabilities ? "rgba(99,102,241,0.1)" : "none",
+                                    border: showCapabilities ? "1px solid rgba(99,102,241,0.25)" : "1px solid transparent",
+                                    cursor: "pointer",
+                                    color: showCapabilities ? "#6366f1" : "#94a3b8",
+                                    padding: "4px 8px", borderRadius: 8,
+                                    fontSize: 10, fontWeight: 700, letterSpacing: "0.02em",
+                                    display: "flex", alignItems: "center", gap: 4,
+                                    transition: "all 0.15s",
+                                }}
+                            >
+                                ⚡ Capabilities
+                            </button>
                             {messages.length > 0 && (
                                 <>
                                     <button onClick={handleExport} title="Export chat" style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", padding: 6, borderRadius: 8, display: "flex", alignItems: "center" }}><Download size={14} /></button>
@@ -551,8 +588,8 @@ export default function TrueSkillAssistant({
                     {/* Context pills */}
                     {contextStatus && <ContextPills status={contextStatus} />}
 
-                    {/* Suggestions — hidden on empty chat (welcome screen takes over), shown during conversation */}
-                    {effectiveSuggestions.length > 0 && !isLoading && messages.length > 0 && (
+                    {/* Suggestions — shown after auto-insight (to entice first interaction) and during conversation */}
+                    {effectiveSuggestions.length > 0 && !isLoading && (messages.length > 0 || !hasUserSentMessage.current) && messages.length > 0 && (
                         <div style={{ padding: "10px 14px 0", flexShrink: 0 }}>
                             <p style={{ fontSize: 9, color: "#94a3b8", marginBottom: 6, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                                 Follow-up
@@ -577,8 +614,28 @@ export default function TrueSkillAssistant({
                         onScroll={handleScroll}
                         style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10, position: "relative" }}
                     >
-                        {messages.length === 0 && !isLoading && (
-                            <CapabilityWelcomeScreen hasData={!!hasData} onSend={handleSend} />
+                        {/* Capabilities slide-over: shown on first open OR when toggled via header button */}
+                        {(showCapabilities || (!hasUserSentMessage.current && !isLoading && messages.every(m => m.role !== "user"))) && (
+                            <div style={{
+                                position: hasUserSentMessage.current ? "absolute" : "relative",
+                                top: hasUserSentMessage.current ? 0 : undefined,
+                                left: hasUserSentMessage.current ? 0 : undefined,
+                                right: hasUserSentMessage.current ? 0 : undefined,
+                                bottom: hasUserSentMessage.current ? 0 : undefined,
+                                background: hasUserSentMessage.current ? "white" : "transparent",
+                                zIndex: hasUserSentMessage.current ? 10 : undefined,
+                                overflowY: hasUserSentMessage.current ? "auto" : undefined,
+                                padding: hasUserSentMessage.current ? "12px 14px" : undefined,
+                                borderRadius: hasUserSentMessage.current ? 12 : undefined,
+                                boxShadow: hasUserSentMessage.current ? "0 0 0 1px rgba(99,102,241,0.1)" : undefined,
+                                animation: hasUserSentMessage.current ? "tsFadeUp 0.18s ease" : undefined,
+                            }}>
+                                <CapabilityWelcomeScreen
+                                    hasData={!!hasData}
+                                    onSend={handleSend}
+                                    onClose={hasUserSentMessage.current ? () => setShowCapabilities(false) : undefined}
+                                />
+                            </div>
                         )}
                         {messages
                             .filter(msg => !searchQuery || msg.content.toLowerCase().includes(searchQuery.toLowerCase()))

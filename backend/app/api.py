@@ -3,6 +3,7 @@ TrueSkill AI - API Routes
 Implements the API contract from project specification.
 """
 
+import os
 import re
 import time
 from collections import defaultdict
@@ -884,6 +885,175 @@ async def project_explain_missing_bullet(body: ProjectBulletExplainRequest, req:
         return {"explanation": text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bullet explanation failed: {str(e)}")
+
+
+# =============================================================================
+# Project Deep Dive Endpoints (Scorecard, Summary, Tech Debt, Skills, Pitch)
+# =============================================================================
+
+class ProjectScorecardRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    matched_repo_id: str = ""
+    matched_repo_name: str = ""
+    overall_score: int = 0
+    tech_coverage_score: int = 0
+    architecture_score: int = 0
+    claim_support_score: int = 0
+    reasoning: str = ""
+    bullet_verdicts: list[dict] = []
+    tech_coverage: list[dict] = []
+
+
+@router.post("/projects/deep-dive/scorecard")
+async def project_deep_dive_scorecard(body: ProjectScorecardRequest, req: Request):
+    """
+    POST /api/projects/deep-dive/scorecard
+    Generate a 10-dimension project scorecard (each 0-10, aggregate 0-100).
+    Uses Neo4j complexity stats + verification data.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .project_deep_dive import generate_project_scorecard
+        result = await generate_project_scorecard(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            matched_repo_id=body.matched_repo_id,
+            matched_repo_name=body.matched_repo_name,
+            overall_score=body.overall_score,
+            tech_coverage_score=body.tech_coverage_score,
+            architecture_score=body.architecture_score,
+            claim_support_score=body.claim_support_score,
+            reasoning=body.reasoning,
+            bullet_verdicts=body.bullet_verdicts,
+            tech_coverage=body.tech_coverage,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scorecard generation failed: {str(e)}")
+
+
+class ProjectSummaryRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    bullet_claims: list[str] = []
+    matched_repo_id: str = ""
+    matched_repo_name: str = ""
+    repo_github_url: str = ""
+
+
+@router.post("/projects/deep-dive/summary")
+async def project_deep_dive_summary(body: ProjectSummaryRequest, req: Request):
+    """
+    POST /api/projects/deep-dive/summary
+    Generate a rich 3-part project description. Fetches README from GitHub if
+    available; falls back to Neo4j docstrings.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .project_deep_dive import generate_project_summary
+        result = await generate_project_summary(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            bullet_claims=body.bullet_claims,
+            matched_repo_id=body.matched_repo_id,
+            matched_repo_name=body.matched_repo_name,
+            repo_github_url=body.repo_github_url,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project summary failed: {str(e)}")
+
+
+class ProjectTechDebtRequest(BaseModel):
+    matched_repo_id: str
+    matched_repo_name: str = ""
+    tech_stack: list[str] = []
+
+
+@router.post("/projects/deep-dive/tech-debt")
+async def project_deep_dive_tech_debt(body: ProjectTechDebtRequest, req: Request):
+    """
+    POST /api/projects/deep-dive/tech-debt
+    Analyse technical debt, code health, and complexity hotspots from Neo4j graph stats.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    if not body.matched_repo_id:
+        raise HTTPException(status_code=400, detail="matched_repo_id is required")
+    try:
+        from .project_deep_dive import generate_tech_debt_radar
+        result = await generate_tech_debt_radar(
+            matched_repo_id=body.matched_repo_id,
+            matched_repo_name=body.matched_repo_name,
+            tech_stack=body.tech_stack,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tech debt radar failed: {str(e)}")
+
+
+class ProjectSkillSignalsRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    bullet_verdicts: list[dict] = []
+    reasoning: str = ""
+    all_evidence_node_ids: list[str] = []
+    matched_repo_name: str = ""
+
+
+@router.post("/projects/deep-dive/skill-signals")
+async def project_deep_dive_skill_signals(body: ProjectSkillSignalsRequest, req: Request):
+    """
+    POST /api/projects/deep-dive/skill-signals
+    Extract demonstrable skill signals with evidence-strength ratings (Strong/Medium/Weak).
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .project_deep_dive import extract_skill_signals
+        result = await extract_skill_signals(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            bullet_verdicts=body.bullet_verdicts,
+            reasoning=body.reasoning,
+            all_evidence_node_ids=body.all_evidence_node_ids,
+            matched_repo_name=body.matched_repo_name,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Skill signals extraction failed: {str(e)}")
+
+
+class ProjectRecruiterPitchRequest(BaseModel):
+    project_name: str
+    tech_stack: list[str] = []
+    overall_score: int = 0
+    status: str = ""
+    bullet_verdicts: list[dict] = []
+    reasoning: str = ""
+    matched_repo_name: str = ""
+
+
+@router.post("/projects/deep-dive/recruiter-pitch")
+async def project_deep_dive_recruiter_pitch(body: ProjectRecruiterPitchRequest, req: Request):
+    """
+    POST /api/projects/deep-dive/recruiter-pitch
+    Generate a one-click recruiter-ready 3-sentence project pitch + LinkedIn version + tagline.
+    """
+    check_rate_limit(req.client.host if req.client else "unknown", "challenge-claim")
+    try:
+        from .project_deep_dive import generate_recruiter_pitch
+        result = await generate_recruiter_pitch(
+            project_name=body.project_name,
+            tech_stack=body.tech_stack,
+            overall_score=body.overall_score,
+            status=body.status,
+            bullet_verdicts=body.bullet_verdicts,
+            reasoning=body.reasoning,
+            matched_repo_name=body.matched_repo_name,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recruiter pitch generation failed: {str(e)}")
 
 
 # =============================================================================
