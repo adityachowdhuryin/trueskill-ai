@@ -582,6 +582,10 @@ async def analyze_multi_repos(
     except HTTPException:
         raise
     except Exception as e:
+        import logging, traceback
+        logging.getLogger("trueskill").error(
+            "analyze/multi FAILED:\n%s", traceback.format_exc()
+        )
         raise HTTPException(status_code=500, detail=f"Multi-repo analysis failed: {str(e)}")
 
 
