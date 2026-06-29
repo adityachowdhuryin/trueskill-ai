@@ -33,9 +33,7 @@ class Neo4jSettings(BaseSettings):
 
     @property
     def effective_database(self) -> str:
-        """Return 'neo4j' if using AuraDB (databases.neo4j.io), otherwise the configured database."""
-        if self.neo4j_uri and "databases.neo4j.io" in self.neo4j_uri:
-            return "neo4j"
+        """Return the configured database, defaulting to 'neo4j'."""
         return self.neo4j_database or "neo4j"
 
     class Config:
