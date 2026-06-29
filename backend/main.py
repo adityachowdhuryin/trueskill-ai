@@ -3,6 +3,7 @@ TrueSkill AI - Backend Entry Point
 Automated Competency Verification System
 """
 
+import os
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -32,12 +33,18 @@ app = FastAPI(
 )
 
 # CORS middleware for frontend communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+else:
+    origins = [
         "http://localhost:3000",  # Next.js dev server
         "http://localhost:3001",  # Next.js fallback port
-    ],
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],

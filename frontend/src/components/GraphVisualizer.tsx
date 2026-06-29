@@ -1504,7 +1504,7 @@ export default function GraphVisualizer({
         const importList = graphData.nodes.filter(n => n.type === "Import").map(n => n.name).slice(0, 15);
         const repoNames = Array.from(new Set(graphData.nodes.map(n => n.repo_id).filter((id): id is string => Boolean(id))));
 
-        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
         try {
             const res = await fetch(`${apiBase}/api/graph/explain`, {
                 method: "POST",
@@ -1566,7 +1566,7 @@ export default function GraphVisualizer({
     useEffect(() => {
         if (pathMode !== "loading" || !pathStartNode || !pathEndNode) return;
         const repoId = pathStartNode.repo_id || repoIds[0] || "";
-        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
         fetch(`${apiBase}/api/graph/path`, {
             method: "POST",

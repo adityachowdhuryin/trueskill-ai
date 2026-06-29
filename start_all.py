@@ -13,11 +13,6 @@ Configure backend/.env with:
     NEO4J_PASSWORD=<password>
     NEO4J_DATABASE=<database>
 
-LLM stack:
-    OPENROUTER_API_KEY=<key>       # Primary — NVIDIA Nemotron-3-Super-120B (OpenRouter)
-    GROQ_API_KEY=<key>             # Fallback — Llama 3.3 70B (auto-used on 429 rate limit)
-    GROQ_API_KEY_BACKUP=<key>      # Second fallback if Groq primary also rate-limits
-
 Usage:
     python3 start_all.py
 """

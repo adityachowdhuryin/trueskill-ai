@@ -222,7 +222,7 @@ type ChatAction =
     | { type: "generateApplicationKit" }
     | { type: "runAtsScore" };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
 type ViewMode = "cards" | "graph";
 type ResultTab = "skills" | "radar" | "activity" | "graph" | "projects" | "coach";
@@ -1561,7 +1561,7 @@ export default function DashboardPage() {
             const formData = new FormData();
             formData.append("pdf_file", pdfFile);
             formData.append("job_description", jobDescription);
-            const res = await fetch("http://localhost:8000/api/ats-score", {
+            const res = await fetch(`${API_BASE_URL}/api/ats-score`, {
                 method: "POST",
                 body: formData,
             });
@@ -3089,7 +3089,7 @@ export default function DashboardPage() {
                             <ATSScorePanel
                                 report={atsReport}
                                 candidateName={pdfFile?.name.replace(/\.pdf$/i, "") ?? "Candidate"}
-                                apiBaseUrl="http://localhost:8000"
+                                apiBaseUrl={API_BASE_URL}
                             />
                         </div>
                     )}

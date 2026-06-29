@@ -809,7 +809,11 @@ def parse_codebase(repo_path: str, repo_id: str) -> GraphData:
     # Collect all parseable files first
     files_to_parse: list[tuple[str, str, str]] = []
     for root, dirs, files in os.walk(repo_path_obj):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        # Skip directories that are standard targets or contain pyvenv.cfg (virtualenvs)
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_dirs and not os.path.exists(os.path.join(root, d, "pyvenv.cfg"))
+        ]
         for file_name in files:
             file_path_full = os.path.join(root, file_name)
             relative_path = os.path.relpath(file_path_full, repo_path_obj)

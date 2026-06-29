@@ -208,7 +208,7 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
         if (!data || explainLoading) return;
         setExplainLoading(true);
         try {
-            const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
             const res = await fetch(`${apiBase}/api/explain-function`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

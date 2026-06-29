@@ -3,7 +3,7 @@
 ## 1. Project Overview
 **Title:** TrueSkill AI: Automated Competency Verification System
 **Type:** Master's Thesis Final Project
-**Core Value:** A multi-agent system that verifies claims on a PDF resume by cross-referencing them with actual code analysis from a GitHub repository using GraphRAG. Includes **Alex** — a full-featured AI career co-pilot — and **Project Deep Dive** — a premium 5-tab AI project analysis engine.
+**Core Value:** A multi-agent system that verifies claims on a PDF resume by cross-referencing them with actual code analysis from a GitHub repository using GraphRAG. Includes **Alex** — a full-featured AI career co-pilot.
 
 ---
 
@@ -17,8 +17,7 @@
 | Charts | Recharts |
 | Backend | Python 3.9+, FastAPI, Pydantic v2 |
 | AI Orchestration | LangChain, LangGraph |
-| LLM — Primary | NVIDIA Nemotron-3-Super-120B via OpenRouter (`nvidia/nemotron-3-super-120b-a12b:free`) |
-| LLM — Fallback | Groq Llama 3.3 70B (`langchain_groq`) — auto-used on rate limit (429) |
+| LLM | Groq — Llama 3.3 70B (`langchain_groq`) |
 | AST Parsing | tree-sitter (Python, JS, TS, Go, Java, Rust) |
 | Graph Database | Neo4j AuraDB (cloud) — `neo4j+s://` |
 | Relational Storage | SQLite (`trueskill_analyses.db`) |
@@ -39,16 +38,16 @@
 | Claim Challenger | `challenge.py` | Devil's Advocate adversarial LLM |
 | Project Verifier | `project_verifier.py` | Tech coverage, architecture assessment, bullet verdicts |
 | Project Features | `project_features.py` | Per-project: interview questions, challenge, bullet explain |
-| Project Deep Dive | `project_deep_dive.py` | 5 async LLM functions powering the Deep Dive panel: Scorecard, Summary, Tech Debt Radar, Skill Signals, Recruiter Pitch |
+| Project Deep Dive | `project_deep_dive.py` | 5 AI analysis functions: 10-dimension scorecard (0–100 aggregate), 3-part project summary (README-fetching), tech-debt radar with hotspots & quick-wins, skill signals with evidence strength (Strong/Medium/Weak), recruiter-ready pitch + LinkedIn version + tagline |
 | Job Finder | `job_finder.py` | Jooble job search + Apollo.io hiring manager |
 | Resume Optimizer | `resume_optimizer.py` | LLM keyword rewriting + email drafting |
 | Report Generator | `report.py` | Self-contained HTML verification report |
 | Storage | `storage.py` | SQLite CRUD + share tokens |
 | Database | `db.py` | Neo4j AuraDB driver + query helpers |
-| Graph Explain | `graph_explain.py` | 8-section AI architectural summary |
+| Graph Explain | `graph_explain.py` | 8-section AI architectural summary (Groq) |
 | Function Explain | `function_explain.py` | Per-function AI explanation |
-| LLM Client | `llm.py` | Nemotron primary (OpenRouter) + Groq fallback; `_FallbackChatGroq` auto-retries on 429 |
-| API | `api.py` | 55+ FastAPI endpoints with rate limiting |
+| LLM Client | `llm.py` | Shared Groq Llama 3.3 70B + `_FallbackChatGroq` (auto-retry backup key on 429) |
+| API | `api.py` | 50+ FastAPI endpoints with rate limiting |
 
 ---
 
@@ -96,8 +95,6 @@ class CoachChatRequestModel(BaseModel):
 class ProjectVerificationResult(BaseModel):
     project_id: str; name: str; tech_stack: list[str]
     status: str; overall_score: int; matched_repo_id: str
-    matched_repo_name: str; repo_github_url: str
-    match_confidence: int; match_reason: str
     tech_coverage_score: int   # 40% weight
     architecture_score: int    # 35% weight
     claim_support_score: int   # 25% weight
@@ -239,57 +236,24 @@ Click any `Function` node in 3D graph → NodeInfoPanel → ✨ Explain → AI p
 - **7d Score Delta**: ↑/↓ badges vs previous run, localStorage persistence
 
 ### Workflow 8: AI Graph Summary (`POST /api/graph/explain`)
-8-section JSON via LLM: summary, architecture_style, tech_stack, modules, key_observations, hotspot_analysis, improvement_suggestions, complexity_verdict. Rendered as collapsible panel in 3D graph view.
+8-section JSON via Groq: summary, architecture_style, tech_stack, modules, key_observations, hotspot_analysis, improvement_suggestions, complexity_verdict. Rendered as collapsible panel in 3D graph view.
 
 ### Workflow 9: Project Verification Suite
 - **Tech Coverage (40%):** alias-aware Cypher search for each claimed technology
 - **Architecture Assessment (35%):** LLM receives top 5 complex functions × 1.5k chars source code
 - **Claim Support (25%):** per-bullet verdict with evidence citations
-- **6 per-card AI features:** View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive, 🔬 Project Deep Dive
+- **6 per-card AI features:** View Code, Architecture Snapshot, Interview Prep, Devil's Advocate, Bullet Deep-Dive, **Project Deep Dive** (see Workflow 10)
 
-### Workflow 10: Project Deep Dive (`/api/projects/deep-dive/*`)
-Premium 5-tab panel inside each `ProjectCard`. All tabs are lazy-loaded (fetch on first click, never re-fetched in session).
+### Workflow 10: Project Deep Dive (`ProjectDeepDive.tsx`)
+A 5-tab slide-out sub-panel embedded inside each `ProjectCard`, powered by `project_deep_dive.py`. All tabs are **lazy-loaded** (data fetched only when the tab is first opened). Tabs requiring an ingested repo (`Score Card`, `Tech Debt`) are disabled for "Repo Not Ingested" projects and auto-redirect to `Summary`.
 
-**Tab 1 — Score Card:**
-- 10 dimensions rated 0–10 each (aggregate 0–100): Code Complexity Management, Tech Stack Depth, Architecture Quality, Claim Authenticity, Documentation Quality, Modularity & Structure, Dependency Hygiene, Originality & Ambition, Resume Impact, Interview Readiness
-- Animated SVG aggregate score circle (colour-coded: green ≥75, indigo ≥55, amber ≥35, red <35)
-- Per-dimension animated bars with rationale
-- Strengths and Growth Areas sections
-- Disabled for "Repo Not Ingested" projects (requires Neo4j stats)
-
-**Tab 2 — Summary:**
-- 3-part description: What it does / How it works / Why it matters (hiring lens)
-- Fetches GitHub README via `GET https://api.github.com/repos/{owner}/{repo}/readme` using `GITHUB_TOKEN` if set
-- Shows "README used ✓" badge when README was fetched; falls back to Neo4j docstrings
-- One-liner for LinkedIn headline
-- Works for all projects (no ingested repo required)
-
-**Tab 3 — Tech Debt Radar:**
-- Code health score (0–100), risk level badge (Low/Medium/High/Critical)
-- Top complexity hotspots: function name, file, cyclomatic complexity score
-- File-level complexity rollup (avg + max per file)
-- Quick wins (actionable, specific to named functions/files)
-- Refactor priority area
-- Positive signals (what the code does well)
-- Complexity distribution stats (1-5 / 6-10 / 11-20 / 21+ buckets)
-- Requires ingested repo (disabled for "Repo Not Ingested")
-
-**Tab 4 — Skill Signals:**
-- 4–7 specific skill signals extracted from verified evidence
-- Evidence strength badge per skill: Strong / Medium / Weak
-- Proof point: specific code evidence with function/file references
-- Interview angle: what to probe in a technical interview
-- Top skill + Weakest signal highlights
-- Overall skill story paragraph
-- Works for all projects
-
-**Tab 5 — Recruiter Pitch:**
-- 3-sentence professional pitch (interview/verbal version)
-- LinkedIn-optimised 2-sentence version
-- One-line tagline (max 15 words, LinkedIn headline-ready)
-- Delivery tip for verbal delivery
-- Copy-to-clipboard buttons on both pitch and LinkedIn version
-- Works for all projects
+| Tab | Endpoint | What It Returns |
+|---|---|---|
+| **Score Card** | `POST /api/projects/deep-dive/scorecard` | 10-dimension rating (0–10 each): Code Complexity Management, Tech Stack Depth, Architecture Quality, Claim Authenticity, Documentation Quality, Modularity & Structure, Dependency Hygiene, Originality & Ambition, Resume Impact, Interview Readiness. Aggregate score 0–100 + executive verdict + strengths + growth areas. Uses Neo4j complexity stats (avg/max cyclomatic, hotspots, orphan count, docstring ratio) + verification data. |
+| **Summary** | `POST /api/projects/deep-dive/summary` | 3-part description: `what` (problem + purpose), `how` (technical architecture), `why` (hiring perspective), plus a one-liner for LinkedIn. Fetches GitHub README (Base64-decoded, truncated to 3k chars) if available; falls back to top-8 Neo4j docstrings. |
+| **Tech Debt** | `POST /api/projects/deep-dive/tech-debt` | Code health assessment: overall health (Excellent/Good/Moderate/Poor), health score (0–100), risk level (Low/Medium/High/Critical), top complexity hotspots with specific function names + refactor suggestions, quick-win list, refactor priority, positive signals. Backed by Neo4j complexity distribution buckets + per-file rollup. |
+| **Skill Signals** | `POST /api/projects/deep-dive/skill-signals` | 4–7 evidence-backed skill signals with `evidence_strength` (Strong/Medium/Weak), a specific code proof-point per skill, an interview probe angle, top skill, and weakest signal summary. |
+| **Pitch** | `POST /api/projects/deep-dive/recruiter-pitch` | Recruiter-ready 3-sentence pitch + LinkedIn-optimised 2-sentence version + 15-word tagline + verbal delivery tip. One-click copy buttons for both versions. Calibrated to the verification score (honest when score is low). |
 
 ---
 
@@ -331,7 +295,8 @@ GET  /api/profile/{token}              public profile (no auth)
 POST /api/coach                        { verified_skills, job_description, num_projects }
 POST /api/coach/heatmap                { verified_skills, job_description, ats_keyword_matches? }
 POST /api/coach/roadmap                { bridge_projects, gap_summary, hours_per_week }
-POST /api/coach/chat/stream            { message, context_data, history, ...extended } → SSE
+POST /api/coach/chat                   { message, context_data, history, ...extended } → { reply, suggestions }
+POST /api/coach/chat/stream            { message, context_data, history, ...extended } → SSE token stream
 POST /api/coach/insights               { context_data } → { insight: str }
 POST /api/coach/export                 → HTML download
 POST /api/coach/memory/save            { session_key, messages } → generate + store summary
@@ -358,11 +323,28 @@ POST /api/projects/explain-missing-bullet { project_name, bullet_claim, missing_
 
 ### Project Deep Dive
 ```
-POST /api/projects/deep-dive/scorecard     { project_name, tech_stack, matched_repo_id, ... }
-POST /api/projects/deep-dive/summary       { project_name, tech_stack, bullet_claims, repo_github_url, ... }
-POST /api/projects/deep-dive/tech-debt     { matched_repo_id, matched_repo_name, tech_stack }
-POST /api/projects/deep-dive/skill-signals { project_name, tech_stack, bullet_verdicts, reasoning, ... }
-POST /api/projects/deep-dive/recruiter-pitch { project_name, tech_stack, overall_score, status, ... }
+POST /api/projects/deep-dive/scorecard      { project_name, tech_stack, matched_repo_id, matched_repo_name,
+                                              overall_score, tech_coverage_score, architecture_score,
+                                              claim_support_score, reasoning, bullet_verdicts, tech_coverage }
+                                            → { dimensions[10], aggregate_score, verdict, strengths[], growth_areas[] }
+
+POST /api/projects/deep-dive/summary        { project_name, tech_stack, bullet_claims[], matched_repo_id,
+                                              matched_repo_name, repo_github_url }
+                                            → { what, how, why, one_liner, readme_used }
+
+POST /api/projects/deep-dive/tech-debt      { matched_repo_id, matched_repo_name, tech_stack }
+                                            → { overall_health, health_score, risk_level, summary,
+                                                hotspots[], quick_wins[], refactor_priority,
+                                                positive_signals[], stats{} }
+
+POST /api/projects/deep-dive/skill-signals  { project_name, tech_stack, bullet_verdicts[],
+                                              reasoning, all_evidence_node_ids[], matched_repo_name }
+                                            → { signals[{skill, evidence_strength, proof_point, interview_angle}],
+                                                top_skill, weakest_signal, overall_signal }
+
+POST /api/projects/deep-dive/recruiter-pitch { project_name, tech_stack, overall_score, status,
+                                               bullet_verdicts[], reasoning, matched_repo_name }
+                                             → { pitch, linkedin_version, tagline, tone_note }
 ```
 
 ### Benchmarks, Interview, ATS
@@ -412,7 +394,7 @@ GET /api/health/db
 | **Radar** | Recharts radar vs LLM role benchmarks. |
 | **Activity** | ContributionHeatmap + SkillTimeline. |
 | **Graph** | 3D force-graph: Bloom, Neighborhood Focus, AI Summary, Evidence Highlighting, Path Finder, Analytics, Code Drill-Down, Function Explain. |
-| **Projects** | ProjectSummaryBar + ProjectCard grid. Each card: tech coverage bars, bullet verdicts, 6 AI features including Project Deep Dive. |
+| **Projects** | ProjectSummaryBar + ProjectCard grid. Each card: tech coverage bars, bullet verdicts, 5 AI features. |
 
 ### Key Components
 | Component | Description |
@@ -427,12 +409,12 @@ GET /api/health/db
 | `GraphVisualizer.tsx` | 3D force-graph: Bloom, fog, hover focus, AI Summary, evidence highlight, Function Explain, Path Finder, Analytics, Code Drill-Down |
 | `SkillCard.tsx` | Score bar, delta badge, evidence nodes, Evidence Strength Meter, Interview Prep, Challenge button |
 | `VerificationSummaryBar.tsx` | Animated SVG donut chart + 4 stat cards with click-to-filter |
-| `ProjectCard.tsx` | Tech coverage bars, bullet verdicts, 6 per-project AI features |
-| `ProjectDeepDive.tsx` | 5-tab Deep Dive panel: Score Card, Summary, Tech Debt, Skill Signals, Recruiter Pitch. Lazy-loaded. |
+| `ProjectCard.tsx` | Tech coverage bars, bullet verdicts, 6 per-project AI features (including Project Deep Dive) |
+| `ProjectDeepDive.tsx` | 5-tab slide-out panel embedded in each ProjectCard: Score Card (10-dim scorecard, aggregate 0–100), Summary (3-part description with README fetch), Tech Debt (hotspots, quick-wins, health score), Skill Signals (Strong/Medium/Weak evidence badges + interview angles), Pitch (recruiter paragraph + LinkedIn version + tagline + copy buttons). Tabs lazy-load on first click. Score Card and Tech Debt disabled for Repo Not Ingested projects. |
 | `CodeViewer.tsx` | Source code modal, inline syntax highlighting, ESC to close |
 | `SkillsGapHeatmap.tsx` | Sortable heatmap: JD req vs code score vs ATS presence |
 | `LearningRoadmap.tsx` | Scrollable week cards with checkbox persistence (localStorage) |
-| `CoachChat.tsx` | Original embedded coach chat panel (still active in dashboard) |
+| `CoachChat.tsx` | Embedded coach chat panel (dashboard) |
 
 ---
 
@@ -442,7 +424,7 @@ GET /api/health/db
 |---|---|---|
 | Cyclomatic Complexity | ✅ | `ingest.py` full AST traversal |
 | Stylometry | ✅ | `forensics.py` Shannon entropy + git history |
-| Explainability | ✅ | `score_breakdown`, Code Drill-Down, Function Explain, AI Graph Summary, Evidence Strength Meter, Project Deep Dive |
+| Explainability | ✅ | `score_breakdown`, Code Drill-Down, Function Explain, AI Graph Summary, Evidence Strength Meter |
 | Multi-language | ✅ | tree-sitter: Python, JS, TS, Go, Java, Rust |
 | Streaming | ✅ | SSE for verification + Alex chat |
 | Candidate Comparison | ✅ | SQLite + `/compare` page |
@@ -458,7 +440,7 @@ GET /api/health/db
 | Feedback Loop | ✅ | 👍/👎 logged to `feedback.jsonl` |
 | Capability Discovery | ✅ | Welcome screen + ⚡ Capabilities persistent toggle |
 | Proactive Insights | ✅ | Auto-insight fires after first analysis; doesn't suppress welcome screen |
-| Project Deep Dive | ✅ | 5-tab premium AI analysis: Scorecard, Summary, Tech Debt, Skill Signals, Pitch |
+| Project Deep Dive | ✅ | `project_deep_dive.py` + `ProjectDeepDive.tsx`: 5-tab AI analysis per project card (scorecard, summary, tech-debt, skill signals, recruiter pitch) |
 
 ---
 
@@ -488,15 +470,9 @@ NEO4J_URI=neo4j+s://<instance-id>.databases.neo4j.io
 NEO4J_USERNAME=<username>
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=<database-name>
-
-# LLM — Primary (OpenRouter)
-OPENROUTER_API_KEY=your_key
-
-# LLM — Groq fallback (activated automatically on 429 rate limit)
 GROQ_API_KEY=your_key
 GROQ_API_KEY_BACKUP=your_backup_key   # auto-used on 429 errors
-
-GITHUB_TOKEN=your_token               # optional — avoids rate limits on README + heatmap
+GITHUB_TOKEN=your_token               # optional
 JOOBLE_API_KEY=your_key               # optional
 APOLLO_API_KEY=your_key               # optional (free tier: /people/match fallback)
 ```
