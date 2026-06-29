@@ -303,11 +303,19 @@ async def extract_profile_endpoint(
         username = match.group(1)
 
         # Fetch repositories from GitHub API
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "TrueSkill-AI",
+        }
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"https://api.github.com/users/{username}/repos",
                 params={"type": "owner", "sort": "updated", "per_page": 15},
-                headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "TrueSkill-AI"}
+                headers=headers
             )
             
             if response.status_code == 404:
