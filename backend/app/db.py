@@ -31,6 +31,13 @@ class Neo4jSettings(BaseSettings):
             return self.neo4j_username
         return self.neo4j_user or self.neo4j_username or "neo4j"
 
+    @property
+    def effective_database(self) -> str:
+        """Return 'neo4j' if using AuraDB (databases.neo4j.io), otherwise the configured database."""
+        if self.neo4j_uri and "databases.neo4j.io" in self.neo4j_uri:
+            return "neo4j"
+        return self.neo4j_database or "neo4j"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -95,7 +102,7 @@ class Neo4jConnection:
             with neo4j_driver.get_session() as session:
                 result = session.run("MATCH (n) RETURN n LIMIT 10")
         """
-        db = database or getattr(self, '_settings', None) and self._settings.neo4j_database or "neo4j"
+        db = database or getattr(self, '_settings', None) and self._settings.effective_database or "neo4j"
         session = self.driver.session(database=db)
         try:
             yield session

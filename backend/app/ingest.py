@@ -125,6 +125,11 @@ def clone_repo(github_url: str, target_dir: Optional[str] = None) -> tuple[str, 
     
     repo_path = os.path.join(target_dir, repo_id)
     
+    # If GITHUB_TOKEN is available and the URL is HTTPS github.com URL, inject the token for authentication
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token and "github.com" in github_url and github_url.startswith("https://"):
+        github_url = github_url.replace("https://github.com", f"https://x-access-token:{github_token}@github.com")
+
     try:
         # Use subprocess directly to fully disable git-lfs filters.
         # GitPython's env= parameter doesn't reliably pass GIT_LFS_SKIP_SMUDGE,
