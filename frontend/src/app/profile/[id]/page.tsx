@@ -33,7 +33,8 @@ export default function PublicProfilePage() {
 
     useEffect(() => {
         if (!token) return;
-        fetch(`/api/profile/${token}`)
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+        fetch(`${apiBase}/api/profile/${token}`)
             .then(r => {
                 if (r.status === 404) { setNotFound(true); setLoading(false); return null; }
                 if (!r.ok) throw new Error("Server error");

@@ -52,7 +52,8 @@ export default function ContributionHeatmap({ repoId }: ContributionHeatmapProps
         if (!repoId) return;
         setLoading(true);
         setError(null);
-        fetch(`/api/heatmap/${repoId}`)
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+        fetch(`${apiBase}/api/heatmap/${repoId}`)
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
             .then(d => { setData(d); setLoading(false); })
             .catch(e => { setError(e.message); setLoading(false); });

@@ -391,8 +391,9 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
         if (challengeText) { setShowChallenge(v => !v); return; }
         setIsChallenging(true);
         setShowChallenge(true);
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
         try {
-            const res = await fetch(`/api/challenge-claim`, {
+            const res = await fetch(`${apiBase}/api/challenge-claim`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -424,8 +425,9 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
         if (interviewData) { setShowInterview(v => !v); return; }
         setInterviewLoading(true);
         setShowInterview(true);
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
         try {
-            const res = await fetch(`/api/interview-questions`, {
+            const res = await fetch(`${apiBase}/api/interview-questions`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

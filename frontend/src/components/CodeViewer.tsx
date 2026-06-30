@@ -151,11 +151,13 @@ export default function CodeViewer({ nodeId, repoIds, fileName, functionName, on
         setLoading(true);
         setError(null);
 
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
         // Try each repoId until one returns code
         for (const rid of repoIds) {
             try {
                 const encodedNode = encodeURIComponent(nodeId).replace(/%2F/g, "/");
-                const res = await fetch(`/api/node-code/${rid}/${encodedNode}`);
+                const res = await fetch(`${apiBase}/api/node-code/${rid}/${encodedNode}`);
 
                 if (res.ok) {
                     const json = await res.json();
