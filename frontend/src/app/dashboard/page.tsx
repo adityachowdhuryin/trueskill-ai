@@ -871,6 +871,29 @@ export default function DashboardPage() {
                 throw new Error(e.detail || "Multi-repo analysis failed");
             }
             const result = await skillsRes.json();
+
+            // Check if the LLM rate limit killed the analysis
+            const hasResults = (result.verification_results?.length ?? 0) > 0;
+            const backendErrors: string[] = result.errors ?? [];
+            const rateLimitError = backendErrors.find((e: string) => e.includes("429") || e.includes("rate limit") || e.includes("rate_limit"));
+
+            if (!hasResults && rateLimitError) {
+                // Rate limit exhausted — don't silently show "no results"
+                setError("⚠️ AI rate limit reached — the free Groq API quota (100k tokens/day) has been exhausted. Please wait 15-60 minutes and try again, or upgrade to Groq Dev tier.");
+                setAgentMessages(prev => [...prev, `⚠️ Rate limit: ${rateLimitError}`]);
+                setIsAnalyzing(false);
+                setIsAnalyzingProjects(false);
+                return;
+            }
+
+            if (!hasResults && backendErrors.length > 0) {
+                setError(`Analysis returned 0 claims: ${backendErrors[0]}`);
+                setAgentMessages(prev => [...prev, `⚠️ Backend error: ${backendErrors[0]}`]);
+                setIsAnalyzing(false);
+                setIsAnalyzingProjects(false);
+                return;
+            }
+
             // Feature 4 — snapshot current scores before overwriting
             if (analysisResult?.verification_results?.length) {
                 const snap: Record<string, number> = {};
@@ -897,7 +920,10 @@ export default function DashboardPage() {
             setIsAnalyzingProjects(false);
 
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Analysis failed");
+            console.error("[TrueSkill] Analysis failed:", err);
+            const msg = err instanceof Error ? err.message : String(err);
+            setError(msg || "Analysis failed — check browser console for details");
+            setAgentMessages(prev => [...prev, `❌ Analysis error: ${msg}`]);
         } finally {
             setIsIngesting(false);
             setIsAnalyzing(false);
