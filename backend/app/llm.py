@@ -40,14 +40,15 @@ class _SmartFallbackLLM:
         # 1. Try adding Cerebras if configured
         cerebras_key = os.getenv("CEREBRAS_API_KEY")
         if cerebras_key:
-            cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
+            cerebras_model = os.getenv("CEREBRAS_MODEL", "gemma-4-31b")
             try:
                 from langchain_openai import ChatOpenAI
                 cerebras_client = ChatOpenAI(
                     model=cerebras_model,
                     openai_api_key=cerebras_key,
                     openai_api_base="https://api.cerebras.ai/v1",
-                    temperature=temperature
+                    temperature=temperature,
+                    max_retries=0  # Do not block and wait on 429, fall back instantly
                 )
                 self._clients.append(("Cerebras", cerebras_client))
                 logger.info(f"Initialized Cerebras client with model {cerebras_model}")
@@ -63,7 +64,8 @@ class _SmartFallbackLLM:
                 self._clients.append(("Groq Primary", ChatGroq(
                     model=MODEL_NAME,
                     groq_api_key=groq_primary,
-                    temperature=temperature
+                    temperature=temperature,
+                    max_retries=0  # Fall back instantly on failure
                 )))
             except Exception as e:
                 logger.error(f"Failed to initialize Groq Primary client: {e}")
@@ -73,7 +75,8 @@ class _SmartFallbackLLM:
                 self._clients.append(("Groq Backup", ChatGroq(
                     model=MODEL_NAME,
                     groq_api_key=groq_backup,
-                    temperature=temperature
+                    temperature=temperature,
+                    max_retries=0  # Fall back instantly on failure
                 )))
             except Exception as e:
                 logger.error(f"Failed to initialize Groq Backup client: {e}")
