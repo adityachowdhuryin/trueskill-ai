@@ -27,86 +27,112 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many requests" in msg
 
 
-class _FallbackChatGroq:
+class _SmartFallbackLLM:
     """
-    Thin wrapper around ChatGroq that transparently retries with a backup
-    API key whenever the primary key hits a 429 rate-limit error.
-
-    Exposes .invoke() and .ainvoke() — the same interface as ChatGroq — so
-    all existing callers work without any changes.
+    Orchestrator LLM client that prioritizes Cerebras (if configured)
+    and transparently falls back to Groq (primary, then backup) upon any failure or rate limit.
     """
 
     def __init__(self, temperature: float) -> None:
         self._temperature = temperature
-        primary = os.getenv("GROQ_API_KEY")
-        backup  = os.getenv("GROQ_API_KEY_BACKUP")
-        if not primary:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-        self._primary = ChatGroq(model=MODEL_NAME, groq_api_key=primary, temperature=temperature)
-        self._backup  = (
-            ChatGroq(model=MODEL_NAME, groq_api_key=backup, temperature=temperature)
-            if backup else None
-        )
+        self._clients = []
+
+        # 1. Try adding Cerebras if configured
+        cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        if cerebras_key:
+            cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
+            try:
+                from langchain_openai import ChatOpenAI
+                cerebras_client = ChatOpenAI(
+                    model=cerebras_model,
+                    openai_api_key=cerebras_key,
+                    openai_api_base="https://api.cerebras.ai/v1",
+                    temperature=temperature
+                )
+                self._clients.append(("Cerebras", cerebras_client))
+                logger.info(f"Initialized Cerebras client with model {cerebras_model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Cerebras client: {e}")
+
+        # 2. Add Groq clients (Primary and Backup)
+        groq_primary = os.getenv("GROQ_API_KEY")
+        groq_backup = os.getenv("GROQ_API_KEY_BACKUP")
+
+        if groq_primary:
+            try:
+                self._clients.append(("Groq Primary", ChatGroq(
+                    model=MODEL_NAME,
+                    groq_api_key=groq_primary,
+                    temperature=temperature
+                )))
+            except Exception as e:
+                logger.error(f"Failed to initialize Groq Primary client: {e}")
+
+        if groq_backup:
+            try:
+                self._clients.append(("Groq Backup", ChatGroq(
+                    model=MODEL_NAME,
+                    groq_api_key=groq_backup,
+                    temperature=temperature
+                )))
+            except Exception as e:
+                logger.error(f"Failed to initialize Groq Backup client: {e}")
+
+        if not self._clients:
+            raise ValueError("No LLM clients could be initialized. Please set CEREBRAS_API_KEY or GROQ_API_KEY.")
 
     # ── Sync ──────────────────────────────────────────────────────────────────
     def invoke(self, messages, **kwargs):
-        try:
-            return self._primary.invoke(messages, **kwargs)
-        except Exception as exc:
-            if _is_rate_limit(exc) and self._backup:
-                logger.warning(
-                    "Primary Groq key hit rate limit — switching to backup key. (%s)", exc
-                )
-                return self._backup.invoke(messages, **kwargs)
-            raise
+        last_exc = None
+        for name, client in self._clients:
+            try:
+                return client.invoke(messages, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"{name} failed to invoke: {exc}. Trying next client...")
+        raise last_exc
 
     # ── Async ─────────────────────────────────────────────────────────────────
     async def ainvoke(self, messages, **kwargs):
-        try:
-            return await self._primary.ainvoke(messages, **kwargs)
-        except Exception as exc:
-            if _is_rate_limit(exc) and self._backup:
-                logger.warning(
-                    "Primary Groq key hit rate limit — switching to backup key. (%s)", exc
-                )
-                return await self._backup.ainvoke(messages, **kwargs)
-            raise
+        last_exc = None
+        for name, client in self._clients:
+            try:
+                return await client.ainvoke(messages, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"{name} failed to ainvoke: {exc}. Trying next client...")
+        raise last_exc
 
-    # ── Stream passthrough (unchanged) ────────────────────────────────────────
+    # ── Stream passthrough ────────────────────────────────────────────────────
     async def astream(self, messages, **kwargs):
-        try:
-            async for chunk in self._primary.astream(messages, **kwargs):
-                yield chunk
-        except Exception as exc:
-            if _is_rate_limit(exc) and self._backup:
-                logger.warning(
-                    "Primary Groq key hit rate limit on stream — switching to backup key. (%s)", exc
-                )
-                async for chunk in self._backup.astream(messages, **kwargs):
+        last_exc = None
+        for name, client in self._clients:
+            try:
+                async for chunk in client.astream(messages, **kwargs):
                     yield chunk
-            else:
-                raise
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"{name} failed to astream: {exc}. Trying next client...")
+        raise last_exc
 
     def stream(self, messages, **kwargs):
-        try:
-            yield from self._primary.stream(messages, **kwargs)
-        except Exception as exc:
-            if _is_rate_limit(exc) and self._backup:
-                logger.warning(
-                    "Primary Groq key hit rate limit on stream — switching to backup key. (%s)", exc
-                )
-                yield from self._backup.stream(messages, **kwargs)
-            else:
-                raise
+        last_exc = None
+        for name, client in self._clients:
+            try:
+                yield from client.stream(messages, **kwargs)
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"{name} failed to stream: {exc}. Trying next client...")
+        raise last_exc
 
 
-def get_llm_model(temperature: float = 0.1) -> _FallbackChatGroq:
+def get_llm_model(temperature: float = 0.1) -> _SmartFallbackLLM:
     """
-    Return an LLM client with transparent fallback key rotation.
-    Drop-in replacement for the previous ChatGroq return — all callers
-    (agents.py, project_verifier.py, coach.py, etc.) work unchanged.
+    Return an LLM client with smart fallback and key rotation across multiple providers (Cerebras, Groq).
     """
-    return _FallbackChatGroq(temperature=temperature)
+    return _SmartFallbackLLM(temperature=temperature)
 
 
 def parse_json_response(response_text: str) -> dict[str, Any]:
