@@ -62,3 +62,5 @@ backend/trueskill_analyses.db
 
 # Alex session memory & feedback log (user data — local only)
 backend/data/
+.vercel
+.env*
