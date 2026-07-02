@@ -37,25 +37,7 @@ class _SmartFallbackLLM:
         self._temperature = temperature
         self._clients = []
 
-        # 1. Try adding Cerebras if configured
-        cerebras_key = os.getenv("CEREBRAS_API_KEY")
-        if cerebras_key:
-            cerebras_model = os.getenv("CEREBRAS_MODEL", "gemma-4-31b")
-            try:
-                from langchain_openai import ChatOpenAI
-                cerebras_client = ChatOpenAI(
-                    model=cerebras_model,
-                    openai_api_key=cerebras_key,
-                    openai_api_base="https://api.cerebras.ai/v1",
-                    temperature=temperature,
-                    max_retries=0  # Do not block and wait on 429, fall back instantly
-                )
-                self._clients.append(("Cerebras", cerebras_client))
-                logger.info(f"Initialized Cerebras client with model {cerebras_model}")
-            except Exception as e:
-                logger.error(f"Failed to initialize Cerebras client: {e}")
-
-        # 2. Add Groq clients (Primary and Backup)
+        # 1. Add Groq clients (Primary and Backup) as the primary option
         groq_primary = os.getenv("GROQ_API_KEY")
         groq_backup = os.getenv("GROQ_API_KEY_BACKUP")
 
@@ -80,6 +62,24 @@ class _SmartFallbackLLM:
                 )))
             except Exception as e:
                 logger.error(f"Failed to initialize Groq Backup client: {e}")
+
+        # 2. Add Cerebras as the fallback option
+        cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        if cerebras_key:
+            cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
+            try:
+                from langchain_openai import ChatOpenAI
+                cerebras_client = ChatOpenAI(
+                    model=cerebras_model,
+                    openai_api_key=cerebras_key,
+                    openai_api_base="https://api.cerebras.ai/v1",
+                    temperature=temperature,
+                    max_retries=0  # Do not block and wait on 429, fall back instantly
+                )
+                self._clients.append(("Cerebras", cerebras_client))
+                logger.info(f"Initialized Cerebras client with model {cerebras_model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Cerebras client: {e}")
 
         if not self._clients:
             raise ValueError("No LLM clients could be initialized. Please set CEREBRAS_API_KEY or GROQ_API_KEY.")
