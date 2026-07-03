@@ -29,15 +29,32 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 class _SmartFallbackLLM:
     """
-    Orchestrator LLM client that prioritizes Cerebras (if configured)
-    and transparently falls back to Groq (primary, then backup) upon any failure or rate limit.
+    Orchestrator LLM client that prioritizes Gemini (Google AI Studio)
+    and transparently falls back to Groq (Primary, then Backup) and Cerebras upon failure or rate limit.
     """
 
     def __init__(self, temperature: float) -> None:
         self._temperature = temperature
         self._clients = []
 
-        # 1. Add Groq clients (Primary and Backup) as the primary option
+        # 1. Add Gemini (Google AI Studio) as the primary option
+        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "AQ.Ab8RN6KtaTSuvkU6K1tWc-MQFHWSH54Di-Vd4qgGn_0Ji0g0Tw"
+        if gemini_key:
+            gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                gemini_client = ChatGoogleGenerativeAI(
+                    model=gemini_model,
+                    google_api_key=gemini_key,
+                    temperature=temperature,
+                    max_retries=0  # Fall back instantly on failure/rate limit
+                )
+                self._clients.append(("Gemini", gemini_client))
+                logger.info(f"Initialized Gemini client with model {gemini_model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini client: {e}")
+
+        # 2. Add Groq clients (Primary and Backup) as the first fallback options
         groq_primary = os.getenv("GROQ_API_KEY")
         groq_backup = os.getenv("GROQ_API_KEY_BACKUP")
 
@@ -63,7 +80,7 @@ class _SmartFallbackLLM:
             except Exception as e:
                 logger.error(f"Failed to initialize Groq Backup client: {e}")
 
-        # 2. Add Cerebras as the fallback option
+        # 3. Add Cerebras as the secondary fallback option
         cerebras_key = os.getenv("CEREBRAS_API_KEY")
         if cerebras_key:
             cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
@@ -82,7 +99,7 @@ class _SmartFallbackLLM:
                 logger.error(f"Failed to initialize Cerebras client: {e}")
 
         if not self._clients:
-            raise ValueError("No LLM clients could be initialized. Please set CEREBRAS_API_KEY or GROQ_API_KEY.")
+            raise ValueError("No LLM clients could be initialized. Please set GOOGLE_API_KEY, GROQ_API_KEY, or CEREBRAS_API_KEY.")
 
     # ── Sync ──────────────────────────────────────────────────────────────────
     def invoke(self, messages, **kwargs):
