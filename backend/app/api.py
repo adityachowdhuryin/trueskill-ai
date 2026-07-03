@@ -1856,41 +1856,55 @@ async def compare_analyses(ids: str):
 async def ats_score_endpoint(
     req: Request,
     job_description: str = Form(...),
-    pdf_file: UploadFile = File(...),
+    pdf_file: Optional[UploadFile] = File(None),
+    resume_text_override: Optional[str] = Form(None),
 ):
     """
     POST /api/ats-score
-    Accepts { pdf_file, job_description }. Runs ATS evaluation via LLM.
+    Accepts { pdf_file (or resume_text_override), job_description }.
+    If resume_text_override is provided and non-empty, PDF extraction is skipped
+    (saves a full re-upload round-trip when the frontend already has the text).
     Returns ATSReport JSON.
     """
-    from PyPDF2 import PdfReader
-    from io import BytesIO
     from .ats import score_resume_ats
+    from .utils.pdf_extractor import extract_text_from_pdf
 
     check_rate_limit(req.client.host if req.client else "unknown", "ats-score")
 
-    if not pdf_file.filename or not pdf_file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-
-    if not job_description or not job_description.strip():
-        raise HTTPException(status_code=400, detail="job_description cannot be empty")
+    # Validate job description has enough content
+    jd_words = len(job_description.split()) if job_description else 0
+    if jd_words < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Job description is too short. Please paste at least 20 words for accurate analysis.",
+        )
 
     try:
-        pdf_content = await pdf_file.read()
+        # ── Use pre-extracted text if provided (avoids re-upload) ────────────
+        resume_text = ""
+        if resume_text_override and resume_text_override.strip():
+            resume_text = resume_text_override.strip()
+        elif pdf_file is not None:
+            if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
+                raise HTTPException(status_code=400, detail="File must be a PDF")
 
-        if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+            pdf_content = await pdf_file.read()
+
+            if len(pdf_content) > MAX_PDF_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PDF file too large. Maximum size is {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB.",
+                )
+
+            resume_text = extract_text_from_pdf(pdf_content)
+        else:
             raise HTTPException(
                 status_code=400,
-                detail=f"PDF file too large. Maximum size is {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB.",
+                detail="Either pdf_file or resume_text_override must be provided.",
             )
 
-        pdf_reader = PdfReader(BytesIO(pdf_content))
-        resume_text = ""
-        for page in pdf_reader.pages:
-            resume_text += page.extract_text() + "\n"
-
         if not resume_text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF. The file may be image-only or scanned.")
 
         report = await score_resume_ats(resume_text, job_description)
         return report.model_dump()
@@ -1902,6 +1916,61 @@ async def ats_score_endpoint(
 
 
 # =============================================================================
+# ATS Score Compare Endpoint
+# =============================================================================
+
+@router.post("/ats-score/compare")
+async def ats_compare_endpoint(req: Request):
+    """
+    POST /api/ats-score/compare
+    Accepts { report_a: dict, report_b: dict } (two ATSReport dicts).
+    Returns a structured diff: score deltas, keyword changes, section changes.
+    """
+    try:
+        data = await req.json()
+        a = data.get("report_a", {})
+        b = data.get("report_b", {})
+
+        if not a or not b:
+            raise HTTPException(status_code=400, detail="Both report_a and report_b are required.")
+
+        def delta(key: str) -> int:
+            return int(b.get(key, 0)) - int(a.get(key, 0))
+
+        # Keyword changes
+        a_found = {km["keyword"] for km in a.get("keyword_matches", []) if km.get("found")}
+        b_found = {km["keyword"] for km in b.get("keyword_matches", []) if km.get("found")}
+        newly_found   = sorted(b_found - a_found)
+        newly_missing = sorted(a_found - b_found)
+
+        # Section score changes
+        a_sections = {sf["section"]: sf["score"] for sf in a.get("section_feedback", [])}
+        b_sections = {sf["section"]: sf["score"] for sf in b.get("section_feedback", [])}
+        section_deltas = {
+            sec: b_sections.get(sec, 0) - a_sections.get(sec, 0)
+            for sec in set(a_sections) | set(b_sections)
+        }
+
+        return {
+            "ats_score_delta":          delta("ats_score"),
+            "keyword_match_delta":      delta("keyword_match_score"),
+            "content_score_delta":      delta("content_score"),
+            "format_score_delta":       delta("format_score"),
+            "experience_match_delta":   delta("experience_match_score"),
+            "newly_found_keywords":     newly_found,
+            "newly_missing_keywords":   newly_missing,
+            "section_score_deltas":     section_deltas,
+            "score_a":                  a.get("ats_score", 0),
+            "score_b":                  b.get("ats_score", 0),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ATS comparison failed: {str(e)}")
+
+
+# =============================================================================
 # ATS Report Download Endpoint
 # =============================================================================
 
@@ -1910,21 +1979,31 @@ async def ats_report_endpoint(req: Request):
     """
     POST /api/ats-report
     Accepts { ats_report: dict, candidate_name: str }.
+    Validates payload via Pydantic before HTML generation (prevents XSS from
+    malformed/crafted input).
     Returns a downloadable self-contained HTML ATS report.
     """
-    from .ats import generate_ats_html_report
+    from .ats import ATSReport, generate_ats_html_report
+    from fastapi.responses import Response as FastAPIResponse
 
     try:
         data = await req.json()
-        ats_report = data.get("ats_report", {})
-        candidate_name = data.get("candidate_name", "Candidate")
+        ats_report_raw = data.get("ats_report", {})
+        candidate_name = str(data.get("candidate_name", "Candidate"))[:100]
 
-        if not ats_report:
+        if not ats_report_raw:
             raise HTTPException(status_code=400, detail="ats_report payload is required")
 
-        html = generate_ats_html_report(ats_report, candidate_name)
-        return StreamingResponse(
-            iter([html]),
+        # Validate structure via Pydantic (also sanitises types)
+        try:
+            validated = ATSReport(**ats_report_raw)
+            ats_report_dict = validated.model_dump()
+        except Exception as validation_err:
+            raise HTTPException(status_code=422, detail=f"Invalid ATS report payload: {validation_err}")
+
+        html_content = generate_ats_html_report(ats_report_dict, candidate_name)
+        return FastAPIResponse(
+            content=html_content,
             media_type="text/html",
             headers={"Content-Disposition": "attachment; filename=ats_report.html"},
         )

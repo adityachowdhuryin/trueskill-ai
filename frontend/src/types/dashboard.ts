@@ -123,18 +123,52 @@ export interface ChatMessage {
     actionPrompt?: { label: string; description: string; action: string };
 }
 
+export interface ATSKeywordMatch {
+    keyword: string;
+    found: boolean;
+    context: string;
+}
+
+export interface ATSSectionFeedback {
+    section: string;
+    score: number;
+    feedback: string;
+    suggestions: string[];
+}
+
+export interface ATSPriorityAction {
+    rank: number;
+    action: string;
+    impact: string;
+    estimated_gain: number;
+    section: string;
+}
+
+export interface ATSRewriteSuggestion {
+    section: string;
+    original_snippet: string;
+    rewritten_snippet: string;
+    rationale: string;
+}
+
 export interface ATSReport {
     ats_score: number;
     keyword_match_score: number;
     format_score: number;
     content_score: number;
-    keyword_matches: Array<{ keyword: string; found: boolean; context: string }>;
-    section_feedback: Array<{ section: string; score: number; feedback: string; suggestions: string[] }>;
+    experience_match_score: number;
+    job_title: string;
+    company_name: string;
+    match_level: string;
+    keyword_matches: ATSKeywordMatch[];
+    section_feedback: ATSSectionFeedback[];
     top_missing_keywords: string[];
     formatting_flags: string[];
     overall_recommendation: string;
     strengths: string[];
     improvements: string[];
+    priority_actions: ATSPriorityAction[];
+    rewrite_suggestions: ATSRewriteSuggestion[];
 }
 
 export interface IngestedRepoRecord {

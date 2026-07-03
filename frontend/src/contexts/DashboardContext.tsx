@@ -148,6 +148,7 @@ interface DashboardContextValue {
 
     // ── ATS ───────────────────────────────────────────────────────────────────
     atsReport: ATSReport | null;
+    atsReportHistory: ATSReport[];
     isScoring: boolean;
     atsError: string | null; setAtsError: (v: string | null) => void;
     handleGetATSScore: () => Promise<void>;
@@ -235,6 +236,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     // ── ATS state ─────────────────────────────────────────────────────────────
     const [atsReport, setAtsReport] = useState<ATSReport | null>(null);
+    const [atsReportHistory, setAtsReportHistory] = useState<ATSReport[]>([]);
     const [isScoring, setIsScoring] = useState(false);
     const [atsError, setAtsError] = useState<string | null>(null);
 
@@ -393,6 +395,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             if (d.gapSummary)     setGapSummary(d.gapSummary);
             if (d.jobDescription) setJobDescription(d.jobDescription);
             if (d.atsReport)      setAtsReport(d.atsReport);
+            if (d.atsReportHistory) setAtsReportHistory(d.atsReportHistory);
             if (d.pdfFileName)    setPdfFileName(d.pdfFileName);
             if (d.viewMode)       setViewMode(d.viewMode as "cards" | "graph");
             if (d.heatmap)        setHeatmap(d.heatmap);
@@ -411,7 +414,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
                 repoUrl, repoId, githubUsername, extractedRepos,
                 selectedRepos: Array.from(selectedRepos),
                 multiRepoIds, analysisResult, bridgeProjects, gapSummary,
-                jobDescription, atsReport,
+                jobDescription, atsReport, atsReportHistory,
                 pdfFileName: pdfFile?.name ?? pdfFileName,
                 viewMode, heatmap, roadmap, chatMessages,
                 projectResults, projectSummary,
@@ -420,7 +423,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [repoUrl, repoId, githubUsername, extractedRepos, selectedRepos,
         multiRepoIds, analysisResult, bridgeProjects, gapSummary,
-        jobDescription, atsReport, pdfFile, pdfFileName, viewMode,
+        jobDescription, atsReport, atsReportHistory, pdfFile, pdfFileName, viewMode,
         heatmap, roadmap, chatMessages, projectResults, projectSummary]);
 
     // ─── Reset all ────────────────────────────────────────────────────────────
@@ -430,7 +433,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         setExtractedRepos([]); setSelectedRepos(new Set()); setMultiRepoIds([]);
         setAnalysisResult(null); setGraphNodes([]); setGraphLinks([]);
         setBridgeProjects([]); setGapSummary(null); setJobDescription("");
-        setAtsReport(null); setPdfFile(null); setPdfFileName(null);
+        setAtsReport(null); setAtsReportHistory([]); setPdfFile(null); setPdfFileName(null);
         setTimelineData({}); setViewMode("cards"); setGraphRepoId(null);
         setError(null); setExtractionError(null); setCoachError(null);
         setAtsError(null); setAgentMessages([]); setAgentStatus(null);
@@ -457,12 +460,26 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     // ─── Chat action handler ──────────────────────────────────────────────────
     const handleGetATSScore = useCallback(async () => {
-        if (!pdfFile) { setAtsError("Please upload your resume PDF first."); return; }
+        if (!pdfFile && !extractedText) { setAtsError("Please upload your resume PDF first."); return; }
         if (!jobDescription.trim()) { setAtsError("Please paste a job description first."); return; }
+        if (jobDescription.trim().split(/\s+/).length < 20) {
+            setAtsError("Job description is too short. Please paste at least 20 words.");
+            return;
+        }
+        // Save previous report to history before clearing
+        setAtsReportHistory(prev => {
+            if (!atsReport) return prev;
+            return [atsReport, ...prev].slice(0, 3);
+        });
         setIsScoring(true); setAtsError(null); setAtsReport(null);
         try {
             const formData = new FormData();
-            formData.append("pdf_file", pdfFile);
+            // Prefer pre-extracted text to avoid re-uploading the full PDF
+            if (extractedText) {
+                formData.append("resume_text_override", extractedText);
+            } else if (pdfFile) {
+                formData.append("pdf_file", pdfFile);
+            }
             formData.append("job_description", jobDescription);
             const res = await fetch(`${API_BASE_URL}/api/ats-score`, { method: "POST", body: formData });
             if (!res.ok) {
@@ -474,7 +491,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         } catch (e) {
             setAtsError(e instanceof Error ? e.message : "ATS scoring failed");
         } finally { setIsScoring(false); }
-    }, [pdfFile, jobDescription]);
+    }, [pdfFile, extractedText, jobDescription, atsReport]);
 
     const handleChatAction = useCallback((actions: ChatAction[]) => {
         for (const action of actions) {
@@ -1085,7 +1102,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         showApplicationKit, setShowApplicationKit,
         handleGenerateActionPlan, handleGenerateHeatmap, handleGenerateRoadmap,
         handleCoachChat, handleExportCoachReport, handleChatAction,
-        atsReport, isScoring, atsError, setAtsError, handleGetATSScore,
+        atsReport, atsReportHistory, isScoring, atsError, setAtsError, handleGetATSScore,
         assistantOpen, setAssistantOpen,
     };
 

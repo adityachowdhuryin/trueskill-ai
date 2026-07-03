@@ -1,61 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
     Download, ChevronDown, ChevronUp, CheckCircle2,
     XCircle, AlertTriangle, Zap, TrendingUp, Target,
-    Rocket, Pencil, ChevronRight
+    Rocket, Pencil, ChevronRight, Copy, Check, RefreshCw,
+    Award, BarChart3,
 } from "lucide-react";
+import type {
+    ATSReport,
+    ATSKeywordMatch,
+    ATSSectionFeedback,
+    ATSPriorityAction,
+    ATSRewriteSuggestion,
+} from "@/types/dashboard";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-export interface KeywordMatch {
-    keyword: string;
-    found: boolean;
-    context: string;
-}
-
-export interface SectionFeedback {
-    section: string;
-    score: number;
-    feedback: string;
-    suggestions: string[];
-}
-
-export interface PriorityAction {
-    rank: number;
-    action: string;
-    impact: string;
-    estimated_gain: number;
-    section: string;
-}
-
-export interface RewriteSuggestion {
-    section: string;
-    original_snippet: string;
-    rewritten_snippet: string;
-    rationale: string;
-}
-
-export interface ATSReport {
-    ats_score: number;
-    keyword_match_score: number;
-    format_score: number;
-    content_score: number;
-    keyword_matches: KeywordMatch[];
-    section_feedback: SectionFeedback[];
-    top_missing_keywords: string[];
-    formatting_flags: string[];
-    overall_recommendation: string;
-    strengths: string[];
-    improvements: string[];
-    priority_actions?: PriorityAction[];
-    rewrite_suggestions?: RewriteSuggestion[];
-}
+// Re-export for any consumers that import types from here
+export type { ATSReport, ATSKeywordMatch as KeywordMatch, ATSSectionFeedback as SectionFeedback, ATSPriorityAction as PriorityAction, ATSRewriteSuggestion as RewriteSuggestion };
 
 interface ATSScorePanelProps {
     report: ATSReport;
+    previousReport?: ATSReport | null;
     candidateName?: string;
-    apiBaseUrl?: string;
+    apiBaseUrl: string;
+    onReAnalyze?: () => void;
+    onApplyToResume?: () => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -89,12 +58,44 @@ function impactBg(impact: string): string {
     return "rgba(34,197,94,0.12)";
 }
 
+function matchLevelColor(level: string): string {
+    if (level === "Excellent Match") return "#22c55e";
+    if (level === "Good Match") return "#60a5fa";
+    if (level === "Partial Match") return "#f59e0b";
+    return "#ef4444";
+}
+
+// ─── Delta Badge ──────────────────────────────────────────────────────────────
+function DeltaBadge({ delta }: { delta: number }) {
+    if (delta === 0) return null;
+    const isPos = delta > 0;
+    return (
+        <span
+            className="text-[10px] font-bold px-1.5 py-0.5 rounded-full ml-1"
+            style={{
+                background: isPos ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+                color: isPos ? "#86efac" : "#fca5a5",
+                border: `1px solid ${isPos ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
+            }}
+        >
+            {isPos ? "+" : ""}{delta}
+        </span>
+    );
+}
+
 // ─── Circular Gauge ────────────────────────────────────────────────────────────
 function CircularGauge({ score }: { score: number }) {
+    const [displayed, setDisplayed] = useState(0);
     const radius = 54;
     const circumference = 2 * Math.PI * radius;
-    const offset = circumference - (score / 100) * circumference;
-    const color = scoreColor(score);
+    const offset = circumference - (displayed / 100) * circumference;
+    const color = scoreColor(displayed);
+
+    // Animate from 0 → score on mount
+    useEffect(() => {
+        const timer = setTimeout(() => setDisplayed(score), 120);
+        return () => clearTimeout(timer);
+    }, [score]);
 
     return (
         <div className="relative flex items-center justify-center" style={{ width: 140, height: 140 }}>
@@ -108,11 +109,11 @@ function CircularGauge({ score }: { score: number }) {
                     strokeLinecap="round"
                     strokeDasharray={circumference}
                     strokeDashoffset={offset}
-                    style={{ transition: "stroke-dashoffset 1s ease-out, stroke 0.3s" }}
+                    style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1), stroke 0.3s" }}
                 />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-3xl font-black" style={{ color }}>{score}</span>
+                <span className="text-3xl font-black" style={{ color }}>{displayed}</span>
                 <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "rgba(255,255,255,0.5)" }}>ATS Score</span>
             </div>
         </div>
@@ -120,13 +121,16 @@ function CircularGauge({ score }: { score: number }) {
 }
 
 // ─── Progress Bar ─────────────────────────────────────────────────────────────
-function ScoreBar({ label, score }: { label: string; score: number }) {
+function ScoreBar({ label, score, delta }: { label: string; score: number; delta?: number }) {
     const color = scoreColor(score);
     return (
         <div className="space-y-1">
             <div className="flex justify-between items-center">
                 <span className="text-xs font-medium text-slate-400">{label}</span>
-                <span className="text-sm font-bold" style={{ color }}>{score}%</span>
+                <div className="flex items-center">
+                    <span className="text-sm font-bold" style={{ color }}>{score}%</span>
+                    {delta !== undefined && <DeltaBadge delta={delta} />}
+                </div>
             </div>
             <div className="h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
                 <div
@@ -138,8 +142,73 @@ function ScoreBar({ label, score }: { label: string; score: number }) {
     );
 }
 
+// ─── Benchmark Bar ────────────────────────────────────────────────────────────
+function BenchmarkBar({ score }: { score: number }) {
+    const passThreshold = 65;
+    const passes = score >= passThreshold;
+    return (
+        <div
+            className="px-4 py-2.5 rounded-xl flex items-center gap-3"
+            style={{
+                background: passes ? "rgba(34,197,94,0.07)" : "rgba(239,68,68,0.07)",
+                border: `1px solid ${passes ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`,
+            }}
+        >
+            <div
+                className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ background: passes ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)" }}
+            >
+                {passes
+                    ? <CheckCircle2 size={13} className="text-green-400" />
+                    : <XCircle size={13} className="text-red-400" />
+                }
+            </div>
+            <div className="flex-1 min-w-0">
+                <p className="text-[11px] font-semibold" style={{ color: passes ? "#86efac" : "#fca5a5" }}>
+                    {passes ? "Likely to pass ATS filters" : "At risk of ATS rejection"}
+                </p>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                    Most ATS systems filter below <strong className="text-slate-400">{passThreshold}</strong>. Your score: <strong style={{ color: scoreColor(score) }}>{score}</strong>
+                </p>
+            </div>
+            {/* Marker track */}
+            <div className="relative w-20 h-1.5 rounded-full flex-shrink-0" style={{ background: "rgba(255,255,255,0.08)" }}>
+                <div className="h-full rounded-full" style={{ width: `${score}%`, background: scoreColor(score) }} />
+                <div
+                    className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full"
+                    style={{ left: `${passThreshold}%`, background: "rgba(255,255,255,0.3)" }}
+                />
+            </div>
+        </div>
+    );
+}
+
+// ─── Match Level Badge ────────────────────────────────────────────────────────
+function MatchLevelBadge({ level, jobTitle, company }: { level: string; jobTitle?: string; company?: string }) {
+    if (!level && !jobTitle) return null;
+    const color = matchLevelColor(level);
+    return (
+        <div className="flex flex-wrap items-center gap-2">
+            {(jobTitle || company) && (
+                <span className="text-xs text-slate-400 truncate max-w-xs">
+                    {[jobTitle, company].filter(Boolean).join(" @ ")}
+                </span>
+            )}
+            {level && (
+                <span
+                    className="text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest flex items-center gap-1"
+                    style={{ background: `${color}20`, color, border: `1px solid ${color}40` }}
+                >
+                    <Award size={9} />
+                    {level}
+                </span>
+            )}
+        </div>
+    );
+}
+
 // ─── Priority Action Card ─────────────────────────────────────────────────────
-function PriorityActionCard({ action }: { action: PriorityAction }) {
+function PriorityActionCard({ action }: { action: ATSPriorityAction }) {
     const ic = impactColor(action.impact);
     const ib = impactBg(action.impact);
     return (
@@ -176,8 +245,46 @@ function PriorityActionCard({ action }: { action: PriorityAction }) {
     );
 }
 
+// ─── Copy Button ──────────────────────────────────────────────────────────────
+function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch {
+            // Fallback for older browsers
+            const el = document.createElement("textarea");
+            el.value = text;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand("copy");
+            document.body.removeChild(el);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        }
+    }, [text]);
+
+    return (
+        <button
+            onClick={handleCopy}
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-all duration-200"
+            style={{
+                background: copied ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.06)",
+                border: `1px solid ${copied ? "rgba(34,197,94,0.3)" : "rgba(255,255,255,0.1)"}`,
+                color: copied ? "#86efac" : "#94a3b8",
+            }}
+        >
+            {copied ? <Check size={10} /> : <Copy size={10} />}
+            {copied ? "Copied!" : label}
+        </button>
+    );
+}
+
 // ─── Rewrite Suggestion Card ──────────────────────────────────────────────────
-function RewriteCard({ rs }: { rs: RewriteSuggestion }) {
+function RewriteCard({ rs }: { rs: ATSRewriteSuggestion }) {
     const [open, setOpen] = useState(false);
     return (
         <div
@@ -207,7 +314,10 @@ function RewriteCard({ rs }: { rs: RewriteSuggestion }) {
                             </div>
                         </div>
                         <div>
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-green-400 mb-1.5">After</p>
+                            <div className="flex items-center justify-between mb-1.5">
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-green-400">After</p>
+                                <CopyButton text={rs.rewritten_snippet} label="Copy" />
+                            </div>
                             <div
                                 className="rounded-lg p-3 text-[11px] text-green-200 leading-relaxed"
                                 style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)" }}
@@ -226,8 +336,47 @@ function RewriteCard({ rs }: { rs: RewriteSuggestion }) {
     );
 }
 
+// ─── Keyword Detail Row ────────────────────────────────────────────────────────
+function KeywordChip({ km }: { km: ATSKeywordMatch }) {
+    const [expanded, setExpanded] = useState(false);
+    const hasContext = !!km.context;
+
+    return (
+        <div className="inline-block">
+            <button
+                onClick={() => hasContext && setExpanded(v => !v)}
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-transform hover:scale-105 ${hasContext ? "cursor-pointer" : "cursor-default"}`}
+                style={{
+                    background: km.found ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+                    border: `1px solid ${km.found ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
+                    color: km.found ? "#86efac" : "#fca5a5",
+                }}
+            >
+                {km.found ? <CheckCircle2 size={10} /> : <XCircle size={10} />}
+                {km.keyword}
+                {hasContext && (
+                    <ChevronDown
+                        size={9}
+                        className="ml-0.5 transition-transform duration-200"
+                        style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+                    />
+                )}
+            </button>
+            {expanded && hasContext && (
+                <div
+                    className="mt-1 px-3 py-2 rounded-lg text-[10px] text-slate-400 leading-relaxed max-w-xs"
+                    style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}
+                >
+                    <span className="text-slate-500 font-semibold">Found: </span>
+                    {km.context}
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ─── Section Accordion ────────────────────────────────────────────────────────
-function SectionCard({ sf }: { sf: SectionFeedback }) {
+function SectionCard({ sf, delta }: { sf: ATSSectionFeedback; delta?: number }) {
     const [open, setOpen] = useState(false);
     const color = scoreColor(sf.score);
 
@@ -251,6 +400,7 @@ function SectionCard({ sf }: { sf: SectionFeedback }) {
                         {sf.score}
                     </span>
                     <span className="text-sm font-semibold text-slate-200">{sf.section}</span>
+                    {delta !== undefined && <DeltaBadge delta={delta} />}
                 </div>
                 <div className="flex items-center gap-3">
                     <div className="w-20 h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
@@ -284,35 +434,63 @@ function SectionCard({ sf }: { sf: SectionFeedback }) {
 // ─── Main Panel ───────────────────────────────────────────────────────────────
 type KeywordTab = "all" | "found" | "missing";
 
-export default function ATSScorePanel({ report, candidateName = "Candidate", apiBaseUrl = "http://localhost:8000" }: ATSScorePanelProps) {
+export default function ATSScorePanel({
+    report,
+    previousReport,
+    candidateName = "Candidate",
+    apiBaseUrl,
+    onReAnalyze,
+    onApplyToResume,
+}: ATSScorePanelProps) {
     const [kwTab, setKwTab] = useState<KeywordTab>("all");
     const [isDownloading, setIsDownloading] = useState(false);
+    const [downloadError, setDownloadError] = useState<string | null>(null);
     const [showRewrites, setShowRewrites] = useState(false);
+    const [showAllKeywords, setShowAllKeywords] = useState(false);
 
-    const found = report.keyword_matches.filter(k => k.found);
+    const found   = report.keyword_matches.filter(k => k.found);
     const missing = report.keyword_matches.filter(k => !k.found);
     const displayed = kwTab === "found" ? found : kwTab === "missing" ? missing : report.keyword_matches;
+    const visibleKeywords = showAllKeywords ? displayed : displayed.slice(0, 24);
 
-    const priorityActions = report.priority_actions ?? [];
+    const priorityActions    = report.priority_actions ?? [];
     const rewriteSuggestions = report.rewrite_suggestions ?? [];
+
+    // Score deltas vs previous run
+    const scoreDelta = previousReport ? report.ats_score - previousReport.ats_score : undefined;
+    const kwDelta    = previousReport ? report.keyword_match_score - previousReport.keyword_match_score : undefined;
+    const cntDelta   = previousReport ? report.content_score - previousReport.content_score : undefined;
+    const fmtDelta   = previousReport ? report.format_score - previousReport.format_score : undefined;
+    const expDelta   = previousReport ? report.experience_match_score - previousReport.experience_match_score : undefined;
+
+    // Section deltas
+    const prevSections: Record<string, number> = {};
+    if (previousReport) {
+        previousReport.section_feedback.forEach(sf => { prevSections[sf.section] = sf.score; });
+    }
 
     const handleDownload = async () => {
         setIsDownloading(true);
+        setDownloadError(null);
         try {
             const res = await fetch(`${apiBaseUrl}/api/ats-report`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ats_report: report, candidate_name: candidateName }),
             });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: "Download failed" }));
+                throw new Error(err.detail ?? "Download failed");
+            }
             const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement("a");
+            a.href     = url;
             a.download = "ats_report.html";
             a.click();
             URL.revokeObjectURL(url);
-        } catch {
-            console.error("Download failed");
+        } catch (e) {
+            setDownloadError(e instanceof Error ? e.message : "Download failed");
         } finally {
             setIsDownloading(false);
         }
@@ -329,7 +507,7 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
         >
             {/* ── Header ── */}
             <div
-                className="px-6 py-4 flex items-center justify-between"
+                className="px-6 py-4 flex items-center justify-between flex-wrap gap-3"
                 style={{
                     background: "linear-gradient(90deg, rgba(79,70,229,0.2) 0%, rgba(124,58,237,0.12) 100%)",
                     borderBottom: "1px solid rgba(255,255,255,0.07)",
@@ -341,23 +519,52 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                     </div>
                     <div>
                         <h3 className="font-bold text-slate-100 text-sm">ATS Evaluation Report</h3>
-                        <p className="text-[11px] text-slate-500 mt-0.5">Resume vs. Job Description Analysis</p>
+                        <MatchLevelBadge
+                            level={report.match_level ?? ""}
+                            jobTitle={report.job_title}
+                            company={report.company_name}
+                        />
                     </div>
                 </div>
-                <button
-                    onClick={handleDownload}
-                    disabled={isDownloading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
-                    style={{
-                        background: isDownloading ? "rgba(99,102,241,0.1)" : "rgba(99,102,241,0.25)",
-                        border: "1px solid rgba(99,102,241,0.4)",
-                        color: "#a5b4fc",
-                    }}
-                >
-                    <Download size={12} />
-                    {isDownloading ? "Downloading..." : "Download Report"}
-                </button>
+                <div className="flex items-center gap-2">
+                    {onReAnalyze && (
+                        <button
+                            onClick={onReAnalyze}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                            style={{
+                                background: "rgba(255,255,255,0.05)",
+                                border: "1px solid rgba(255,255,255,0.1)",
+                                color: "#94a3b8",
+                            }}
+                            title="Re-run ATS analysis"
+                        >
+                            <RefreshCw size={11} />
+                            Re-analyze
+                        </button>
+                    )}
+                    <button
+                        onClick={handleDownload}
+                        disabled={isDownloading}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                            background: isDownloading ? "rgba(99,102,241,0.1)" : "rgba(99,102,241,0.25)",
+                            border: "1px solid rgba(99,102,241,0.4)",
+                            color: "#a5b4fc",
+                        }}
+                    >
+                        <Download size={12} />
+                        {isDownloading ? "Downloading..." : "Download Report"}
+                    </button>
+                </div>
             </div>
+
+            {downloadError && (
+                <div className="mx-6 mt-3 px-3 py-2 rounded-lg text-xs text-red-300 flex items-center gap-2"
+                    style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                    <XCircle size={12} className="flex-shrink-0" />
+                    {downloadError}
+                </div>
+            )}
 
             <div className="p-6 space-y-6">
                 {/* ── Score Dashboard ── */}
@@ -365,19 +572,23 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                     {/* Circular gauge */}
                     <div className="flex flex-col items-center gap-2">
                         <CircularGauge score={report.ats_score} />
-                        <span
-                            className="text-xs font-bold uppercase tracking-widest px-2.5 py-0.5 rounded-full"
-                            style={{ color: scoreColor(report.ats_score), background: scoreBg(report.ats_score) }}
-                        >
-                            {scoreLabel(report.ats_score)}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                            <span
+                                className="text-xs font-bold uppercase tracking-widest px-2.5 py-0.5 rounded-full"
+                                style={{ color: scoreColor(report.ats_score), background: scoreBg(report.ats_score) }}
+                            >
+                                {scoreLabel(report.ats_score)}
+                            </span>
+                            {scoreDelta !== undefined && <DeltaBadge delta={scoreDelta} />}
+                        </div>
                     </div>
 
                     {/* Sub-score bars */}
                     <div className="flex-1 min-w-48 space-y-4">
-                        <ScoreBar label="Keyword Match" score={report.keyword_match_score} />
-                        <ScoreBar label="Content Quality" score={report.content_score} />
-                        <ScoreBar label="Formatting" score={report.format_score} />
+                        <ScoreBar label="Keyword Match"    score={report.keyword_match_score}      delta={kwDelta} />
+                        <ScoreBar label="Content Quality"  score={report.content_score}             delta={cntDelta} />
+                        <ScoreBar label="Formatting"       score={report.format_score}              delta={fmtDelta} />
+                        <ScoreBar label="Experience Match" score={report.experience_match_score ?? 0} delta={expDelta} />
                     </div>
 
                     {/* Quick stats */}
@@ -392,6 +603,9 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                         </div>
                     </div>
                 </div>
+
+                {/* ── Benchmark Bar ── */}
+                <BenchmarkBar score={report.ats_score} />
 
                 {/* ── Overall recommendation ── */}
                 {report.overall_recommendation && (
@@ -443,6 +657,20 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                                 {rewriteSuggestions.map((rs, i) => (
                                     <RewriteCard key={i} rs={rs} />
                                 ))}
+                                {onApplyToResume && (
+                                    <button
+                                        onClick={onApplyToResume}
+                                        className="w-full mt-2 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all hover:scale-[1.01]"
+                                        style={{
+                                            background: "linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(139,92,246,0.15) 100%)",
+                                            border: "1px solid rgba(99,102,241,0.4)",
+                                            color: "#a5b4fc",
+                                        }}
+                                    >
+                                        <Pencil size={12} />
+                                        Improve Resume with These Suggestions →
+                                    </button>
+                                )}
                             </div>
                         )}
                     </div>
@@ -463,7 +691,7 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                             {(["all", "found", "missing"] as KeywordTab[]).map(tab => (
                                 <button
                                     key={tab}
-                                    onClick={() => setKwTab(tab)}
+                                    onClick={() => { setKwTab(tab); setShowAllKeywords(false); }}
                                     className="px-2.5 py-1.5 capitalize transition-all"
                                     style={{
                                         background: kwTab === tab ? "rgba(99,102,241,0.35)" : "transparent",
@@ -491,27 +719,24 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                         </div>
                     )}
 
-                    {/* Keyword chips grid */}
-                    <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-                        {displayed.map((km, i) => (
-                            <div
-                                key={i}
-                                title={km.context || undefined}
-                                className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-default transition-transform hover:scale-105"
-                                style={{
-                                    background: km.found ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-                                    border: `1px solid ${km.found ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
-                                    color: km.found ? "#86efac" : "#fca5a5",
-                                }}
-                            >
-                                {km.found
-                                    ? <CheckCircle2 size={10} />
-                                    : <XCircle size={10} />
-                                }
-                                {km.keyword}
-                            </div>
+                    {/* Keyword chips — expandable, with click-to-expand context */}
+                    <div className="flex flex-wrap gap-1.5">
+                        {visibleKeywords.map((km) => (
+                            <KeywordChip key={km.keyword} km={km} />
                         ))}
                     </div>
+
+                    {displayed.length > 24 && (
+                        <button
+                            onClick={() => setShowAllKeywords(v => !v)}
+                            className="mt-2 text-[11px] font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
+                        >
+                            {showAllKeywords
+                                ? <><ChevronUp size={11} /> Show less</>
+                                : <><ChevronDown size={11} /> Show all {displayed.length} keywords</>
+                            }
+                        </button>
+                    )}
                 </div>
 
                 {/* ── Section Feedback ── */}
@@ -522,7 +747,11 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                     </h4>
                     <div className="space-y-2">
                         {report.section_feedback.map((sf, i) => (
-                            <SectionCard key={i} sf={sf} />
+                            <SectionCard
+                                key={i}
+                                sf={sf}
+                                delta={previousReport ? (sf.score - (prevSections[sf.section] ?? sf.score)) : undefined}
+                            />
                         ))}
                     </div>
                 </div>
@@ -551,7 +780,6 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
 
                 {/* ── Strengths & Improvements ── */}
                 <div className="grid grid-cols-2 gap-4">
-                    {/* Strengths */}
                     <div
                         className="rounded-xl p-4"
                         style={{ background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)" }}
@@ -569,7 +797,6 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                         </ul>
                     </div>
 
-                    {/* Improvements */}
                     <div
                         className="rounded-xl p-4"
                         style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)" }}
@@ -587,6 +814,40 @@ export default function ATSScorePanel({ report, candidateName = "Candidate", api
                         </ul>
                     </div>
                 </div>
+
+                {/* ── Score Comparison (if previous report exists) ── */}
+                {previousReport && (
+                    <div
+                        className="rounded-xl p-4 space-y-3"
+                        style={{ background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)" }}
+                    >
+                        <h4 className="text-xs font-bold uppercase tracking-widest text-indigo-400 flex items-center gap-1.5">
+                            <BarChart3 size={12} />
+                            vs. Previous Run
+                        </h4>
+                        <div className="flex items-center gap-4 flex-wrap text-sm">
+                            <div className="text-center">
+                                <div className="text-lg font-black" style={{ color: scoreColor(previousReport.ats_score) }}>{previousReport.ats_score}</div>
+                                <div className="text-[10px] text-slate-500">Before</div>
+                            </div>
+                            <ChevronRight size={16} className="text-slate-600" />
+                            <div className="text-center">
+                                <div className="text-lg font-black" style={{ color: scoreColor(report.ats_score) }}>{report.ats_score}</div>
+                                <div className="text-[10px] text-slate-500">Now</div>
+                            </div>
+                            <div
+                                className="px-3 py-1 rounded-full text-xs font-bold"
+                                style={{
+                                    background: scoreDelta! >= 0 ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+                                    color: scoreDelta! >= 0 ? "#86efac" : "#fca5a5",
+                                    border: `1px solid ${scoreDelta! >= 0 ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
+                                }}
+                            >
+                                {scoreDelta! >= 0 ? "+" : ""}{scoreDelta} pts
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );

@@ -2,19 +2,22 @@
 ATS Score Module — Applicant Tracking System Evaluation
 ========================================================
 Evaluates a resume against a job description and produces:
-  - Overall ATS compatibility score (0-100)
-  - Keyword match analysis
+  - Overall ATS compatibility score (0-100)  [computed server-side from sub-scores]
+  - Keyword match analysis with context
   - Section-by-section feedback (Summary, Experience, Skills, Education)
   - Formatting / readability flags
-  - Priority actions ranked by expected score gain
-  - Section rewrite suggestions
-  - Downloadable HTML report generator
+  - Priority actions ranked by expected score gain (top 5)
+  - Section rewrite suggestions (3-4)
+  - Experience years match score
+  - Job title & company extraction
+  - Downloadable HTML report generator (with HTML escaping)
 
 Uses the shared Groq/Llama LLM from llm.py — no new dependencies.
 """
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -56,10 +59,14 @@ class RewriteSuggestion(BaseModel):
 
 
 class ATSReport(BaseModel):
-    ats_score: int = Field(ge=0, le=100, description="Overall ATS compatibility score")
+    ats_score: int = Field(ge=0, le=100, description="Overall ATS compatibility score (server-computed)")
     keyword_match_score: int = Field(ge=0, le=100, description="% of JD keywords found in resume")
     format_score: int = Field(ge=0, le=100, description="Formatting and readability score")
     content_score: int = Field(ge=0, le=100, description="Content quality and completeness")
+    experience_match_score: int = Field(ge=0, le=100, description="Years of experience match vs JD requirements")
+    job_title: str = Field(default="", description="Target job title extracted from JD")
+    company_name: str = Field(default="", description="Target company extracted from JD")
+    match_level: str = Field(default="", description="Plain-English verdict: Excellent/Good/Partial/Poor Match")
     keyword_matches: list[KeywordMatch] = Field(default_factory=list)
     section_feedback: list[SectionFeedback] = Field(default_factory=list)
     top_missing_keywords: list[str] = Field(default_factory=list)
@@ -72,7 +79,22 @@ class ATSReport(BaseModel):
 
 
 # =============================================================================
-# Core Scoring Function
+# Helpers
+# =============================================================================
+
+def _compute_match_level(score: int) -> str:
+    """Compute a plain-English match verdict from the ATS score."""
+    if score >= 85:
+        return "Excellent Match"
+    if score >= 70:
+        return "Good Match"
+    if score >= 55:
+        return "Partial Match"
+    return "Poor Match"
+
+
+# =============================================================================
+# Core Scoring Prompt
 # =============================================================================
 
 SYSTEM_PROMPT = """You are an expert ATS (Applicant Tracking System) analyst and resume coach.
@@ -82,20 +104,26 @@ You must analyze:
 1. **Keyword Match** — Extract every required skill, tool, technology, and qualification from the job description. For EACH one, check whether it appears in the resume (exact match OR clear synonym). Record context snippets where found.
 2. **Section Quality** — Evaluate the quality of: Summary/Objective, Work Experience, Skills, and Education sections.
 3. **Formatting & Readability** — Flag issues like: no quantified achievements, passive language, missing action verbs, overly long paragraphs, no dates, etc.
-4. **Priority Actions** — Identify the top 3 most impactful changes the candidate should make, ranked by estimated ATS score gain. Be very specific.
-5. **Rewrite Suggestions** — For the 2-3 weakest sections, provide a short original snippet and a rewritten version that would score higher.
-6. **Scoring:**
+4. **Experience Match** — Assess how well the candidate's years of experience matches what the JD requires (0-100).
+5. **Priority Actions** — Identify the top 5 most impactful changes the candidate should make, ranked by estimated ATS score gain. Be very specific.
+6. **Rewrite Suggestions** — For the 3-4 weakest sections, provide a short original snippet and a rewritten version that would score higher.
+7. **Metadata Extraction** — Extract the target `job_title` and `company_name` from the job description.
+8. **Scoring:**
    - `keyword_match_score`: (keywords found / total keywords) * 100, rounded to integer
    - `format_score`: 0-100 based on formatting quality
    - `content_score`: 0-100 based on content quality, relevance, and depth
-   - `ats_score`: weighted average = (keyword_match_score * 0.45) + (content_score * 0.35) + (format_score * 0.20), rounded to integer
+   - `experience_match_score`: 0-100 based on years of experience match
+   - NOTE: Do NOT compute ats_score — set it to 0, it will be computed server-side.
 
 Return ONLY valid JSON in this exact structure — no markdown, no explanation outside the JSON:
 {
-  "ats_score": <0-100>,
+  "ats_score": 0,
   "keyword_match_score": <0-100>,
   "format_score": <0-100>,
   "content_score": <0-100>,
+  "experience_match_score": <0-100>,
+  "job_title": "<extracted job title from JD, e.g. 'Senior Software Engineer'>",
+  "company_name": "<extracted company name from JD, or '' if not found>",
   "keyword_matches": [
     {"keyword": "Python", "found": true, "context": "Built data pipelines using Python and Pandas"},
     {"keyword": "Kubernetes", "found": false, "context": ""},
@@ -156,6 +184,20 @@ Return ONLY valid JSON in this exact structure — no markdown, no explanation o
       "impact": "Medium",
       "estimated_gain": 5,
       "section": "Summary"
+    },
+    {
+      "rank": 4,
+      "action": "Specific fourth action",
+      "impact": "Medium",
+      "estimated_gain": 4,
+      "section": "Skills"
+    },
+    {
+      "rank": 5,
+      "action": "Specific fifth action",
+      "impact": "Low",
+      "estimated_gain": 3,
+      "section": "Education"
     }
   ],
   "rewrite_suggestions": [
@@ -170,10 +212,20 @@ Return ONLY valid JSON in this exact structure — no markdown, no explanation o
       "original_snippet": "Python, databases, cloud",
       "rewritten_snippet": "Python (FastAPI, Pandas, NumPy) | Databases (PostgreSQL, Redis, MongoDB) | Cloud (AWS EC2, S3, Lambda)",
       "rationale": "Specific technology names match JD keywords; structured format is easier for ATS to parse"
+    },
+    {
+      "section": "Summary",
+      "original_snippet": "Experienced software developer looking for opportunities",
+      "rewritten_snippet": "Results-driven Software Engineer with 4+ years building scalable distributed systems in Python and Go, specialising in cloud-native microservices and ML pipelines",
+      "rationale": "Tailors the summary directly to the role; keyword-rich and metric-focused"
     }
   ]
 }"""
 
+
+# =============================================================================
+# Core Scoring Function
+# =============================================================================
 
 async def score_resume_ats(resume_text: str, job_description: str) -> ATSReport:
     """
@@ -185,17 +237,19 @@ async def score_resume_ats(resume_text: str, job_description: str) -> ATSReport:
 
     Returns:
         ATSReport with all scoring details.
+        ats_score is computed server-side (not trusted from LLM).
     """
     llm = get_llm_model(temperature=0.1)
 
+    # Increase character limits for better coverage of longer resumes
     human_prompt = f"""RESUME:
 ---
-{resume_text[:10000]}
+{resume_text[:20000]}
 ---
 
 JOB DESCRIPTION:
 ---
-{job_description[:5000]}
+{job_description[:8000]}
 ---
 
 Perform a full ATS analysis and return the JSON report."""
@@ -207,7 +261,23 @@ Perform a full ATS analysis and return the JSON report."""
 
     raw = parse_json_response(response.content)
 
-    # Build keyword_matches list
+    # ── Sub-scores from LLM ──────────────────────────────────────────────────
+    kw_score  = max(0, min(100, int(raw.get("keyword_match_score", 0))))
+    fmt_score = max(0, min(100, int(raw.get("format_score", 0))))
+    cnt_score = max(0, min(100, int(raw.get("content_score", 0))))
+    exp_score = max(0, min(100, int(raw.get("experience_match_score", 70))))
+
+    # ── Server-side ATS score computation (deterministic, no LLM math) ───────
+    # Weights: keyword 40%, content 30%, format 20%, experience 10%
+    computed_ats_score = round(
+        kw_score  * 0.40 +
+        cnt_score * 0.30 +
+        fmt_score * 0.20 +
+        exp_score * 0.10
+    )
+    computed_ats_score = max(0, min(100, computed_ats_score))
+
+    # ── Build sub-lists ──────────────────────────────────────────────────────
     keyword_matches = [
         KeywordMatch(
             keyword=km.get("keyword", ""),
@@ -217,7 +287,6 @@ Perform a full ATS analysis and return the JSON report."""
         for km in raw.get("keyword_matches", [])
     ]
 
-    # Build section_feedback list
     section_feedback = [
         SectionFeedback(
             section=sf.get("section", ""),
@@ -228,7 +297,6 @@ Perform a full ATS analysis and return the JSON report."""
         for sf in raw.get("section_feedback", [])
     ]
 
-    # Build priority_actions list
     priority_actions = [
         PriorityAction(
             rank=int(pa.get("rank", i + 1)),
@@ -240,7 +308,6 @@ Perform a full ATS analysis and return the JSON report."""
         for i, pa in enumerate(raw.get("priority_actions", []))
     ]
 
-    # Build rewrite_suggestions list
     rewrite_suggestions = [
         RewriteSuggestion(
             section=rs.get("section", ""),
@@ -251,11 +318,19 @@ Perform a full ATS analysis and return the JSON report."""
         for rs in raw.get("rewrite_suggestions", [])
     ]
 
+    job_title   = str(raw.get("job_title", "")).strip()
+    company_name = str(raw.get("company_name", "")).strip()
+    match_level = _compute_match_level(computed_ats_score)
+
     return ATSReport(
-        ats_score=max(0, min(100, int(raw.get("ats_score", 0)))),
-        keyword_match_score=max(0, min(100, int(raw.get("keyword_match_score", 0)))),
-        format_score=max(0, min(100, int(raw.get("format_score", 0)))),
-        content_score=max(0, min(100, int(raw.get("content_score", 0)))),
+        ats_score=computed_ats_score,
+        keyword_match_score=kw_score,
+        format_score=fmt_score,
+        content_score=cnt_score,
+        experience_match_score=exp_score,
+        job_title=job_title,
+        company_name=company_name,
+        match_level=match_level,
         keyword_matches=keyword_matches,
         section_feedback=section_feedback,
         top_missing_keywords=raw.get("top_missing_keywords", []),
@@ -292,37 +367,53 @@ def _impact_color(impact: str) -> str:
     return {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#22c55e"}.get(impact, "#94a3b8")
 
 
+def _e(text: Any) -> str:
+    """HTML-escape a value to prevent XSS in the downloaded report."""
+    return html.escape(str(text) if text is not None else "")
+
+
 def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Candidate") -> str:
     """
     Generate a self-contained downloadable HTML ATS report.
+    All user/LLM-derived strings are HTML-escaped to prevent XSS.
     """
-    ats_score = report.get("ats_score", 0)
-    kw_score = report.get("keyword_match_score", 0)
-    fmt_score = report.get("format_score", 0)
-    content_score = report.get("content_score", 0)
-    recommendation = report.get("overall_recommendation", "")
-    strengths = report.get("strengths", [])
-    improvements = report.get("improvements", [])
-    formatting_flags = report.get("formatting_flags", [])
-    top_missing = report.get("top_missing_keywords", [])
-    keyword_matches = report.get("keyword_matches", [])
-    section_feedback = report.get("section_feedback", [])
-    priority_actions = report.get("priority_actions", [])
+    ats_score          = report.get("ats_score", 0)
+    kw_score           = report.get("keyword_match_score", 0)
+    fmt_score          = report.get("format_score", 0)
+    content_score      = report.get("content_score", 0)
+    exp_score          = report.get("experience_match_score", 0)
+    job_title          = report.get("job_title", "")
+    company_name       = report.get("company_name", "")
+    match_level        = report.get("match_level", "")
+    recommendation     = report.get("overall_recommendation", "")
+    strengths          = report.get("strengths", [])
+    improvements       = report.get("improvements", [])
+    formatting_flags   = report.get("formatting_flags", [])
+    top_missing        = report.get("top_missing_keywords", [])
+    keyword_matches    = report.get("keyword_matches", [])
+    section_feedback   = report.get("section_feedback", [])
+    priority_actions   = report.get("priority_actions", [])
     rewrite_suggestions = report.get("rewrite_suggestions", [])
 
     ats_color = _score_color(ats_score)
     ats_label = _score_label(ats_score)
 
+    # Sub-header line
+    job_line = ""
+    if job_title or company_name:
+        parts = [p for p in [job_title, company_name] if p]
+        job_line = f"<div class='sub'>Targeting: <strong>{_e(' @ '.join(parts))}</strong> &nbsp;|&nbsp; {_e(match_level)}</div>"
+
     # Keyword rows
     kw_rows = ""
     for km in keyword_matches:
         found = km.get("found", False)
-        status_icon = "✓" if found else "✗"
+        status_icon  = "✓" if found else "✗"
         status_color = "#22c55e" if found else "#ef4444"
-        context = km.get("context", "") or "—"
+        context = _e(km.get("context", "") or "—")
         kw_rows += f"""
         <tr>
-            <td style="padding:9px 14px;font-weight:500">{km.get('keyword','')}</td>
+            <td style="padding:9px 14px;font-weight:500">{_e(km.get('keyword',''))}</td>
             <td style="padding:9px 14px;text-align:center;color:{status_color};font-weight:700;font-size:16px">{status_icon}</td>
             <td style="padding:9px 14px;color:#64748b;font-size:12px;max-width:320px">{context}</td>
         </tr>"""
@@ -333,19 +424,19 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
         sc = sf.get("score", 0)
         sc_color = _score_color(sc)
         suggestions_html = "".join(
-            f"<li style='margin-bottom:4px'>{s}</li>"
+            f"<li style='margin-bottom:4px'>{_e(s)}</li>"
             for s in sf.get("suggestions", [])
         )
         section_rows += f"""
         <div style="background:#f8fafc;border-radius:12px;padding:18px 20px;margin-bottom:12px;border:1px solid #e2e8f0">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                <span style="font-weight:700;font-size:15px">{sf.get('section','')}</span>
+                <span style="font-weight:700;font-size:15px">{_e(sf.get('section',''))}</span>
                 <span style="font-size:22px;font-weight:800;color:{sc_color}">{sc}%</span>
             </div>
             <div style="background:#e2e8f0;border-radius:6px;height:6px;margin-bottom:10px">
                 <div style="background:{sc_color};height:6px;border-radius:6px;width:{sc}%"></div>
             </div>
-            <p style="color:#475569;font-size:13px;margin-bottom:8px">{sf.get('feedback','')}</p>
+            <p style="color:#475569;font-size:13px;margin-bottom:8px">{_e(sf.get('feedback',''))}</p>
             {"<ul style='color:#64748b;font-size:12px;padding-left:18px'>" + suggestions_html + "</ul>" if suggestions_html else ""}
         </div>"""
 
@@ -356,16 +447,16 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
         pa_rows += f"""
         <div style="display:flex;align-items:flex-start;gap:14px;padding:14px;background:#f8fafc;border-radius:10px;margin-bottom:10px;border-left:4px solid {ic}">
             <div style="width:28px;height:28px;border-radius:50%;background:{ic};color:white;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex-shrink:0">
-                {pa.get('rank','')}
+                {_e(pa.get('rank',''))}
             </div>
             <div style="flex:1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                    <span style="font-size:11px;font-weight:700;text-transform:uppercase;color:{ic}">{pa.get('impact','')} Impact</span>
+                    <span style="font-size:11px;font-weight:700;text-transform:uppercase;color:{ic}">{_e(pa.get('impact',''))} Impact</span>
                     <span style="font-size:11px;color:#64748b">·</span>
-                    <span style="font-size:11px;color:#64748b">{pa.get('section','')}</span>
-                    <span style="font-size:11px;background:#e0e7ff;color:#4338ca;padding:1px 7px;border-radius:20px;font-weight:600">+{pa.get('estimated_gain',0)} pts</span>
+                    <span style="font-size:11px;color:#64748b">{_e(pa.get('section',''))}</span>
+                    <span style="font-size:11px;background:#e0e7ff;color:#4338ca;padding:1px 7px;border-radius:20px;font-weight:600">+{_e(pa.get('estimated_gain',0))} pts</span>
                 </div>
-                <p style="font-size:13px;color:#1e293b;margin:0">{pa.get('action','')}</p>
+                <p style="font-size:13px;color:#1e293b;margin:0">{_e(pa.get('action',''))}</p>
             </div>
         </div>"""
 
@@ -375,50 +466,53 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
         rw_rows += f"""
         <div style="background:#f8fafc;border-radius:10px;padding:16px;margin-bottom:12px;border:1px solid #e2e8f0">
             <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#6366f1;margin-bottom:10px">
-                {rs.get('section','')} Section
+                {_e(rs.get('section',''))} Section
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px">
                 <div>
                     <div style="font-size:11px;font-weight:600;color:#94a3b8;margin-bottom:4px">BEFORE</div>
-                    <div style="background:#fee2e2;border-radius:6px;padding:10px;font-size:12px;color:#7f1d1d;line-height:1.5">{rs.get('original_snippet','')}</div>
+                    <div style="background:#fee2e2;border-radius:6px;padding:10px;font-size:12px;color:#7f1d1d;line-height:1.5">{_e(rs.get('original_snippet',''))}</div>
                 </div>
                 <div>
                     <div style="font-size:11px;font-weight:600;color:#94a3b8;margin-bottom:4px">AFTER</div>
-                    <div style="background:#dcfce7;border-radius:6px;padding:10px;font-size:12px;color:#14532d;line-height:1.5">{rs.get('rewritten_snippet','')}</div>
+                    <div style="background:#dcfce7;border-radius:6px;padding:10px;font-size:12px;color:#14532d;line-height:1.5">{_e(rs.get('rewritten_snippet',''))}</div>
                 </div>
             </div>
-            <p style="font-size:11px;color:#64748b;margin:0;font-style:italic">💡 {rs.get('rationale','')}</p>
+            <p style="font-size:11px;color:#64748b;margin:0;font-style:italic">💡 {_e(rs.get('rationale',''))}</p>
         </div>"""
 
     # Missing keywords badges
     missing_badges = "".join(
-        f"<span style='display:inline-block;margin:3px;padding:3px 10px;background:#fee2e2;color:#b91c1c;border-radius:20px;font-size:12px;font-weight:600'>{k}</span>"
+        f"<span style='display:inline-block;margin:3px;padding:3px 10px;background:#fee2e2;color:#b91c1c;border-radius:20px;font-size:12px;font-weight:600'>{_e(k)}</span>"
         for k in top_missing
     )
 
     # Formatting flags
     flags_html = "".join(
-        f"<div style='padding:8px 12px;background:#fffbeb;border-left:3px solid #f59e0b;margin-bottom:8px;border-radius:0 6px 6px 0;font-size:13px;color:#92400e'>⚠ {f}</div>"
+        f"<div style='padding:8px 12px;background:#fffbeb;border-left:3px solid #f59e0b;margin-bottom:8px;border-radius:0 6px 6px 0;font-size:13px;color:#92400e'>⚠ {_e(f)}</div>"
         for f in formatting_flags
     )
 
-    strengths_html = "".join(f"<li style='margin-bottom:5px;color:#166534'>{s}</li>" for s in strengths)
-    improvements_html = "".join(f"<li style='margin-bottom:5px;color:#9a3412'>{s}</li>" for s in improvements)
+    strengths_html    = "".join(f"<li style='margin-bottom:5px;color:#166534'>{_e(s)}</li>" for s in strengths)
+    improvements_html = "".join(f"<li style='margin-bottom:5px;color:#9a3412'>{_e(s)}</li>" for s in improvements)
 
-    html = f"""<!DOCTYPE html>
+    # Experience match bar
+    exp_color = _score_color(exp_score)
+
+    html_doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ATS Report — {candidate_name}</title>
+<title>ATS Report — {_e(candidate_name)}</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#f1f5f9; color:#1e293b; }}
   .container {{ max-width:960px; margin:0 auto; padding:40px 24px; }}
   .header {{ background:linear-gradient(135deg,#4f46e5,#7c3aed); color:white; border-radius:16px; padding:32px; margin-bottom:28px; }}
   .header h1 {{ font-size:26px; margin-bottom:6px; }}
-  .header .sub {{ opacity:0.85; font-size:14px; }}
-  .score-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:16px; margin-bottom:28px; }}
+  .header .sub {{ opacity:0.85; font-size:14px; margin-top:4px; }}
+  .score-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr; gap:16px; margin-bottom:28px; }}
   .score-card {{ background:white; border-radius:12px; padding:20px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.08); }}
   .score-card .label {{ font-size:12px; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }}
   .score-card .value {{ font-size:32px; font-weight:800; }}
@@ -438,14 +532,15 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
 <div class="container">
   <div class="header">
     <h1>🎯 ATS Evaluation Report</h1>
-    <div class="sub">Candidate: <strong>{candidate_name}</strong> &nbsp;|&nbsp; Generated by TrueSkill AI</div>
+    <div class="sub">Candidate: <strong>{_e(candidate_name)}</strong> &nbsp;|&nbsp; Generated by TrueSkill AI</div>
+    {job_line}
   </div>
 
   <div class="score-grid">
     <div class="score-card">
       <div class="label">ATS Score</div>
       <div class="value" style="color:{ats_color}">{ats_score}%</div>
-      <div style="font-size:12px;color:{ats_color};font-weight:600;margin-top:4px">{ats_label}</div>
+      <div style="font-size:12px;color:{ats_color};font-weight:600;margin-top:4px">{_e(ats_label)}</div>
     </div>
     <div class="score-card">
       <div class="label">Keyword Match</div>
@@ -459,11 +554,15 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
       <div class="label">Formatting</div>
       <div class="value" style="color:{_score_color(fmt_score)}">{fmt_score}%</div>
     </div>
+    <div class="score-card">
+      <div class="label">Exp. Match</div>
+      <div class="value" style="color:{exp_color}">{exp_score}%</div>
+    </div>
   </div>
 
   <div class="rec-box">
     <div style="font-weight:700;margin-bottom:8px;color:#4f46e5">📋 Overall Recommendation</div>
-    <p style="color:#374151;line-height:1.6">{recommendation}</p>
+    <p style="color:#374151;line-height:1.6">{_e(recommendation)}</p>
   </div>
 
   {"<div class='card'><p class='section-title'>🚀 Priority Actions</p>" + pa_rows + "</div>" if pa_rows else ""}
@@ -502,4 +601,4 @@ def generate_ats_html_report(report: dict[str, Any], candidate_name: str = "Cand
 </body>
 </html>"""
 
-    return html
+    return html_doc

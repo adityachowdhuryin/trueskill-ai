@@ -6,7 +6,7 @@ import { useState, useEffect } from "react";
 import {
     LayoutDashboard, Microscope, FolderGit2, GraduationCap,
     FileText, GitCompare, ChevronLeft, ChevronRight,
-    CheckCircle2, Sparkles,
+    CheckCircle2, Sparkles, ScanSearch,
 } from "lucide-react";
 import { useDashboard } from "@/contexts/DashboardContext";
 
@@ -41,6 +41,13 @@ const MAIN_LINKS = [
         label: "Career Coach",
         desc: "Action plans & JD match",
         statusKey: "coach" as const,
+    },
+    {
+        href: "/dashboard/ats",
+        exact: false,
+        icon: ScanSearch,
+        label: "ATS Scorer",
+        desc: "Score resume vs JD",
     },
 ];
 

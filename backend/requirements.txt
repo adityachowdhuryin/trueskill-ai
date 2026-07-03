@@ -20,6 +20,7 @@ tree-sitter-javascript>=0.21.0
 tree-sitter-typescript>=0.21.0
 python-multipart
 PyPDF2>=3.0.0
+pdfminer.six>=20221105
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 beautifulsoup4>=4.12.0
