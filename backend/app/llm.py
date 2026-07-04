@@ -64,7 +64,7 @@ class _SmartFallbackLLM:
                 logger.error(f"Failed to initialize Groq Backup client: {e}")
 
         # 2. Add Gemini (Google AI Studio) as the first fallback option
-        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "AQ.Ab8RN6KtaTSuvkU6K1tWc-MQFHWSH54Di-Vd4qgGn_0Ji0g0Tw"
+        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if gemini_key:
             gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
             try:

@@ -122,9 +122,9 @@ const STATUS_CONFIG = {
 function ScoreBreakdownPanel({ bd }: { bd: ScoreBreakdown }) {
     const bars = [
         { label: "Evidence", value: bd.evidence_base, max: 30, color: "#6366f1", bg: "rgba(99,102,241,0.08)" },
-        { label: "Node Bonus", value: bd.node_bonus, max: 20, color: "#6366f1", bg: "rgba(99,102,241,0.06)" },
+        { label: "Node Bonus", value: bd.node_bonus, max: 10, color: "#6366f1", bg: "rgba(99,102,241,0.06)" },
         { label: "Complexity", value: bd.complexity, max: 20, color: "#f59e0b", bg: "rgba(245,158,11,0.08)" },
-        { label: "AI Quality", value: bd.llm, max: 30, color: "#7c3aed", bg: "rgba(124,58,237,0.08)" },
+        { label: "AI Quality", value: bd.llm, max: 40, color: "#7c3aed", bg: "rgba(124,58,237,0.08)" },
     ];
     const [mounted, setMounted] = useState(false);
     useEffect(() => { const t = setTimeout(() => setMounted(true), 80); return () => clearTimeout(t); }, []);

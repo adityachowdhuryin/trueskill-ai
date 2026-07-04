@@ -882,8 +882,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     // ─── Show in graph ────────────────────────────────────────────────────────
     const handleShowInGraph = useCallback((evidenceNodeIds: string[]) => {
         const nodeIds = evidenceNodeIds.flatMap(eid => {
-            const funcName = eid.includes(":") ? eid.split(":").pop()?.trim() ?? "" : eid;
-            const nid1 = funcNameToNodeId[funcName]; if (nid1) return [nid1];
+            const afterColon = eid.includes(":") ? eid.split(":").pop()?.trim() ?? "" : eid;
+            // Strip class prefix for method IDs like "ClassName.method"
+            const bareName = afterColon.includes(".") ? afterColon.split(".").pop()?.trim() ?? afterColon : afterColon;
+            const nidA = funcNameToNodeId[afterColon]; if (nidA) return [nidA];
+            const nidB = funcNameToNodeId[bareName]; if (nidB) return [nidB];
             const nid2 = funcNameToNodeId[eid]; if (nid2) return [nid2];
             const stem = eid.split("/").pop()?.split(".")[0] ?? "";
             const nid3 = stem ? funcNameToNodeId[stem] : undefined; if (nid3) return [nid3];

@@ -391,10 +391,18 @@ def query_knowledge_graph(
         complexity = record.get("complexity")
         source_preview = record.get("source_preview") or ""
 
-        # Extract node ID (using name + file_path as composite ID)
+        # Extract node ID — prefer the canonical func_id stored at ingest
+        # (correctly encodes class methods as "file:ClassName.method").
+        # Fall back to file:name for Import/Class nodes that have no func_id.
         node_name = node.get("name", node.get("module_name", "unknown"))
         file_path = node.get("file_path", node.get("path", ""))
-        node_id = f"{file_path}:{node_name}" if file_path else node_name
+        func_id = node.get("func_id")
+        if func_id:
+            node_id = func_id
+        elif file_path:
+            node_id = f"{file_path}:{node_name}"
+        else:
+            node_id = node_name
 
         node_ids.append(node_id)
         node_types.extend(labels)

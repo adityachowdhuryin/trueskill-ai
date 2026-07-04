@@ -2,15 +2,15 @@
 Project Verification Module — Phase 2
 ======================================
 5-layer matching algorithm (URL → Name → Import → Language → None).
-Short-circuits architecture LLM when tech coverage < 25%.
+Short-circuits architecture LLM when tech coverage < 15%.
 Weighted claim_support_score. Richer LLM context.
 
 Scoring model (max 100):
     tech_coverage_score  : 0-40
-    architecture_score   : 0-35  (0 if coverage < 25%)
+    architecture_score   : 0-35  (0 if coverage < 15%)
     claim_support_score  : 0-25  (weighted by evidence depth)
 
-Thresholds: Verified ≥ 65 · Partially Verified ≥ 35 · Unverified < 35
+Thresholds: Verified ≥ 60 · Partially Verified ≥ 28 · Unverified < 28
 """
 
 import re
