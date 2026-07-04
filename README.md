@@ -12,9 +12,9 @@ A multi-agent system that cross-references PDF resume claims against actual GitH
 trueskill-ai/
 ├── backend/
 │   ├── app/
-│   │   ├── api.py                   # All API routes (50+ endpoints)
+│   │   ├── api.py                   # All API routes (55+ endpoints)
 │   │   ├── agents.py                # LangGraph: Parser → Auditor → Grader
-│   │   ├── alias_map.py             # 110+ library alias mappings (PyTorch→torch, etc.)
+│   │   ├── alias_map.py             # ~84 library alias mappings (PyTorch→torch, etc.)
 │   │   ├── ingest.py                # GitHub repo clone + AST parsing (6 languages)
 │   │   ├── forensics.py             # Stylometric authorship analysis
 │   │   ├── ats.py                   # ATS resume scoring + HTML report
@@ -34,12 +34,15 @@ trueskill-ai/
 │   │   ├── report.py                # HTML verification report generator
 │   │   ├── storage.py               # SQLite: analyses + share tokens
 │   │   ├── db.py                    # Neo4j AuraDB driver + query helpers
-│   │   ├── graph_explain.py         # 8-section AI architectural summary (Groq)
+│   │   ├── graph_explain.py         # 8-section AI architectural summary
 │   │   ├── function_explain.py      # Per-function AI explanation
-│   │   └── llm.py                   # Shared Groq Llama 3.3 70B client + backup key rotation
+│   │   ├── llm.py                   # Multi-provider LLM client (Groq → Gemini → Cerebras)
+│   │   └── utils/
+│   │       └── pdf_extractor.py     # pdfminer.six + PyPDF2 PDF text extraction
 │   ├── data/                        # Local data (git-ignored)
 │   │   ├── memories.json            # Alex cross-session memory (30-day expiry)
 │   │   └── feedback.jsonl           # 👍/👎 reaction log
+│   ├── tests/                       # pytest suite
 │   ├── main.py
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -48,25 +51,36 @@ trueskill-ai/
 │   └── src/
 │       ├── app/
 │       │   ├── page.tsx             # Landing page
-│       │   ├── dashboard/           # Main dashboard
+│       │   ├── dashboard/
+│       │   │   ├── layout.tsx       # Sidebar + global Alex wrapper
+│       │   │   ├── page.tsx         # Overview hub
+│       │   │   ├── verification/    # Upload, ingest, analyze; Skills/Radar/Activity/Graph tabs
+│       │   │   ├── projects/        # Project verification grid
+│       │   │   ├── coach/           # Career coach: bridge projects, heatmap, roadmap
+│       │   │   └── ats/             # Dedicated ATS Scorer with run history
 │       │   ├── compare/             # Candidate comparison
 │       │   ├── resume-toolkit/      # 4-step AI Resume Toolkit
 │       │   └── profile/[id]/        # Public shareable profile
+│       ├── contexts/
+│       │   └── DashboardContext.tsx # Shared dashboard state + localStorage session persistence
 │       └── components/
-│           ├── TrueSkillAssistant.tsx   # Alex floating AI career co-pilot panel
-│           ├── MockInterview.tsx        # Live AI mock interview
-│           ├── TailoredResume.tsx       # Resume tailoring result
+│           ├── DashboardSidebar.tsx         # Collapsible sidebar + mobile bottom nav
+│           ├── DashboardAssistantWrapper.tsx # Global Alex mount across dashboard routes
+│           ├── TrueSkillAssistant.tsx       # Alex floating AI career co-pilot panel
+│           ├── MockInterview.tsx
+│           ├── TailoredResume.tsx
 │           ├── SalaryIntelligenceCard.tsx
-│           ├── ApplicationKit.tsx       # Cover letter + LinkedIn + cold email
-│           ├── JdUrlInput.tsx           # JD URL import
-│           ├── MatchingJobsPanel.tsx    # Job matches from JD
-│           ├── GraphVisualizer.tsx      # 3D force-graph
+│           ├── ApplicationKit.tsx
+│           ├── JdUrlInput.tsx
+│           ├── MatchingJobsPanel.tsx
+│           ├── GraphVisualizer.tsx          # 3D force-graph
 │           ├── GraphFullscreenModal.tsx
 │           ├── ErrorBoundary.tsx
 │           ├── ATSScorePanel.tsx
+│           ├── ATSSkeleton.tsx
 │           ├── SkillCard.tsx
 │           ├── ProjectCard.tsx
-│           ├── ProjectDeepDive.tsx      # 5-tab AI deep-dive per project card
+│           ├── ProjectDeepDive.tsx
 │           ├── ProjectSummaryBar.tsx
 │           ├── CodeViewer.tsx
 │           ├── SkillRadar.tsx
@@ -76,14 +90,13 @@ trueskill-ai/
 │           ├── EmailComposer.tsx
 │           ├── JobCard.tsx
 │           ├── SkillTimeline.tsx
-│           ├── Navbar.tsx
 │           ├── Skeletons.tsx
 │           ├── AnimatedCounter.tsx
 │           ├── SkillsGapHeatmap.tsx
 │           ├── LearningRoadmap.tsx
-│           ├── CoachChat.tsx
 │           └── VerificationSummaryBar.tsx
 ├── start_all.py
+├── DEPLOYMENT.md
 ├── project_spec.md
 └── README.md
 ```
@@ -122,10 +135,24 @@ cd frontend && npm install && npm run dev
 
 ---
 
+## Dashboard
+
+The dashboard uses a **collapsible sidebar** (desktop) and **bottom nav** (mobile) with route-based sub-pages. State is shared across routes via `DashboardContext` and auto-saved to `localStorage` (`trueskill_dashboard_v2`). Alex is mounted globally on all dashboard routes via `DashboardAssistantWrapper`.
+
+| Route | Purpose |
+|---|---|
+| `/dashboard` | Overview hub — stats, onboarding, quick links, authenticity score |
+| `/dashboard/verification` | Upload PDF, ingest repos, run analysis; sub-tabs: Skills, Radar, Activity, 3D Graph |
+| `/dashboard/projects` | Project verification grid + Project Deep Dive |
+| `/dashboard/coach` | Bridge projects, JD heatmap, learning roadmap, mock interview, tailoring |
+| `/dashboard/ats` | Dedicated ATS Scorer — score resume vs JD, multi-run history, delta comparison |
+
+---
+
 ## Features
 
 ### Alex — AI Career Co-Pilot
-Floating panel (bottom-right FAB, `⌘K` shortcut) embedded in the dashboard:
+Floating panel (bottom-right FAB, `⌘K` shortcut) on all dashboard routes:
 
 **Discovery**
 - **Capability Welcome Screen** — 7 interactive cards on first open (Skills Analysis, ATS Audit, Mock Interview, Resume Tailoring, Salary Intel, Application Kit, Career Roadmap). Cards are context-aware: locked with "Run analysis first" badge when no data is loaded. Each card has a clickable example question that fires directly into chat.
@@ -152,7 +179,7 @@ Floating panel (bottom-right FAB, `⌘K` shortcut) embedded in the dashboard:
 ### Verification Pipeline (LangGraph)
 Three-agent SSE-streaming workflow:
 1. **Parser** — Extracts `ResumeClaim` list (topic, claim_text, difficulty, claim_type, specific_libraries). Classifies `code_verifiable` vs `not_code_verifiable`. Deduplicates by topic, hard cap at 20 claims.
-2. **Auditor** — 3-layer: claim classification bypass → repo routing (language/import profiling) → Cypher search with `LIBRARY_ALIAS_MAP` (110+ aliases) + docstring + source_code (8k chars).
+2. **Auditor** — 3-layer: claim classification bypass → repo routing (language/import profiling) → Cypher search with `LIBRARY_ALIAS_MAP` (~84 aliases) + docstring + source_code (8k chars).
 3. **Grader** — 0–100 score:
    - `evidence_base`: 0 / +15 (imports) / +30 (function/class nodes)
    - `node_bonus`: +2/node, capped at +10
@@ -160,7 +187,7 @@ Three-agent SSE-streaming workflow:
    - `llm_score`: 0–40 (6 snippets × 2k chars semantic analysis)
    - Verified ≥60 · Partially Verified ≥30 · Unverified <30
 
-### Career Coaching Suite
+### Career Coaching Suite (`/dashboard/coach`)
 | Feature | Description |
 |---|---|
 | **Bridge Projects** | N projects targeting verified skill gaps |
@@ -172,6 +199,17 @@ Three-agent SSE-streaming workflow:
 | **Application Kit** | Cover letter + LinkedIn message + cold email |
 | **JD URL Import** | Paste a job URL instead of full JD text |
 | **Coach Report Export** | Self-contained HTML: gap summary, heatmap, projects, roadmap |
+
+ATS scoring primary home is `/dashboard/ats` (also triggerable via Alex `runAtsScore` action).
+
+### ATS Scorer (`/dashboard/ats`)
+Dedicated page for resume-vs-JD scoring with multi-run history and delta comparison against previous runs.
+
+- **Weighted score:** keyword×0.40 + content×0.30 + format×0.20 + experience×0.10
+- **Metadata extraction:** job title, company name, match level (Excellent/Good/Partial/Poor)
+- **Actionable output:** priority actions (ranked by estimated score gain), section rewrite suggestions
+- **Run history:** last N scores persisted in session; `ATSScorePanel` shows deltas vs previous run
+- **Compare API:** `POST /api/ats-score/compare` diffs two ATS reports (score deltas, keyword changes)
 
 ### Project Verification
 Three-dimension scoring per project card:
@@ -203,11 +241,12 @@ Built with react-force-graph-3d + Three.js:
 - Analytics Panel, Code Drill-Down, Type/Complexity colour modes
 - Multi-repo: comma-separated IDs, up to 25,000 nodes
 
-### Verification Results Dashboard
+### Verification Results (`/dashboard/verification`)
 - Animated SVG donut chart (per-segment glow, click-to-filter stat cards)
 - Evidence Strength Meter — 4-bar animated score breakdown per SkillCard
 - AI Claim Challenger — Devil's Advocate adversarial counter-argument (≤180 words)
 - Score Delta Badges — ↑/↓ vs previous run, localStorage persistence
+- Authenticity score — stylometric authorship analysis from forensics (shown on Overview + Verification)
 
 ### AI Resume Toolkit (`/resume-toolkit`)
 4-step: Job Search → ATS Optimization → Hiring Manager Lookup → Outreach Email.
@@ -293,6 +332,7 @@ Also includes free-text job search via `POST /api/job-finder/search`.
 | `POST` | `/api/interview-questions` | Skill-scoped interview questions |
 | `POST` | `/api/challenge-claim` | Devil's Advocate for skill claim verdict |
 | `POST` | `/api/ats-score` | Full ATS evaluation |
+| `POST` | `/api/ats-score/compare` | Diff two ATS reports (score/keyword/section deltas) |
 | `POST` | `/api/ats-report` | Download HTML ATS report |
 | `POST` | `/api/export-report` | Download HTML verification report |
 
@@ -305,11 +345,13 @@ Also includes free-text job search via `POST /api/job-finder/search`.
 | `POST` | `/api/resume-toolkit/draft-email` | Personalized outreach email |
 | `POST` | `/api/job-finder/search` | Free-text job search (no PDF required) |
 
-### Health
+### Health & Debug
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/health` | App health |
 | `GET` | `/api/health/db` | Neo4j AuraDB connectivity |
+| `GET` | `/debug/test-llm` | Diagnostic: verify LLM (Groq) reachability |
+| `GET` | `/debug/test-neo4j` | Diagnostic: verify Neo4j reachability |
 
 ---
 
@@ -317,18 +359,19 @@ Also includes free-text job search via `POST /api/job-finder/search`.
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14 (App Router), TypeScript, Vanilla CSS |
+| Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS 3.4 |
+| Icons / Fonts | lucide-react, Geist (via `next/font`) |
 | 3D Graph | react-force-graph-3d, Three.js |
 | Charts | Recharts |
 | Backend | Python 3.9+, FastAPI, Pydantic v2 |
 | AI Orchestration | LangChain, LangGraph |
-| LLM | Groq — Llama 3.3 70B (`langchain_groq`) |
+| LLM | Groq Llama 3.3 70B (primary) → Groq backup → Gemini → Cerebras fallback chain |
 | AST Parsing | tree-sitter (Python, JS, TS, Go, Java, Rust) |
 | Graph Database | Neo4j AuraDB (cloud) |
 | Relational Storage | SQLite (`trueskill_analyses.db`) |
 | Local Data | JSON flat-files (`backend/data/`) |
 | HTTP Client | httpx (async) |
-| PDF Extraction | PyPDF2 |
+| PDF Extraction | pdfminer.six + PyPDF2 (`utils/pdf_extractor.py`) |
 
 ---
 
@@ -341,12 +384,21 @@ NEO4J_USERNAME=<username>
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=<database-name>
 
-# Groq (required)
+# Groq (primary LLM)
 GROQ_API_KEY=your_key_here
 GROQ_API_KEY_BACKUP=your_backup_key   # auto-used on 429 errors
 
+# LLM fallbacks (optional — used automatically on Groq failure/rate limit)
+GOOGLE_API_KEY=your_key               # or GEMINI_API_KEY
+GEMINI_MODEL=gemini-3.1-flash-lite
+CEREBRAS_API_KEY=your_key
+CEREBRAS_MODEL=gpt-oss-120b
+
 # GitHub (optional — avoids rate limits)
 GITHUB_TOKEN=your_token
+
+# Production CORS (optional — set to your Vercel frontend URL)
+ALLOWED_ORIGINS=https://your-app.vercel.app
 
 # Optional integrations
 JOOBLE_API_KEY=your_key

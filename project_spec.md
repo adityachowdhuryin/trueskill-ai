@@ -12,25 +12,26 @@
 ### 2.1 Tech Stack
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14 (App Router), TypeScript, Vanilla CSS |
+| Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS 3.4 |
+| Icons / Fonts | lucide-react, Geist (via `next/font`) |
 | 3D Graph | react-force-graph-3d, Three.js |
 | Charts | Recharts |
 | Backend | Python 3.9+, FastAPI, Pydantic v2 |
 | AI Orchestration | LangChain, LangGraph |
-| LLM | Groq — Llama 3.3 70B (`langchain_groq`) |
+| LLM | Groq Llama 3.3 70B (primary) → Groq backup → Gemini → Cerebras fallback chain |
 | AST Parsing | tree-sitter (Python, JS, TS, Go, Java, Rust) |
 | Graph Database | Neo4j AuraDB (cloud) — `neo4j+s://` |
 | Relational Storage | SQLite (`trueskill_analyses.db`) |
 | Local Data | JSON flat-files (`backend/data/`) |
 | HTTP Client | httpx (async) |
-| PDF Parser | PyPDF2 |
+| PDF Parser | pdfminer.six + PyPDF2 (`utils/pdf_extractor.py`) |
 
 ### 2.2 Backend Modules
 | Module | File | Description |
 |---|---|---|
 | Ingestion Engine | `ingest.py` | Clone repos, parse ASTs, build Neo4j graph |
 | Reasoning Core | `agents.py` | LangGraph Parser → Auditor → Grader |
-| Alias Map | `alias_map.py` | 110+ library alias entries (PyTorch→torch, OpenCV→cv2, etc.) |
+| Alias Map | `alias_map.py` | ~84 library alias entries (PyTorch→torch, OpenCV→cv2, etc.) |
 | Forensics | `forensics.py` | Stylometric authorship + AI-code detection |
 | ATS Scorer | `ats.py` | Resume vs JD evaluation, HTML report |
 | Coach Module | `coach.py` | Alex streaming chat, cross-session memory, agentic actions, bridge projects, heatmap, roadmap, mock interview, resume tailoring, salary intel, application kit |
@@ -44,10 +45,11 @@
 | Report Generator | `report.py` | Self-contained HTML verification report |
 | Storage | `storage.py` | SQLite CRUD + share tokens |
 | Database | `db.py` | Neo4j AuraDB driver + query helpers |
-| Graph Explain | `graph_explain.py` | 8-section AI architectural summary (Groq) |
+| Graph Explain | `graph_explain.py` | 8-section AI architectural summary |
 | Function Explain | `function_explain.py` | Per-function AI explanation |
-| LLM Client | `llm.py` | Shared Groq Llama 3.3 70B + `_FallbackChatGroq` (auto-retry backup key on 429) |
-| API | `api.py` | 50+ FastAPI endpoints with rate limiting |
+| LLM Client | `llm.py` | `_SmartFallbackLLM`: Groq primary → Groq backup → Gemini → Cerebras |
+| PDF Extractor | `utils/pdf_extractor.py` | pdfminer.six + PyPDF2 best-effort text extraction |
+| API | `api.py` | 55+ FastAPI endpoints; rate-limiting infrastructure present but currently disabled |
 
 ---
 
@@ -102,10 +104,15 @@ class ProjectVerificationResult(BaseModel):
     all_evidence_node_ids: list[str]
 
 class ATSReport(BaseModel):
-    ats_score: int               # weighted: kw*0.45 + content*0.35 + format*0.20
+    ats_score: int               # weighted: kw*0.40 + content*0.30 + format*0.20 + experience*0.10
     keyword_match_score: int; format_score: int; content_score: int
+    experience_match_score: int  # years-of-experience match vs JD (0-100)
+    job_title: str; company_name: str; match_level: str  # Excellent/Good/Partial/Poor Match
     keyword_matches: list; section_feedback: list
-    top_missing_keywords: list[str]; strengths: list[str]; improvements: list[str]
+    top_missing_keywords: list[str]; formatting_flags: list[str]
+    overall_recommendation: str; strengths: list[str]; improvements: list[str]
+    priority_actions: list        # ranked actions with estimated score gain
+    rewrite_suggestions: list       # before/after section rewrites
 ```
 
 ### 3.3 Local Data Files
@@ -139,7 +146,7 @@ START → Parser → Auditor → Grader → END
 **Auditor — 3-Layer Scoped Search:**
 - Layer 1: `not_code_verifiable` claims (Agile, leadership, etc.) → bypass graph
 - Layer 2: Repo routing via language/import profiling; falls back to all repos
-- Layer 3: Cypher searches `n.name`, `n.module_name`, `n.source_code` (8k chars), `n.docstring`, `n.file_path`. Keywords expanded via `LIBRARY_ALIAS_MAP` + `specific_libraries`. Returns up to 100 nodes re-ranked: complex functions first.
+- Layer 3: Cypher searches `n.name`, `n.module_name`, `n.source_code` (8k chars), `n.docstring`, `n.file_path`. Keywords expanded via `LIBRARY_ALIAS_MAP` (~84 entries) + `specific_libraries`. Returns up to 100 nodes re-ranked: complex functions first.
 
 **Grader — Scoring (max 100):**
 - `evidence_base`: 0 / +15 (imports only) / +30 (function/class nodes)
@@ -150,6 +157,15 @@ START → Parser → Auditor → Grader → END
 
 ### Workflow 2: ATS Pipeline
 PDF resume + JD → `ATSReport` + downloadable HTML report.
+
+**Dedicated UI:** `/dashboard/ats` — standalone ATS Scorer page with multi-run history (`atsReportHistory` in `DashboardContext`) and delta comparison against previous run in `ATSScorePanel`.
+
+**Scoring (server-side, deterministic):**
+```
+ats_score = keyword_match×0.40 + content×0.30 + format×0.20 + experience_match×0.10
+```
+
+**Compare endpoint:** `POST /api/ats-score/compare` accepts `{ report_a, report_b }` and returns score deltas, newly found/missing keywords, and per-section score changes.
 
 ### Workflow 3: AI Resume Toolkit
 4-step at `/resume-toolkit`: Job Search → ATS Optimization → Hiring Manager Lookup → Email Drafting.
@@ -234,6 +250,7 @@ Click any `Function` node in 3D graph → NodeInfoPanel → ✨ Explain → AI p
 - **7b Evidence Strength Meter**: 4-bar animated breakdown (evidence_base/node_bonus/depth_bonus/llm) inside each SkillCard
 - **7c AI Claim Challenger** (`POST /api/challenge-claim`): Devil's Advocate ≤180-word counter-argument; hidden for 0-score/no-evidence cards
 - **7d Score Delta**: ↑/↓ badges vs previous run, localStorage persistence
+- **7e Authenticity Score**: stylometric authorship score from `forensics.py`, shown on Overview and Verification pages
 
 ### Workflow 8: AI Graph Summary (`POST /api/graph/explain`)
 8-section JSON via Groq: summary, architecture_style, tech_stack, modules, key_observations, hotspot_analysis, improvement_suggestions, complexity_verdict. Rendered as collapsible panel in 3D graph view.
@@ -355,6 +372,7 @@ GET  /api/benchmarks/{role_slug}       get benchmark
 POST /api/interview-questions          { topic, claim_text, difficulty, num_questions }
 POST /api/challenge-claim              { topic, claim_text, score, status, score_breakdown? }
 POST /api/ats-score                    { pdf_file, job_description } → ATSReport
+POST /api/ats-score/compare            { report_a, report_b } → score/keyword/section deltas
 POST /api/ats-report                   { ats_report, candidate_name } → HTML
 POST /api/export-report                { ...results } → HTML
 ```
@@ -368,10 +386,12 @@ POST /api/resume-toolkit/draft-email           { pdf_file, job_posting, hiring_m
 POST /api/job-finder/search                    { query, location? } → jobs (no PDF required)
 ```
 
-### Health
+### Health & Debug
 ```
-GET /health
-GET /api/health/db
+GET /health                            → app health
+GET /api/health/db                     → Neo4j AuraDB connectivity
+GET /debug/test-llm                    → diagnostic: LLM (Groq) reachability
+GET /debug/test-neo4j                  → diagnostic: Neo4j reachability
 ```
 
 ---
@@ -382,24 +402,34 @@ GET /api/health/db
 | Route | Description |
 |---|---|
 | `/` | Animated landing page with feature cards + tech stack |
-| `/dashboard` | Main workflow: upload PDF → ingest repo → analyze → tabbed results + Alex |
+| `/dashboard` | Overview hub — stats, onboarding steps, quick-action cards, authenticity score |
+| `/dashboard/verification` | Upload PDF, ingest repos, run analysis; sub-tabs: Skills, Radar, Activity, 3D Graph |
+| `/dashboard/projects` | Project verification grid + Project Deep Dive |
+| `/dashboard/coach` | Bridge projects, JD heatmap, learning roadmap, mock interview, tailoring |
+| `/dashboard/ats` | Dedicated ATS Scorer — score resume vs JD, multi-run history, delta comparison |
 | `/compare` | Side-by-side multi-candidate comparison with gauge charts |
 | `/resume-toolkit` | 4-step AI Resume Toolkit |
 | `/profile/[token]` | Public shareable verified profile (no auth) |
 
-### Dashboard Tabs
+### Dashboard Navigation
+The dashboard uses a **collapsible sidebar** (desktop) and **bottom nav** (mobile) via `DashboardSidebar.tsx`. State is shared across all routes via `DashboardContext.tsx` and persisted to `localStorage` (`trueskill_dashboard_v2`). Alex is mounted globally on all dashboard routes via `DashboardAssistantWrapper.tsx`.
+
+### Verification Sub-Tabs (`/dashboard/verification`)
 | Tab | Description |
 |---|---|
 | **Skills** | Sorted skill cards (Verified→Partial→Unverified). Filter: search, status, Expand All. VerificationSummaryBar above. Each card: animated score bar, delta badge, evidence nodes, Evidence Strength Meter, Interview Prep, Challenge button. |
 | **Radar** | Recharts radar vs LLM role benchmarks. |
 | **Activity** | ContributionHeatmap + SkillTimeline. |
 | **Graph** | 3D force-graph: Bloom, Neighborhood Focus, AI Summary, Evidence Highlighting, Path Finder, Analytics, Code Drill-Down, Function Explain. |
-| **Projects** | ProjectSummaryBar + ProjectCard grid. Each card: tech coverage bars, bullet verdicts, 5 AI features. |
 
 ### Key Components
 | Component | Description |
 |---|---|
+| `DashboardSidebar.tsx` | Collapsible sidebar + mobile bottom nav; status badges for sections with data |
+| `DashboardContext.tsx` | Shared dashboard state, session persistence, API handlers |
+| `DashboardAssistantWrapper.tsx` | Global Alex + graph fullscreen modal mount across dashboard routes |
 | `TrueSkillAssistant.tsx` | Alex floating AI career co-pilot. Full feature set: capability welcome screen, ⚡ Capabilities persistent toggle, rotating suggestion bank, streaming chat, proactive auto-insight, voice input, reactions, expand toggle, search, export, clear |
+| `ATSSkeleton.tsx` | Loading skeleton for ATS Scorer page |
 | `MockInterview.tsx` | Live AI mock interview session |
 | `TailoredResume.tsx` | Resume tailoring result panel |
 | `SalaryIntelligenceCard.tsx` | Salary range + negotiation points |
@@ -414,7 +444,7 @@ GET /api/health/db
 | `CodeViewer.tsx` | Source code modal, inline syntax highlighting, ESC to close |
 | `SkillsGapHeatmap.tsx` | Sortable heatmap: JD req vs code score vs ATS presence |
 | `LearningRoadmap.tsx` | Scrollable week cards with checkbox persistence (localStorage) |
-| `CoachChat.tsx` | Embedded coach chat panel (dashboard) |
+| `ATSScorePanel.tsx` | ATS score breakdown, priority actions, rewrite suggestions, delta vs previous run |
 
 ---
 
@@ -428,7 +458,8 @@ GET /api/health/db
 | Multi-language | ✅ | tree-sitter: Python, JS, TS, Go, Java, Rust |
 | Streaming | ✅ | SSE for verification + Alex chat |
 | Candidate Comparison | ✅ | SQLite + `/compare` page |
-| ATS Evaluation | ✅ | `ats.py` weighted scoring |
+| ATS Evaluation | ✅ | `ats.py` weighted scoring (kw 40% + content 30% + format 20% + experience 10%) |
+| ATS Scorer Page | ✅ | `/dashboard/ats` dedicated page with multi-run history + `POST /api/ats-score/compare` |
 | AI Architectural Insights | ✅ | `graph_explain.py` 8-section JSON |
 | Career Coaching Suite | ✅ | Full suite + Alex AI co-pilot |
 | Adversarial Verification | ✅ | `challenge.py` Devil's Advocate |
@@ -441,6 +472,8 @@ GET /api/health/db
 | Capability Discovery | ✅ | Welcome screen + ⚡ Capabilities persistent toggle |
 | Proactive Insights | ✅ | Auto-insight fires after first analysis; doesn't suppress welcome screen |
 | Project Deep Dive | ✅ | `project_deep_dive.py` + `ProjectDeepDive.tsx`: 5-tab AI analysis per project card (scorecard, summary, tech-debt, skill signals, recruiter pitch) |
+| Dashboard Navigation | ✅ | Sidebar + route-based sub-pages (`DashboardSidebar`, `DashboardContext`) with session persistence |
+| LLM Resilience | ✅ | `_SmartFallbackLLM` in `llm.py`: Groq → Gemini → Cerebras automatic failover |
 
 ---
 
@@ -470,11 +503,16 @@ NEO4J_URI=neo4j+s://<instance-id>.databases.neo4j.io
 NEO4J_USERNAME=<username>
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=<database-name>
-GROQ_API_KEY=your_key
-GROQ_API_KEY_BACKUP=your_backup_key   # auto-used on 429 errors
-GITHUB_TOKEN=your_token               # optional
-JOOBLE_API_KEY=your_key               # optional
-APOLLO_API_KEY=your_key               # optional (free tier: /people/match fallback)
+GROQ_API_KEY=your_key                    # primary LLM
+GROQ_API_KEY_BACKUP=your_backup_key      # auto-used on 429 errors
+GOOGLE_API_KEY=your_key                  # optional LLM fallback (or GEMINI_API_KEY)
+GEMINI_MODEL=gemini-3.1-flash-lite
+CEREBRAS_API_KEY=your_key                # optional LLM fallback
+CEREBRAS_MODEL=gpt-oss-120b
+GITHUB_TOKEN=your_token                  # optional
+ALLOWED_ORIGINS=https://your-app.vercel.app  # production CORS
+JOOBLE_API_KEY=your_key                  # optional
+APOLLO_API_KEY=your_key                  # optional (free tier: /people/match fallback)
 ```
 
 > **Security:** `.env` and `Neo4j-*.txt` are excluded via `.gitignore`.
