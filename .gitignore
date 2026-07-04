@@ -64,3 +64,6 @@ backend/trueskill_analyses.db
 backend/data/
 .vercel
 .env*
+
+# Internal audit / working docs (local only)
+verification_systems_audit.md
