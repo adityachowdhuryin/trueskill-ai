@@ -2,11 +2,17 @@
 Shared LLM Utilities
 Centralized LLM initialization and response parsing to avoid code duplication.
 
-Key rotation: if GROQ_API_KEY hits a rate-limit (HTTP 429), every call made
-through get_llm_model() is automatically retried once with GROQ_API_KEY_BACKUP,
-so the app keeps running without disruption.
+Fallback chain (in order):
+  1. Groq Primary      (GROQ_API_KEY)
+  2. Groq Backup       (GROQ_API_KEY_BACKUP)
+  3. Groq Key 3        (GROQ_API_KEY_3)
+  4. Groq Key 4        (GROQ_API_KEY_4)
+  5. Gemini            (GOOGLE_API_KEY / GEMINI_API_KEY)
+  6. Cerebras          (CEREBRAS_API_KEY)
 
-No changes needed in any caller — the fallback is fully transparent.
+Key rotation: if any Groq key hits a rate-limit (HTTP 429), the switch
+happens instantly because every client is initialized with max_retries=0.
+The fallback is fully transparent — no changes needed in any caller.
 """
 
 import json
@@ -63,7 +69,35 @@ class _SmartFallbackLLM:
             except Exception as e:
                 logger.error(f"Failed to initialize Groq Backup client: {e}")
 
-        # 2. Add Gemini (Google AI Studio) as the first fallback option
+        # 3. Groq Key 3 — third fallback
+        groq_key3 = os.getenv("GROQ_API_KEY_3")
+        if groq_key3:
+            try:
+                self._clients.append(("Groq Key 3", ChatGroq(
+                    model=MODEL_NAME,
+                    groq_api_key=groq_key3,
+                    temperature=temperature,
+                    max_retries=0  # Fall back instantly on failure
+                )))
+                logger.info("Initialized Groq Key 3 client")
+            except Exception as e:
+                logger.error(f"Failed to initialize Groq Key 3 client: {e}")
+
+        # 4. Groq Key 4 — fourth fallback
+        groq_key4 = os.getenv("GROQ_API_KEY_4")
+        if groq_key4:
+            try:
+                self._clients.append(("Groq Key 4", ChatGroq(
+                    model=MODEL_NAME,
+                    groq_api_key=groq_key4,
+                    temperature=temperature,
+                    max_retries=0  # Fall back instantly on failure
+                )))
+                logger.info("Initialized Groq Key 4 client")
+            except Exception as e:
+                logger.error(f"Failed to initialize Groq Key 4 client: {e}")
+
+        # 5. Gemini (Google AI Studio) — fifth fallback
         gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if gemini_key:
             gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -80,7 +114,7 @@ class _SmartFallbackLLM:
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini client: {e}")
 
-        # 3. Add Cerebras as the secondary fallback option
+        # 6. Cerebras — sixth fallback
         cerebras_key = os.getenv("CEREBRAS_API_KEY")
         if cerebras_key:
             cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
@@ -99,7 +133,11 @@ class _SmartFallbackLLM:
                 logger.error(f"Failed to initialize Cerebras client: {e}")
 
         if not self._clients:
-            raise ValueError("No LLM clients could be initialized. Please set GOOGLE_API_KEY, GROQ_API_KEY, or CEREBRAS_API_KEY.")
+            raise ValueError(
+                "No LLM clients could be initialized. "
+                "Please set at least one of: GROQ_API_KEY, GROQ_API_KEY_BACKUP, "
+                "GROQ_API_KEY_3, GROQ_API_KEY_4, GOOGLE_API_KEY, or CEREBRAS_API_KEY."
+            )
 
     # ── Sync ──────────────────────────────────────────────────────────────────
     def invoke(self, messages, **kwargs):

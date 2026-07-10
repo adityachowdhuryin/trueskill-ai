@@ -1320,9 +1320,27 @@ async def get_system_info():
     groq_backup = os.getenv("GROQ_API_KEY_BACKUP", "")
     if groq_backup:
         providers.append({
-            "name": "Groq (Backup)",
+            "name": "Groq (Key 2)",
             "model": MODEL_NAME,
             "key_hint": mask(groq_backup),
+            "status": "configured",
+        })
+
+    groq_key3 = os.getenv("GROQ_API_KEY_3", "")
+    if groq_key3:
+        providers.append({
+            "name": "Groq (Key 3)",
+            "model": MODEL_NAME,
+            "key_hint": mask(groq_key3),
+            "status": "configured",
+        })
+
+    groq_key4 = os.getenv("GROQ_API_KEY_4", "")
+    if groq_key4:
+        providers.append({
+            "name": "Groq (Key 4)",
+            "model": MODEL_NAME,
+            "key_hint": mask(groq_key4),
             "status": "configured",
         })
 
@@ -1330,7 +1348,7 @@ async def get_system_info():
     if gemini_key:
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
         providers.append({
-            "name": "Gemini (Fallback)",
+            "name": "Gemini (Fallback 5)",
             "model": gemini_model,
             "key_hint": mask(gemini_key),
             "status": "configured",
@@ -1340,7 +1358,7 @@ async def get_system_info():
     if cerebras_key:
         cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
         providers.append({
-            "name": "Cerebras (Fallback)",
+            "name": "Cerebras (Fallback 6)",
             "model": cerebras_model,
             "key_hint": mask(cerebras_key),
             "status": "configured",
