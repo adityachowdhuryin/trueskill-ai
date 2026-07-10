@@ -155,6 +155,7 @@ export default function ProjectCard({
     const [archLoading, setArchLoading]           = useState(false);
     const [archData, setArchData]                 = useState<any>(null);
     const [archSuggestionsOpen, setArchSuggestionsOpen] = useState(false);
+    const [showAllModules, setShowAllModules]           = useState(false);
     // Bullet Explain
     const [bulletExplain, setBulletExplain]       = useState<Record<number, string>>({});
     const [bulletLoading, setBulletLoading]       = useState<Record<number, boolean>>({});
@@ -253,7 +254,9 @@ export default function ProjectCard({
     const totalTechs    = result.tech_total_count ?? result.tech_coverage.length;
     const allEvidenceIds = result.tech_coverage.filter(t => t.found).flatMap(t => t.evidence_node_ids);
     const canShowInGraph = onShowInGraph && allEvidenceIds.length > 0;
-    const effectiveRepoIds = repoIds.length > 0 ? repoIds : (result.matched_repo_id ? [result.matched_repo_id] : []);
+    const effectiveRepoIds = result.matched_repo_id
+        ? [result.matched_repo_id, ...repoIds.filter(id => id !== result.matched_repo_id)]
+        : repoIds.length > 0 ? repoIds : [];
     const COMPLEXITY_COLORS: Record<string, string> = { "Low": "#10b981", "Medium": "#6366f1", "High": "#f59e0b", "Very High": "#ef4444" };
     const complexityColor = archData?.complexity_verdict ? COMPLEXITY_COLORS[archData.complexity_verdict] ?? "#94a3b8" : "#94a3b8";
 
@@ -397,7 +400,9 @@ export default function ProjectCard({
                                         <div className="mt-1 ml-2 pl-2 border-l-2 border-emerald-200 space-y-0.5">
                                             {item.evidence_node_ids.slice(0, 5).map((nid, j) => (
                                                 <div key={j} className="flex items-center gap-2">
-                                                    <p className="text-[10px] text-slate-500 font-mono truncate max-w-xs flex-1">{nid}</p>
+                                                    <p className="text-[10px] text-slate-500 font-mono truncate max-w-xs flex-1">
+                                                        {nid.includes(":") ? `${nid.split(":")[0].split("/").pop()} · ${nid.split(":").slice(1).join(":")}` : nid}
+                                                    </p>
                                                     <button
                                                         onClick={e => { e.stopPropagation(); setCodeViewerNode(nid); }}
                                                         className="flex-shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-600 text-[9px] font-semibold hover:bg-indigo-100"
@@ -522,12 +527,21 @@ export default function ProjectCard({
                                             {archData.modules?.length > 0 && (
                                                 <div className="space-y-1">
                                                     <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Modules</p>
-                                                    {archData.modules.slice(0, 4).map((m: any, i: number) => (
+                                                    {archData.modules.slice(0, showAllModules ? undefined : 4).map((m: any, i: number) => (
                                                         <div key={i} className="flex gap-2 items-start">
                                                             <span className="font-semibold text-slate-700 shrink-0">{m.name}:</span>
                                                             <span className="text-slate-500">{m.role}</span>
                                                         </div>
                                                     ))}
+                                                    {archData.modules?.length > 4 && (
+                                                        <button
+                                                            onClick={e => { e.stopPropagation(); setShowAllModules(v => !v); }}
+                                                            className="flex items-center gap-1 text-[10px] font-semibold text-indigo-500 hover:text-indigo-700 transition-colors mt-1"
+                                                        >
+                                                            <ChevronRight className={`w-3 h-3 transition-transform ${showAllModules ? "rotate-90" : ""}`} />
+                                                            {showAllModules ? "Show less" : `Show all ${archData.modules.length} modules`}
+                                                        </button>
+                                                    )}
                                                 </div>
                                             )}
                                             {archData.hotspot_analysis && (
@@ -739,7 +753,7 @@ export default function ProjectCard({
                 nodeId={codeViewerNode}
                 repoIds={effectiveRepoIds}
                 fileName={codeViewerNode.includes(":") ? codeViewerNode.split(":")[0].split("/").pop() ?? codeViewerNode : codeViewerNode}
-                functionName={codeViewerNode.includes(":") ? codeViewerNode.split(":").pop() ?? codeViewerNode : codeViewerNode}
+                functionName={codeViewerNode.includes(":") ? codeViewerNode.split(":").slice(1).join(":") : codeViewerNode}
                 onClose={() => setCodeViewerNode(null)}
             />
         )}

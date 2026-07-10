@@ -1195,6 +1195,8 @@ async def get_graph_data(
                 "file_path": node.get("file_path", node.get("path", "")),
                 "complexity_score": node.get("complexity_score"),
                 "repo_id": node.get("repo_id", ""),
+                "func_id": node.get("func_id"),           # canonical lookup ID for Function nodes
+                "parent_class": node.get("parent_class"), # class name for class methods/constructors
                 "properties": dict(node),
             })
 
@@ -1290,6 +1292,66 @@ async def find_graph_path(req: PathRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Path query failed: {str(e)}")
+
+
+@router.get("/system-info")
+async def get_system_info():
+    """
+    Returns the configured LLM providers, model names, and masked API key hints.
+    Never exposes actual key values — only the last 4 characters for identification.
+    """
+    import os
+    from app.llm import MODEL_NAME
+
+    def mask(key: str) -> str:
+        return f"...{key[-4:]}" if len(key) > 4 else "****"
+
+    providers = []
+
+    groq_primary = os.getenv("GROQ_API_KEY", "")
+    if groq_primary:
+        providers.append({
+            "name": "Groq (Primary)",
+            "model": MODEL_NAME,
+            "key_hint": mask(groq_primary),
+            "status": "configured",
+        })
+
+    groq_backup = os.getenv("GROQ_API_KEY_BACKUP", "")
+    if groq_backup:
+        providers.append({
+            "name": "Groq (Backup)",
+            "model": MODEL_NAME,
+            "key_hint": mask(groq_backup),
+            "status": "configured",
+        })
+
+    gemini_key = os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
+    if gemini_key:
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        providers.append({
+            "name": "Gemini (Fallback)",
+            "model": gemini_model,
+            "key_hint": mask(gemini_key),
+            "status": "configured",
+        })
+
+    cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
+    if cerebras_key:
+        cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
+        providers.append({
+            "name": "Cerebras (Fallback)",
+            "model": cerebras_model,
+            "key_hint": mask(cerebras_key),
+            "status": "configured",
+        })
+
+    return {
+        "providers": providers,
+        "primary_model": MODEL_NAME,
+        "fallback_order": [p["name"] for p in providers],
+        "total_providers": len(providers),
+    }
 
 
 @router.get("/health/db")

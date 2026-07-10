@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
     LayoutDashboard, Microscope, FolderGit2, GraduationCap,
     FileText, GitCompare, ChevronLeft, ChevronRight,
-    CheckCircle2, Sparkles, ScanSearch,
+    CheckCircle2, Sparkles, ScanSearch, Home, Info, Cpu, X,
 } from "lucide-react";
 import { useDashboard } from "@/contexts/DashboardContext";
 
@@ -60,6 +60,21 @@ export default function DashboardSidebar() {
     const pathname = usePathname();
     const [collapsed, setCollapsed] = useState(false);
     const { analysisResult, projectResults, bridgeProjects, githubUsername } = useDashboard();
+    const [showSysInfo, setShowSysInfo] = useState(false);
+    const [sysInfo, setSysInfo] = useState<{ providers: Array<{ name: string; model: string; key_hint: string }> } | null>(null);
+    const [loadingSysInfo, setLoadingSysInfo] = useState(false);
+
+    const toggleSysInfo = useCallback(async () => {
+        if (showSysInfo) { setShowSysInfo(false); return; }
+        setShowSysInfo(true);
+        if (sysInfo) return;
+        setLoadingSysInfo(true);
+        try {
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+            const res = await fetch(`${apiBase}/api/system-info`);
+            if (res.ok) setSysInfo(await res.json());
+        } catch { /* silent */ } finally { setLoadingSysInfo(false); }
+    }, [showSysInfo, sysInfo]);
 
     // Persist collapsed state
     useEffect(() => {
@@ -91,19 +106,21 @@ export default function DashboardSidebar() {
                 className="hidden md:flex flex-col h-screen sticky top-0 bg-white border-r border-slate-200/80 transition-all duration-300 ease-in-out select-none z-40 flex-shrink-0"
                 style={{ width: collapsed ? 64 : 240 }}
             >
-                {/* Logo */}
+                {/* Logo — click to go home */}
                 <div className="flex items-center px-4 h-16 border-b border-slate-100 overflow-hidden">
-                    <div
-                        className="w-9 h-9 flex-shrink-0 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-xl flex items-center justify-center font-black text-sm text-white shadow-md"
-                        style={{ boxShadow: "0 0 16px rgba(99,102,241,0.4)" }}
-                    >
-                        TS
-                    </div>
-                    {!collapsed && (
-                        <span className="ml-3 text-base font-bold text-slate-900 whitespace-nowrap tracking-tight">
-                            TrueSkill AI
-                        </span>
-                    )}
+                    <Link href="/" className="flex items-center gap-0 group" title="Back to home">
+                        <div
+                            className="w-9 h-9 flex-shrink-0 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-xl flex items-center justify-center font-black text-sm text-white shadow-md group-hover:scale-105 transition-transform"
+                            style={{ boxShadow: "0 0 16px rgba(99,102,241,0.4)" }}
+                        >
+                            TS
+                        </div>
+                        {!collapsed && (
+                            <span className="ml-3 text-base font-bold text-slate-900 whitespace-nowrap tracking-tight group-hover:text-indigo-600 transition-colors">
+                                TrueSkill AI
+                            </span>
+                        )}
+                    </Link>
                 </div>
 
                 {/* Nav items */}
@@ -201,7 +218,7 @@ export default function DashboardSidebar() {
                     })}
                 </nav>
 
-                {/* Bottom: user badge + collapse toggle */}
+                {/* Bottom: user badge + info button + collapse toggle */}
                 <div className="border-t border-slate-100 p-3 flex flex-col gap-2">
                     {/* GitHub user badge */}
                     {githubUsername && !collapsed && (
@@ -224,23 +241,74 @@ export default function DashboardSidebar() {
                         </div>
                     )}
 
-                    {/* Collapse toggle */}
-                    <button
-                        onClick={toggleCollapsed}
-                        className="flex items-center justify-center w-full h-8 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors duration-200 group"
-                        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                    >
-                        {collapsed
-                            ? <ChevronRight className="w-4 h-4 group-hover:text-indigo-600 transition-colors" />
-                            : <ChevronLeft className="w-4 h-4 group-hover:text-indigo-600 transition-colors" />
-                        }
-                        {!collapsed && <span className="ml-1.5 text-xs font-medium">Collapse</span>}
-                    </button>
+                    {/* Info + Collapse row */}
+                    <div className="flex items-center gap-1.5">
+                        {/* System info button */}
+                        <div className="relative">
+                            <button
+                                onClick={toggleSysInfo}
+                                title="View AI configuration"
+                                className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-slate-100 transition-colors"
+                            >
+                                <Info className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Popover */}
+                            {showSysInfo && (
+                                <div className="absolute bottom-10 left-0 z-50 w-72 bg-white border border-slate-200 rounded-2xl shadow-2xl p-4">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <p className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                                            <Cpu className="w-3.5 h-3.5 text-indigo-500" /> AI Configuration
+                                        </p>
+                                        <button onClick={() => setShowSysInfo(false)} className="w-5 h-5 flex items-center justify-center text-slate-400 hover:text-slate-600">
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                    {loadingSysInfo ? (
+                                        <p className="text-[11px] text-slate-400">Loading…</p>
+                                    ) : sysInfo?.providers && sysInfo.providers.length > 0 ? (
+                                        <div className="flex flex-col gap-0">
+                                            {sysInfo.providers.map((p, i) => (
+                                                <div key={i} className="flex items-start gap-2.5 py-2 border-t border-slate-50 first:border-0">
+                                                    <span className={`mt-1 w-1.5 h-1.5 rounded-full flex-shrink-0 ${i === 0 ? "bg-emerald-500" : "bg-slate-300"}`} />
+                                                    <div>
+                                                        <p className="text-[11px] font-semibold text-slate-700">{p.name}</p>
+                                                        <p className="text-[10px] font-mono text-indigo-600">{p.model}</p>
+                                                        <p className="text-[10px] text-slate-400">Key: {p.key_hint}</p>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <p className="text-[11px] text-slate-400">No providers configured.</p>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Collapse toggle */}
+                        <button
+                            onClick={toggleCollapsed}
+                            className="flex-1 flex items-center justify-center h-8 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors duration-200 group"
+                            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                        >
+                            {collapsed
+                                ? <ChevronRight className="w-4 h-4 group-hover:text-indigo-600 transition-colors" />
+                                : <ChevronLeft className="w-4 h-4 group-hover:text-indigo-600 transition-colors" />
+                            }
+                            {!collapsed && <span className="ml-1.5 text-xs font-medium">Collapse</span>}
+                        </button>
+                    </div>
                 </div>
             </aside>
 
             {/* ── Mobile Bottom Nav ─────────────────────────────────────────────── */}
             <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-xl border-t border-slate-200 px-2 py-1.5 flex items-center justify-around safe-area-inset-bottom">
+                {/* Home link */}
+                <Link href="/" className="relative flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-slate-400 hover:text-slate-700 transition-all">
+                    <Home className="w-5 h-5" strokeWidth={1.7} />
+                    <span className="text-[9px] font-medium">Home</span>
+                </Link>
                 {MAIN_LINKS.map(link => {
                     const Icon = link.icon;
                     const active = isActive(link.href, link.exact ?? false);

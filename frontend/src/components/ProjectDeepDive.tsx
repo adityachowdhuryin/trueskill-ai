@@ -552,11 +552,84 @@ export default function ProjectDeepDive({ result }: ProjectDeepDiveProps) {
                                         {techDebtData.overall_health}
                                     </span>
                                     <RiskBadge level={techDebtData.risk_level} />
-                                    {techDebtData.stats && (
-                                        <span className="text-[10px] text-slate-400">
-                                            Avg complexity: {techDebtData.stats.avg_complexity.toFixed(1)} · High-complexity fns: {techDebtData.stats.high_complexity_pct}% · Docs: {techDebtData.stats.docstring_ratio}%
-                                        </span>
-                                    )}
+                                    {techDebtData.stats && (() => {
+                                        const s = techDebtData.stats!;
+                                        const complexPct = s.high_complexity_pct;
+                                        const docPct = typeof s.docstring_ratio === "number"
+                                            ? (s.docstring_ratio <= 1 ? Math.round(s.docstring_ratio * 100) : s.docstring_ratio)
+                                            : 0;
+                                        const tiles = [
+                                            {
+                                                label: "Avg Complexity",
+                                                value: s.avg_complexity.toFixed(1),
+                                                suffix: "",
+                                                color: s.avg_complexity >= 8 ? "#ef4444" : s.avg_complexity >= 4 ? "#f59e0b" : "#10b981",
+                                                bg: s.avg_complexity >= 8 ? "rgba(239,68,68,0.06)" : s.avg_complexity >= 4 ? "rgba(245,158,11,0.06)" : "rgba(16,185,129,0.06)",
+                                            },
+                                            {
+                                                label: "High-Complexity",
+                                                value: String(complexPct),
+                                                suffix: "%",
+                                                color: complexPct > 30 ? "#ef4444" : complexPct > 15 ? "#f59e0b" : "#10b981",
+                                                bg: complexPct > 30 ? "rgba(239,68,68,0.06)" : complexPct > 15 ? "rgba(245,158,11,0.06)" : "rgba(16,185,129,0.06)",
+                                            },
+                                            {
+                                                label: "Doc Coverage",
+                                                value: String(docPct),
+                                                suffix: "%",
+                                                color: docPct >= 50 ? "#10b981" : docPct >= 20 ? "#f59e0b" : "#ef4444",
+                                                bg: docPct >= 50 ? "rgba(16,185,129,0.06)" : docPct >= 20 ? "rgba(245,158,11,0.06)" : "rgba(239,68,68,0.06)",
+                                            },
+                                            {
+                                                label: "Dead Code",
+                                                value: String(s.orphan_count),
+                                                suffix: " nodes",
+                                                color: s.orphan_count > 0 ? "#ef4444" : "#10b981",
+                                                bg: s.orphan_count > 0 ? "rgba(239,68,68,0.06)" : "rgba(16,185,129,0.06)",
+                                            },
+                                        ];
+                                        const buckets = s.complexity_buckets ? Object.entries(s.complexity_buckets) : [];
+                                        const maxBucket = buckets.length > 0 ? Math.max(...buckets.map(([,v]) => v as number)) : 1;
+                                        return (
+                                            <div className="space-y-2 mt-2">
+                                                <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Code Quality Metrics</p>
+                                                <div className="grid grid-cols-2 gap-1.5">
+                                                    {tiles.map(t => (
+                                                        <div
+                                                            key={t.label}
+                                                            className="flex flex-col items-center gap-0.5 px-2 py-2 rounded-lg"
+                                                            style={{ background: t.bg, border: `1px solid ${t.color}30` }}
+                                                        >
+                                                            <span className="text-[8px] font-bold uppercase tracking-wide text-slate-500">{t.label}</span>
+                                                            <span className="text-base font-black tabular-nums" style={{ color: t.color }}>
+                                                                {t.value}<span className="text-[10px] font-semibold opacity-70">{t.suffix}</span>
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                {buckets.length > 0 && (
+                                                    <div className="space-y-1">
+                                                        <p className="text-[8px] font-bold uppercase tracking-widest text-slate-400">Complexity Distribution</p>
+                                                        {buckets.map(([bucket, count]) => (
+                                                            <div key={bucket} className="flex items-center gap-2">
+                                                                <span className="text-[9px] text-slate-400 w-12 flex-shrink-0 truncate">{bucket}</span>
+                                                                <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                                                                    <div
+                                                                        className="h-full rounded-full transition-all duration-700"
+                                                                        style={{
+                                                                            width: `${((count as number) / maxBucket) * 100}%`,
+                                                                            background: "linear-gradient(to right, #4ade80, #fbbf24, #ef4444)",
+                                                                        }}
+                                                                    />
+                                                                </div>
+                                                                <span className="text-[9px] font-bold text-slate-500 w-6 text-right">{count as number}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                                 <HealthBar score={techDebtData.health_score} />
                                 {techDebtData.summary && <p className="text-xs text-slate-600 leading-relaxed">{techDebtData.summary}</p>}

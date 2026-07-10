@@ -27,7 +27,9 @@ export interface GraphNode {
     color?: string;
     file_path?: string;
     complexity_score?: number;
-    repo_id?: string;  // which repository this node belongs to
+    repo_id?: string;    // which repository this node belongs to
+    func_id?: string;    // canonical func_id for /node-code lookup (file.py:ClassName.method)
+    parent_class?: string; // class name if this is a method/constructor
 }
 
 export interface GraphLink {
@@ -36,7 +38,7 @@ export interface GraphLink {
     type: string;
 }
 
-interface GraphSummaryData {
+export interface GraphSummaryData {
     summary: string;
     architecture_style: string;
     tech_stack?: string[];
@@ -844,12 +846,22 @@ function GraphContentArea({
             {/* Code Viewer modal */}
             {codeViewerNode && (
                 <CodeViewer
-                    nodeId={codeViewerNode.file_path
-                        ? `${codeViewerNode.file_path}:${codeViewerNode.name}`
-                        : String(codeViewerNode.id ?? codeViewerNode.name)}
+                    nodeId={
+                        codeViewerNode.func_id
+                            ? codeViewerNode.func_id                                                                                      // ✅ canonical — always correct
+                            : codeViewerNode.file_path && codeViewerNode.parent_class
+                                ? `${codeViewerNode.file_path}:${codeViewerNode.parent_class}.${codeViewerNode.name}` // ✅ class method fallback
+                                : codeViewerNode.file_path
+                                    ? `${codeViewerNode.file_path}:${codeViewerNode.name}`                             // regular function fallback
+                                    : String(codeViewerNode.id ?? codeViewerNode.name)                                 // last resort
+                    }
                     repoIds={repoIds.length > 0 ? repoIds : (codeViewerNode.repo_id ? [codeViewerNode.repo_id] : [])}
                     fileName={codeViewerNode.file_path?.split("/").pop() ?? codeViewerNode.name}
-                    functionName={codeViewerNode.name}
+                    functionName={
+                        codeViewerNode.parent_class
+                            ? `${codeViewerNode.parent_class}.${codeViewerNode.name}`
+                            : codeViewerNode.name
+                    }
                     onClose={() => setCodeViewerNode(null)}
                 />
             )}

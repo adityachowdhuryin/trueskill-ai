@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useEffect } from "react";
+import { useRef, useCallback, useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { useDashboard } from "@/contexts/DashboardContext";
 import {
@@ -8,8 +8,10 @@ import {
     RefreshCw, Download, Share2, Check, Copy, AlertCircle,
     Network, Microscope, Target, Activity, BarChart3,
     Search, Filter, ChevronsUpDown, Maximize2, Sparkles,
+    Eye, FileText, X,
 } from "lucide-react";
 import type { VerificationResult } from "@/types/dashboard";
+import ForensicsPanel from "@/components/ForensicsPanel";
 import VerificationSummaryBar from "@/components/VerificationSummaryBar";
 import SkillCard from "@/components/SkillCard";
 import ErrorBoundary from "@/components/ErrorBoundary";
@@ -31,6 +33,8 @@ const RESULT_TABS = [
 export default function VerificationPage() {
     const ctx = useDashboard();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [showPdfPreview, setShowPdfPreview] = useState(false);
+    const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
 
     const {
         repoUrl, setRepoUrl, repoId, pdfFile, pdfFileName, extractedText,
@@ -49,6 +53,19 @@ export default function VerificationPage() {
         multiRepoIds,
     } = ctx;
 
+    const openPdfPreview = useCallback((e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!pdfFile) return;
+        const url = URL.createObjectURL(pdfFile);
+        setPdfPreviewUrl(url);
+        setShowPdfPreview(true);
+    }, [pdfFile]);
+
+    const closePdfPreview = useCallback(() => {
+        setShowPdfPreview(false);
+        if (pdfPreviewUrl) { URL.revokeObjectURL(pdfPreviewUrl); setPdfPreviewUrl(null); }
+    }, [pdfPreviewUrl]);
+
     // ── Drag & drop ───────────────────────────────────────────────────────────
     const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, [setIsDragging]);
     const handleDragLeave = useCallback(() => setIsDragging(false), [setIsDragging]);
@@ -63,7 +80,7 @@ export default function VerificationPage() {
 
     const canAnalyze = (selectedRepos.size > 0 || (isManualMode && repoUrl)) && !!pdfFile;
     const hasResults = (analysisResult?.verification_results?.length ?? 0) > 0;
-    const authenticityScore = analysisResult?.authenticity_score ?? null;
+
 
     // ── Handle ?tab= URL param (e.g. from Projects → Show in Graph) ───────────
     useEffect(() => {
@@ -77,6 +94,7 @@ export default function VerificationPage() {
     }, []);
 
     return (
+        <>
         <div className="flex h-screen flex-col md:flex-row overflow-hidden">
             {/* ── LEFT PANEL ─────────────────────────────────────────────────── */}
             <aside className="w-full md:w-[340px] flex-shrink-0 bg-white border-b md:border-b-0 md:border-r border-slate-200 overflow-y-auto flex flex-col">
@@ -104,11 +122,19 @@ export default function VerificationPage() {
                                     <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
                                         <Check className="w-5 h-5 text-emerald-600" />
                                     </div>
-                                    <div>
+                                    <div className="text-center">
                                         <p className="text-sm font-semibold text-emerald-700 truncate max-w-[200px]">
                                             {pdfFile.name}
                                         </p>
-                                        <p className="text-[10px] text-slate-400">Click to replace</p>
+                                        <div className="flex items-center gap-2 justify-center mt-1">
+                                            <p className="text-[10px] text-slate-400">Click to replace</p>
+                                            <button
+                                                onClick={openPdfPreview}
+                                                className="flex items-center gap-0.5 text-[10px] text-indigo-500 hover:text-indigo-700 font-semibold transition-colors"
+                                            >
+                                                <Eye className="w-2.5 h-2.5" /> Preview
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             ) : (
@@ -281,12 +307,9 @@ export default function VerificationPage() {
                         </div>
                     )}
 
-                    {/* ── Authenticity badge ─────────────────────────────────────── */}
-                    {authenticityScore !== null && (
-                        <div className={`flex items-center justify-between px-4 py-3 rounded-xl border text-sm font-semibold ${authenticityScore >= 80 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : authenticityScore >= 60 ? "bg-amber-50 border-amber-200 text-amber-700" : "bg-red-50 border-red-200 text-red-700"}`}>
-                            <span>Authenticity Score</span>
-                            <span className="text-lg font-extrabold">{Math.round(authenticityScore)}%</span>
-                        </div>
+                    {/* ── Forensics Panel ─────────────────────────────────────── */}
+                    {analysisResult?.forensics && (
+                        <ForensicsPanel forensics={analysisResult.forensics} />
                     )}
                 </div>
 
@@ -532,5 +555,38 @@ export default function VerificationPage() {
                 </div>
             </main>
         </div>
+        {/* ── PDF Preview Modal ────────────────────────────────────────────── */}
+        {showPdfPreview && pdfPreviewUrl && (
+            <div
+                className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+                onClick={closePdfPreview}
+            >
+                <div
+                    className="relative w-[92vw] max-w-4xl h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+                    onClick={e => e.stopPropagation()}
+                >
+                    {/* Header */}
+                    <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 bg-white flex-shrink-0">
+                        <p className="text-sm font-semibold text-slate-800 flex items-center gap-2 truncate">
+                            <FileText className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+                            <span className="truncate">{pdfFile?.name}</span>
+                        </p>
+                        <button
+                            onClick={closePdfPreview}
+                            className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                        >
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
+                    {/* PDF iframe */}
+                    <iframe
+                        src={pdfPreviewUrl}
+                        className="flex-1 w-full border-0"
+                        title="Resume PDF Preview"
+                    />
+                </div>
+            </div>
+        )}
+        </>
     );
 }

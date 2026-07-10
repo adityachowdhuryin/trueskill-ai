@@ -3,7 +3,7 @@
 import {
     createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode,
 } from "react";
-import type { GraphNode, GraphLink } from "@/components/GraphVisualizer";
+import type { GraphNode, GraphLink, GraphSummaryData } from "@/components/GraphVisualizer";
 import type {
     GitHubRepo, VerificationResult, AnalysisResponse, BridgeProject,
     SkillsHeatmap, Roadmap, ChatMessage, ATSReport, IngestedRepoRecord,
@@ -74,14 +74,14 @@ interface DashboardContextValue {
     isLoadingGraph: boolean;
     graphMeta: Record<string, unknown> | null;
     graphHighlightIds: string[]; setGraphHighlightIds: (v: string[]) => void;
-    graphSummary: unknown; setGraphSummary: (v: unknown) => void;
+    graphSummary: GraphSummaryData | null; setGraphSummary: (v: GraphSummaryData | null) => void;
     funcNameToNodeId: Record<string, string>;
     isGraphFullscreen: boolean; setIsGraphFullscreen: (v: boolean) => void;
     handleNodeClick: (node: GraphNode) => void;
     handleShowInGraph: (evidenceNodeIds: string[]) => void;
 
     // ── Timeline ──────────────────────────────────────────────────────────────
-    timelineData: Record<string, unknown[]>;
+    timelineData: Record<string, Array<{ name: string; path: string; first_seen: string | null; last_modified: string | null }>>;
 
     // ── Skills tab state ──────────────────────────────────────────────────────
     resultTab: ResultTab; setResultTab: (v: ResultTab) => void;
@@ -241,7 +241,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const [atsError, setAtsError] = useState<string | null>(null);
 
     // ── Timeline state ────────────────────────────────────────────────────────
-    const [timelineData, setTimelineData] = useState<Record<string, unknown[]>>({});
+    const [timelineData, setTimelineData] = useState<Record<string, Array<{ name: string; path: string; first_seen: string | null; last_modified: string | null }>>>({});
 
     // ── Multi-repo state ──────────────────────────────────────────────────────
     const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
@@ -310,6 +310,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
                 file_path: n.file_path as string | undefined,
                 complexity_score: n.complexity_score as number | undefined,
                 repo_id: (n.repo_id as string) || "",
+                func_id: n.func_id as string | undefined,
+                parent_class: n.parent_class as string | undefined,
             }));
             const links: GraphLink[] = (data.edges || []).map((e: Record<string, unknown>) => ({
                 source: e.source as string,

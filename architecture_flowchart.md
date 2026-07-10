@@ -11,7 +11,7 @@ flowchart TD
     end
 
     subgraph Ingestion_Layer ["Ingestion & Parsing Layer"]
-        VLM_Parser["Gemini Flash VLM Parser"]
+        PDF_Parser["PDF Text Extractor<br>(pdfminer.six + PyPDF2)"]
         AST_Ingest["tree-sitter Ingestion Engine<br>(Python, JS, TS, Go, Java, Rust)"]
         ATS_Engine["ATS Keyword & Format Scorer"]
         Neo4jDB[("Neo4j AuraDB Cloud Graph")]
@@ -20,7 +20,7 @@ flowchart TD
 
     subgraph Reasoning_Layer ["Reasoning Layer (LangGraph Council of Agents)"]
         ParserNode["Parser Agent Node<br>(Claim Deduplication & Cap <=20)"]
-        AuditorNode["Auditor Agent Node<br>(3-Layer Cypher Query Translation &<br>110+ Library Alias Mapping)"]
+        AuditorNode["Auditor Agent Node<br>(3-Layer Cypher Query Translation &<br>~84 Library Alias Mapping)"]
         GraderNode["Grader Agent Node<br>(100-Pt Rubric: Evidence + Node Bonus +<br>Depth + LLM Audit)"]
     end
 
@@ -39,12 +39,12 @@ flowchart TD
     end
 
     %% Data Flow Connections
-    ResumePDF --> VLM_Parser
+    ResumePDF --> PDF_Parser
     ResumePDF --> ATS_Engine
     JobDesc --> ATS_Engine
     GitHubURL --> AST_Ingest
     
-    VLM_Parser --> ResumeText
+    PDF_Parser --> ResumeText
     AST_Ingest --> Neo4jDB
     
     ResumeText --> ParserNode
@@ -80,9 +80,9 @@ flowchart TD
 
 ### Flow Walkthrough
 
-1. **User Input:** The candidate uploads their double-column PDF resume and GitHub repository URL. If matching against a role, a Job Description (or URL) is also provided.
+1. **User Input:** The candidate uploads their PDF resume and GitHub repository URL. If matching against a role, a Job Description (or URL) is also provided.
 2. **Ingestion Processing:** 
-   - The PDF is parsed via a Gemini Vision-Language Model to extract clean claim blocks (mapped by topic, difficulty, and libraries).
+   - The PDF is converted to plain text via `pdfminer.six` (with a `PyPDF2` fallback); the LLM-powered Parser agent then extracts structured claim blocks (topic, difficulty, and libraries).
    - The codebase is parsed by `tree-sitter` to construct an Abstract Syntax Tree (AST) stored in `Neo4j AuraDB`.
 3. **Multi-Agent Audit:** Orchestrated via `LangGraph` in a 3-agent pipeline (Parser $\rightarrow$ Auditor $\rightarrow$ Grader). The Auditor translates natural language resume claims into Cypher queries, resolving library aliases. The Grader audits complexity and applies a 100-point rubric.
 4. **Co-Pilot and Output:** The SQLite database stores candidate profiles and comparative scoring. The Next.js frontend renders an SVG verification dashboard, an interactive 3D Force-Directed Graph, the 5-tab Project Deep Dive panel, and **Alex**—the SSE-streaming AI career coach that triggers mock interviews, salary intelligence, resume tailoring, and email drafts.

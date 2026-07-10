@@ -507,7 +507,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
                                 PREP
                             </span>
                         </div>
-                        <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">{result.claim_text}</p>
+                        <p className={`text-xs text-slate-500 leading-relaxed ${isExpanded ? "" : "line-clamp-1"}`}>{result.claim_text}</p>
 
                         {/* Score bar + delta badge — hidden for not-assessed skills */}
                         {!isNotAssessed && (
@@ -560,6 +560,12 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
             >
                 <div className="px-5 pb-5 pt-0 pl-6 space-y-4 border-t-2 border-dashed border-slate-100 mt-1">
                     <div className="pt-3 space-y-4">
+
+                        {/* ── Full Claim Statement ─────────────────────────────────────── */}
+                        <div className="px-3 py-2.5 rounded-xl border border-slate-100 bg-slate-50/60">
+                            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Verified Claim</p>
+                            <p className="text-xs text-slate-600 leading-relaxed italic">&ldquo;{result.claim_text}&rdquo;</p>
+                        </div>
 
                         {/* ── Score Breakdown (Feature 2) — hidden for not-assessed ── */}
                         {!isNotAssessed && result.score_breakdown && Object.keys(result.score_breakdown).length > 0 && (
@@ -785,7 +791,7 @@ export default function SkillCard({ result, index = 0, forceExpanded, repoIds = 
         {codeViewerNode && (
             <CodeViewer
                 nodeId={codeViewerNode.raw}
-                repoIds={repoIds.length > 0 ? repoIds : [result.claim_id.split("_")[0]]}
+                repoIds={repoIds}
                 fileName={codeViewerNode.file || codeViewerNode.raw}
                 functionName={codeViewerNode.name || codeViewerNode.raw}
                 onClose={() => setCodeViewerNode(null)}

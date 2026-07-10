@@ -337,19 +337,18 @@ def match_project_to_repo(
 def _check_one_tech(repo_id: str, tech: str) -> "TechCoverageItem":
     """Check a single tech in Neo4j — designed to run in thread pool."""
     CYPHER = """
-    MATCH (n)
-    WHERE n.repo_id = $repo_id
+    MATCH (fn:Function)
+    WHERE fn.repo_id = $repo_id
+      AND fn.source_code IS NOT NULL
       AND ANY(kw IN $keywords WHERE
-        toLower(n.name) CONTAINS kw
-        OR (n:Import AND toLower(n.module_name) CONTAINS kw)
-        OR (n:Function AND n.source_code IS NOT NULL
-            AND toLower(substring(n.source_code, 0, 8000)) CONTAINS kw)
-        OR (n:Function AND n.docstring IS NOT NULL
-            AND toLower(n.docstring) CONTAINS kw)
-        OR (n.file_path IS NOT NULL AND toLower(n.file_path) CONTAINS kw)
+        toLower(fn.name) CONTAINS kw
+        OR toLower(fn.file_path) CONTAINS kw
+        OR toLower(substring(fn.source_code, 0, 8000)) CONTAINS kw
+        OR (fn.docstring IS NOT NULL AND toLower(fn.docstring) CONTAINS kw)
       )
-    RETURN n.name AS node_name, n.file_path AS file_path,
-           COALESCE(n.module_name, n.name) AS display_name
+    RETURN fn.func_id   AS func_id,
+           fn.name      AS node_name,
+           fn.file_path AS file_path
     LIMIT 60
     """
     # Fix A: use LIBRARY_ALIAS_MAP + SPECIFIC_TECH_IMPORTS for richer keyword expansion
@@ -365,9 +364,16 @@ def _check_one_tech(repo_id: str, tech: str) -> "TechCoverageItem":
         found = len(rows) > 0
         node_ids = []
         for row in rows[:6]:
-            name = row.get("node_name") or row.get("display_name", "")
-            fp   = row.get("file_path", "")
-            node_ids.append(f"{fp}:{name}" if fp else name)
+            func_id = row.get("func_id")
+            name    = row.get("node_name", "")
+            fp      = row.get("file_path", "")
+            # Mirror agents.py: prefer the canonical func_id, fall back gracefully
+            if func_id:
+                node_ids.append(func_id)
+            elif fp:
+                node_ids.append(f"{fp}:{name}")
+            else:
+                node_ids.append(name)
         return TechCoverageItem(tech=tech, found=found, evidence_node_ids=node_ids)
     except Exception:
         return TechCoverageItem(tech=tech, found=False)
